@@ -1,0 +1,18 @@
+# dmidecode 3.4
+Getting SMBIOS data from sysfs.
+SMBIOS 3.2.0 present.
+
+Handle 0x0000, DMI type 0, 26 bytes
+BIOS Information
+	Vendor: Dell Inc.
+	Version: 2.19.1
+	Release Date: 04/01/2024
+	Address: 0xF0000
+	Runtime Size: 64 kB
+	ROM Size: 32 MB
+	Characteristics:
+		ISA is supported
+		PCI is supported
+		PNP is supported
+	BIOS Revision: 2.19
+	Firmware Revision: 5.10

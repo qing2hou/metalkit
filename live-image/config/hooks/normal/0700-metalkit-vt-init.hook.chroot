@@ -1,0 +1,11 @@
+#!/bin/bash
+# Enable VT init oneshot (clears Scroll Lock state at boot).
+#
+# Why: iDRAC's Avocent USB HID emulation enumerates with Scroll Lock
+# asserted. On Linux VT, scroll-lock pauses tty output, so the BMC
+# console looks frozen — the login prompt appears but typed characters
+# don't echo until the user toggles Scroll Lock via the vKVM on-screen
+# keyboard. Running `setleds -D -scroll` clears the kbd driver's
+# default + current lock state for tty1..6 before getty starts.
+set -e
+systemctl enable metalkit-vt-init.service

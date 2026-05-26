@@ -1,0 +1,16 @@
+d binary
+f binary/sha256sum.txt
+f binary/sha256sum.README
+d binary/boot
+d binary/boot/grub
+f binary/boot/grub/loopback.cfg
+f binary/boot/grub/theme.cfg
+d binary/boot/grub/live-theme
+f binary/boot/grub/live-theme/theme.txt
+f binary/boot/grub/grub.cfg
+f binary/boot/grub/config.cfg
+d binary/live
+f binary/live/initrd.img
+f binary/live/filesystem.packages
+f binary/live/filesystem.packages-remove
+f binary/live/filesystem.squashfs

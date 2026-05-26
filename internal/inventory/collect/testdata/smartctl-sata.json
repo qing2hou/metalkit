@@ -1,0 +1,27 @@
+{
+  "smartctl": {
+    "version": [7, 3]
+  },
+  "device": {
+    "name": "/dev/sda",
+    "type": "sat"
+  },
+  "smart_status": {
+    "passed": true
+  },
+  "power_on_time": {
+    "hours": 12345
+  },
+  "power_cycle_count": 42,
+  "temperature": {
+    "current": 31
+  },
+  "ata_smart_attributes": {
+    "table": [
+      { "id": 5,   "name": "Reallocated_Sector_Ct", "raw": { "value": 0, "string": "0" } },
+      { "id": 197, "name": "Current_Pending_Sector", "raw": { "value": 2, "string": "2" } },
+      { "id": 241, "name": "Total_LBAs_Written", "raw": { "value": 1000, "string": "1000" } },
+      { "id": 242, "name": "Total_LBAs_Read",    "raw": { "value": 500,  "string": "500" } }
+    ]
+  }
+}

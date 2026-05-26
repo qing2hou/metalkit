@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>metalkit · 登录</title>
+  <link rel="stylesheet" href="/ui/assets/style.css">
+</head>
+<body data-page="login">
+  <main class="login-page">
+    <form id="login-form" class="login-card" autocomplete="on">
+      <h1 class="brand">metalkit</h1>
+      <p class="muted">运维控制台</p>
+      <div id="error-banner" class="error-banner" hidden></div>
+      <label class="kv">
+        <span>用户名</span>
+        <input id="login-user" name="username" type="text" required autocomplete="username" autofocus>
+      </label>
+      <label class="kv">
+        <span>密码</span>
+        <input id="login-pass" name="password" type="password" required autocomplete="current-password">
+      </label>
+      <button type="submit" class="btn btn-primary login-submit">登录</button>
+    </form>
+  </main>
+  <script src="/ui/assets/login.js" defer></script>
+</body>
+</html>

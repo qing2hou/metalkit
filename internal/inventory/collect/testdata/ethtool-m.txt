@@ -1,0 +1,18 @@
+	Identifier                                : 0x03 (SFP)
+	Extended identifier                       : 0x04 (GBIC/SFP defined by 2-wire interface ID)
+	Connector                                 : 0x07 (LC)
+	Transceiver type                          : 10G Ethernet: 10G Base-SR
+	Encoding                                  : 0x06 (64B/66B)
+	BR, Nominal                               : 10300MBd
+	Length (SMF,km)                           : 0km
+	Length (50um)                             : 80m
+	Length (62.5um)                           : 30m
+	Length (Copper)                           : 0m
+	Length (OM3)                              : 300m
+	Laser wavelength                          : 850nm
+	Vendor name                               : FINISAR CORP.
+	Vendor OUI                                : 00:90:65
+	Vendor PN                                 : FTLX8574D3BCL
+	Vendor rev                                : A
+	Vendor SN                                 : ABCD1234
+	Date code                                 : 200101

@@ -1,0 +1,14 @@
+/bin/
+/boot/
+/controller
+/live-image/binary/
+/live-image/cache/
+/live-image/.build/
+/live-image/chroot/
+/live-image/auto/local
+*.deb
+*.iso
+*.tar
+config.host147.yaml
+config.smoke.yaml
+.claude/

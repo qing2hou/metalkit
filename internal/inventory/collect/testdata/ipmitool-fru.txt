@@ -1,0 +1,19 @@
+FRU Device Description : Builtin FRU Device (ID 0)
+ Chassis Type          : Rack Mount Chassis
+ Chassis Part Number   : 0YWR7D
+ Chassis Serial        : ABC1234
+ Board Mfg Date        : Mon Jan  1 00:00:00 2020
+ Board Mfg             : Dell Inc.
+ Board Product         : PowerEdge R740
+ Board Serial          : CN7475167S00LL
+ Board Part Number     : 0YWR7D
+ Product Manufacturer  : Dell Inc.
+ Product Name          : PowerEdge R740
+ Product Part Number   : 0YWR7D
+ Product Serial        : ABC1234
+
+FRU Device Description : Disk_Backplane (ID 5)
+ Board Mfg Date        : Mon Jan  1 00:00:00 2020
+ Board Product         : BP12G+EXP 0:1
+ Board Serial          : CN7475167S00MM
+ Board Part Number     : 0K8N7P

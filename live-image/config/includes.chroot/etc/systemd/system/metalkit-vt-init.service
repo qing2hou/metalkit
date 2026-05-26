@@ -1,0 +1,14 @@
+[Unit]
+Description=Disable Scroll_Lock keysym + clear lock state on Linux VTs (iDRAC vKVM USB HID sends Scroll_Lock key presses that pause tty1 output and look like the BMC console is frozen — virtual kbd works, physical kbd doesn't, until Scroll Lock is toggled)
+DefaultDependencies=no
+After=systemd-vconsole-setup.service
+Before=getty.target getty@tty1.service getty@tty2.service getty@tty3.service getty@tty4.service getty@tty5.service getty@tty6.service
+ConditionPathExists=/dev/tty1
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo "keycode 70 = VoidSymbol" | loadkeys -; for t in 1 2 3 4 5 6; do setleds -D -scroll < /dev/tty$t 2>/dev/null || true; done'
+
+[Install]
+WantedBy=getty.target

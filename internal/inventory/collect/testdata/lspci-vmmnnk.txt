@@ -1,0 +1,36 @@
+Slot:	00:00.0
+Class:	Host bridge [0600]
+Vendor:	Intel Corporation [8086]
+Device:	Sky Lake-E DMI3 Registers [2020]
+SVendor:	Dell [1028]
+SDevice:	Sky Lake-E DMI3 Registers [07a0]
+Rev:	07
+
+Slot:	01:00.0
+Class:	Ethernet controller [0200]
+Vendor:	Intel Corporation [8086]
+Device:	Ethernet Controller X710 for 10GbE SFP+ [1572]
+SVendor:	Dell [1028]
+SDevice:	rNDC X710 [1f99]
+Driver:	i40e
+Module:	i40e
+
+Slot:	5e:00.0
+Class:	VGA compatible controller [0300]
+Vendor:	NVIDIA Corporation [10de]
+Device:	GA100 [A100 SXM4 40GB] [20b0]
+SVendor:	NVIDIA Corporation [10de]
+SDevice:	GA100 [134f]
+Driver:	nvidia
+Module:	nouveau
+Module:	nvidia_drm
+Module:	nvidia
+
+Slot:	af:00.0
+Class:	Processing accelerators [1200]
+Vendor:	Habana Labs Ltd. [1da3]
+Device:	HL-205 AI Training Accelerator [1020]
+SVendor:	Habana Labs Ltd. [1da3]
+SDevice:	HL-205 [1020]
+Driver:	habanalabs
+Module:	habanalabs

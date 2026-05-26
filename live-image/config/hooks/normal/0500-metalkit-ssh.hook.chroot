@@ -1,0 +1,43 @@
+#!/bin/bash
+# Enable ssh, set root password, permit root login.
+# Built into the live squashfs at lb build time.
+set -e
+
+# Root password "metalkit" (M1 test only — replace before production).
+echo 'root:metalkit' | chpasswd
+
+# live-config installs an autologin drop-in on tty1 that runs
+# `agetty --autologin user`, but user-setup does not create the `user`
+# account in our minimal image. Create it so PAM doesn't fail — and
+# also so the account exists if someone wants to log in as `user`.
+if ! getent passwd user >/dev/null; then
+    useradd -m -s /bin/bash user
+    echo 'user:metalkit' | chpasswd
+fi
+
+# Disable live-config's tty1 autologin: BMC console must show a real
+# login prompt (security). The drop-in below sorts after live-config's
+# `live-config_autologin.conf` so its ExecStart wins.
+mkdir -p /etc/systemd/system/getty@tty1.service.d
+cat > /etc/systemd/system/getty@tty1.service.d/zz-metalkit-no-autologin.conf <<'EOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --noclear %I $TERM
+EOF
+
+# Allow root login via SSH with password.
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/10-metalkit.conf <<'EOF'
+PermitRootLogin yes
+PasswordAuthentication yes
+EOF
+
+systemctl enable ssh
+
+# vim-tiny defaults to vi-compatible mode: arrow keys insert ABCD,
+# Backspace does nothing past the insertion point. Fix both.
+if [ -f /etc/vim/vimrc.tiny ]; then
+    sed -i 's/^set compatible$/set nocompatible/' /etc/vim/vimrc.tiny
+    grep -q '^set backspace=2$' /etc/vim/vimrc.tiny \
+        || echo 'set backspace=2' >> /etc/vim/vimrc.tiny
+fi

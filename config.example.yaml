@@ -1,0 +1,23 @@
+serverIP: 10.99.0.1
+interface: br-pxe
+httpAddr: ":8080"
+dhcpAddr: ":67"
+bsdpAddr: ":4011"
+tftpAddr: ":69"
+bootDir: ./boot
+logLevel: info
+
+# Persistent data. dbPath holds the SQLite catalog (inventory + images);
+# imagesDir holds chunked-upload working directories under .tmp/ and the
+# finalized content-addressed image files. masterKeyPath holds the AES-256
+# key used to encrypt BMC passwords (and future sensitive columns);
+# auto-generated mode 0600 on first boot if absent.
+dbPath: /var/lib/metalkit/inventory.db
+imagesDir: /var/lib/metalkit/images
+masterKeyPath: /var/lib/metalkit/master.key
+
+# Web UI + read-side API auth. Empty adminPass disables auth (open mode) and
+# logs a warning at startup. Agent POST endpoints (/api/v1/report,
+# /api/v1/heartbeat/*) are always open — agents have no credential store.
+adminUser: admin
+adminPass: ""

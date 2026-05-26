@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="metalkit-api-base" content="/api/v1">
+  <title>metalkit - 机器</title>
+  <link rel="stylesheet" href="/ui/assets/style.css">
+</head>
+<body data-page="list">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1 class="brand">metalkit</h1>
+      <nav class="topnav">
+        <a href="/ui/">机器</a>
+        <a href="/ui/images">镜像</a>
+        <a href="/ui/profiles">配置</a>
+        <a href="/ui/bmc">BMC</a>
+        <a href="/ui/jobs">作业</a>
+      </nav>
+      <div class="topbar-actions">
+        <span id="refresh-countdown" class="muted" title="距下次自动刷新"></span>
+        <button id="refresh-btn" type="button" class="btn">刷新</button>
+        <span id="current-user" class="muted" title="当前登录用户"></span>
+        <button id="logout-btn" type="button" class="btn btn-ghost" title="退出登录">退出</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="page">
+    <div id="error-banner" class="error-banner" hidden></div>
+
+    <section id="machines-section">
+      <div class="section-head">
+        <h2>metalkit &mdash; 机器列表</h2>
+        <span id="machines-count" class="muted"></span>
+      </div>
+
+      <div id="machine-filter-bar" class="filter-bar" hidden>
+        <div class="filter-group">
+          <input id="m-filter-text" type="text" placeholder="搜索 序列号 / 产品型号 / UUID">
+        </div>
+        <div class="filter-group" id="m-filter-status">
+          <span class="muted">状态：</span>
+          <span class="chip" data-status="online">在线</span>
+          <span class="chip" data-status="offline">离线</span>
+          <span class="chip" data-status="degraded">异常</span>
+          <span class="chip" data-status="unknown">未知</span>
+        </div>
+        <div class="filter-group">
+          <button id="m-filter-clear" type="button" class="btn btn-ghost">清除</button>
+          <span id="m-filter-count" class="muted"></span>
+        </div>
+      </div>
+
+      <div id="machines-loading" class="muted">加载机器列表&hellip;</div>
+
+      <div id="machines-empty" class="empty-state" hidden>
+        <p>暂无机器上报。</p>
+        <p class="muted">让节点 PXE 启动后会出现在这里。</p>
+      </div>
+
+      <div id="machines-wrap" hidden>
+        <table id="machines-table" class="data-table">
+          <thead>
+            <tr>
+              <th class="col-status">状态</th>
+              <th>序列号</th>
+              <th>厂商 / 产品</th>
+              <th>UUID</th>
+              <th>最近上报</th>
+              <th class="col-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody id="machines-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span class="muted">metalkit 运维控制台</span>
+  </footer>
+
+  <script src="/ui/assets/common.js" defer></script>
+  <script src="/ui/assets/app.js" defer></script>
+  <script src="/ui/assets/list-filter.js" defer></script>
+</body>
+</html>

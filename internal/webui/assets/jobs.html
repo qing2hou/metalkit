@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="metalkit-api-base" content="/api/v1">
+  <title>metalkit - 作业</title>
+  <link rel="stylesheet" href="/ui/assets/style.css">
+</head>
+<body data-page="jobs">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1 class="brand">metalkit</h1>
+      <nav class="topnav">
+        <a href="/ui/">机器</a>
+        <a href="/ui/images">镜像</a>
+        <a href="/ui/profiles">配置</a>
+        <a href="/ui/bmc">BMC</a>
+        <a href="/ui/jobs">作业</a>
+      </nav>
+      <div class="topbar-actions">
+        <button id="refresh-btn" type="button" class="btn">刷新</button>
+        <span id="current-user" class="muted" title="当前登录用户"></span>
+        <button id="logout-btn" type="button" class="btn btn-ghost" title="退出登录">退出</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="page">
+    <div id="error-banner" class="error-banner" hidden></div>
+
+    <section id="jobs-filters">
+      <div class="section-head">
+        <h2>装机作业</h2>
+        <span id="jobs-count" class="muted"></span>
+      </div>
+
+      <div class="filter-bar">
+        <div class="filter-group">
+          <label for="filter-machine" class="muted">机器 UUID</label>
+          <input id="filter-machine" type="text" placeholder="子串过滤" autocomplete="off">
+        </div>
+        <div class="filter-group">
+          <span class="muted">状态</span>
+          <div id="filter-status" class="filter-chips">
+            <button type="button" class="chip" data-status="pending">等待中</button>
+            <button type="button" class="chip" data-status="running">运行中</button>
+            <button type="button" class="chip" data-status="succeeded">成功</button>
+            <button type="button" class="chip" data-status="failed">失败</button>
+            <button type="button" class="chip" data-status="cancelled">已取消</button>
+          </div>
+        </div>
+        <div class="filter-group">
+          <label class="filter-check">
+            <input id="filter-recent" type="checkbox">
+            <span>仅最近 24 小时</span>
+          </label>
+        </div>
+        <div class="filter-group">
+          <button id="filter-clear" type="button" class="btn btn-ghost">清除过滤</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="jobs-section">
+      <div id="jobs-loading" class="muted">加载作业&hellip;</div>
+
+      <div id="jobs-empty" class="empty-state" hidden>
+        <p>当前过滤条件下没有匹配的作业。</p>
+        <p class="muted">通过 PUT binding 设置 <code>desired_state=install</code> 来发起作业。</p>
+      </div>
+
+      <div id="jobs-wrap" hidden>
+        <table id="jobs-table" class="data-table">
+          <thead>
+            <tr>
+              <th>作业</th>
+              <th>机器</th>
+              <th>类型</th>
+              <th>状态</th>
+              <th>阶段</th>
+              <th>开始时间</th>
+              <th>耗时</th>
+              <th class="col-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody id="jobs-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span class="muted">metalkit 运维控制台</span>
+  </footer>
+
+  <script src="/ui/assets/common.js" defer></script>
+  <script src="/ui/assets/jobs.js" defer></script>
+</body>
+</html>

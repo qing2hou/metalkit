@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="metalkit-api-base" content="/api/v1">
+  <title>metalkit - 配置</title>
+  <link rel="stylesheet" href="/ui/assets/style.css">
+</head>
+<body data-page="profiles">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1 class="brand"><a href="/ui/">metalkit</a></h1>
+      <nav class="topnav">
+        <a href="/ui/">机器</a>
+        <a href="/ui/images">镜像</a>
+        <a href="/ui/profiles">配置</a>
+        <a href="/ui/bmc">BMC</a>
+        <a href="/ui/jobs">作业</a>
+      </nav>
+      <div class="topbar-actions">
+        <button id="new-profile-btn" type="button" class="btn btn-primary">+ 新建配置</button>
+        <button id="refresh-btn" type="button" class="btn">刷新</button>
+        <span id="current-user" class="muted" title="当前登录用户"></span>
+        <button id="logout-btn" type="button" class="btn btn-ghost" title="退出登录">退出</button>
+      </div>
+    </div>
+  </header>
+  <main class="page">
+    <div id="error-banner" class="error-banner" hidden></div>
+    <section>
+      <div class="section-head">
+        <h2>安装配置</h2>
+        <span id="profiles-count" class="muted"></span>
+      </div>
+      <div id="profiles-loading" class="muted">加载中&hellip;</div>
+      <div id="profiles-empty" class="empty-state" hidden>
+        <p>暂无配置，点击 <strong>+ 新建配置</strong>。</p>
+      </div>
+      <div id="profiles-wrap" hidden>
+        <table id="profiles-table" class="data-table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>描述</th>
+              <th>主机名模板</th>
+              <th>网络</th>
+              <th>目标盘</th>
+              <th>更新时间</th>
+              <th class="col-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody id="profiles-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <footer class="footer"><span class="muted">metalkit 运维控制台</span></footer>
+  <script src="/ui/assets/common.js" defer></script>
+  <script src="/ui/assets/profiles.js" defer></script>
+</body>
+</html>

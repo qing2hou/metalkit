@@ -1,0 +1,6 @@
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
+/dev/sda1 / ext4 rw,relatime,errors=remount-ro 0 0
+/dev/sda2 /boot ext4 rw,relatime 0 0
+tmpfs /run tmpfs rw,nosuid,nodev,size=812345k,nr_inodes=819200,mode=755 0 0
+/dev/nvme0n1p1 /mnt/data xfs rw,relatime,attr2,inode64 0 0

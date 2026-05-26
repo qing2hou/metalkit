@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="metalkit-api-base" content="/api/v1">
+  <title>metalkit - 镜像</title>
+  <link rel="stylesheet" href="/ui/assets/style.css">
+</head>
+<body data-page="images">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1 class="brand">metalkit</h1>
+      <nav class="topnav">
+        <a href="/ui/">机器</a>
+        <a href="/ui/images">镜像</a>
+        <a href="/ui/profiles">配置</a>
+        <a href="/ui/bmc">BMC</a>
+        <a href="/ui/jobs">作业</a>
+      </nav>
+      <div class="topbar-actions">
+        <button id="refresh-btn" type="button" class="btn">刷新</button>
+        <span id="current-user" class="muted" title="当前登录用户"></span>
+        <button id="logout-btn" type="button" class="btn btn-ghost" title="退出登录">退出</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="page">
+    <div id="error-banner" class="error-banner" hidden></div>
+
+    <section id="upload-section">
+      <div class="section-head">
+        <h2>上传镜像</h2>
+      </div>
+      <div class="upload-card">
+        <div class="upload-row">
+          <label class="upload-field">
+            <span>镜像文件（qcow2 / raw，最大 10 GiB）</span>
+            <input id="upload-file" type="file" accept=".qcow2,.img,.raw,application/octet-stream">
+          </label>
+        </div>
+        <div class="upload-row upload-grid">
+          <label class="upload-field">
+            <span>名称</span>
+            <input id="upload-name" type="text" placeholder="自动：使用文件名">
+          </label>
+          <label class="upload-field">
+            <span>家族</span>
+            <select id="upload-family">
+              <option value="">（未指定）</option>
+              <option value="ubuntu">ubuntu</option>
+              <option value="debian">debian</option>
+              <option value="rhel">rhel（rocky / alma / rhel）</option>
+            </select>
+          </label>
+          <label class="upload-field">
+            <span>版本</span>
+            <input id="upload-version" type="text" placeholder="例：22.04">
+          </label>
+          <label class="upload-field upload-field-wide">
+            <span>备注</span>
+            <input id="upload-notes" type="text" placeholder="可选">
+          </label>
+        </div>
+        <div class="upload-row">
+          <button id="upload-start" type="button" class="btn primary" disabled>开始上传</button>
+          <button id="upload-abort" type="button" class="btn" hidden>中止</button>
+          <span id="upload-status" class="muted"></span>
+        </div>
+        <div id="upload-progress-wrap" hidden>
+          <div class="progress"><div id="upload-progress-bar" class="progress-bar"></div></div>
+          <div id="upload-progress-text" class="muted mono"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="images-section">
+      <div class="section-head">
+        <h2>镜像列表</h2>
+        <span id="images-count" class="muted"></span>
+      </div>
+
+      <div id="images-loading" class="muted">加载镜像&hellip;</div>
+
+      <div id="images-empty" class="empty-state" hidden>
+        <p>尚未上传任何镜像。</p>
+        <p class="muted">在上方上传一个，装机会使用这些镜像。</p>
+      </div>
+
+      <div id="images-wrap" hidden>
+        <table id="images-table" class="data-table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>家族 / 版本</th>
+              <th>格式</th>
+              <th>大小（占用 / 虚拟）</th>
+              <th>上传时间</th>
+              <th>SHA-256</th>
+              <th class="col-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody id="images-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span class="muted">metalkit 运维控制台</span>
+  </footer>
+
+  <script src="/ui/assets/common.js" defer></script>
+  <script src="/ui/assets/images.js" defer></script>
+</body>
+</html>

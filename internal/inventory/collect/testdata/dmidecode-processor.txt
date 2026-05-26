@@ -1,0 +1,48 @@
+# dmidecode 3.4
+Getting SMBIOS data from sysfs.
+SMBIOS 3.2.0 present.
+
+Handle 0x0400, DMI type 4, 48 bytes
+Processor Information
+	Socket Designation: CPU1
+	Type: Central Processor
+	Family: Xeon
+	Manufacturer: Intel(R) Corporation
+	ID: 57 06 05 00 FF FB EB BF
+	Version: Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz
+	Voltage: 1.6 V
+	External Clock: 100 MHz
+	Max Speed: 4000 MHz
+	Current Speed: 3000 MHz
+	Status: Populated, Enabled
+	Upgrade: Socket LGA3647-1
+	L1 Cache Handle: 0x0700
+	L2 Cache Handle: 0x0701
+	L3 Cache Handle: 0x0702
+	Serial Number: Not Specified
+	Asset Tag: UNKNOWN
+	Part Number: Not Specified
+	Core Count: 24
+	Core Enabled: 24
+	Thread Count: 48
+	Characteristics:
+		64-bit capable
+		Multi-Core
+	Microcode: 0x5003604
+
+Handle 0x0401, DMI type 4, 48 bytes
+Processor Information
+	Socket Designation: CPU2
+	Type: Central Processor
+	Family: Xeon
+	Manufacturer: Intel(R) Corporation
+	ID: 57 06 05 00 FF FB EB BF
+	Version: Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz
+	Voltage: 1.6 V
+	Max Speed: 4000 MHz
+	Current Speed: 3000 MHz
+	Status: Populated, Enabled
+	Core Count: 24
+	Core Enabled: 24
+	Thread Count: 48
+	Microcode: 0x5003604

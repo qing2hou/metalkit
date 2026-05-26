@@ -1,0 +1,13 @@
+{
+  "smartctl": { "version": [7, 3] },
+  "device": { "name": "/dev/nvme0n1", "type": "nvme" },
+  "smart_status": { "passed": true },
+  "power_on_time": { "hours": 7777 },
+  "power_cycle_count": 18,
+  "temperature": { "current": 40 },
+  "nvme_smart_health_information_log": {
+    "data_units_read": 100,
+    "data_units_written": 200,
+    "media_errors": 0
+  }
+}

@@ -1,0 +1,38 @@
+[
+  {
+    "ifindex": 1,
+    "ifname": "lo",
+    "flags": ["LOOPBACK","UP","LOWER_UP"],
+    "mtu": 65536,
+    "operstate": "UNKNOWN",
+    "link_type": "loopback",
+    "address": "00:00:00:00:00:00",
+    "addr_info": [
+      {"family": "inet", "local": "127.0.0.1", "prefixlen": 8},
+      {"family": "inet6", "local": "::1", "prefixlen": 128}
+    ]
+  },
+  {
+    "ifindex": 2,
+    "ifname": "eno1",
+    "flags": ["BROADCAST","MULTICAST","UP","LOWER_UP"],
+    "mtu": 1500,
+    "operstate": "UP",
+    "link_type": "ether",
+    "address": "f4:ee:08:11:22:33",
+    "addr_info": [
+      {"family": "inet", "local": "10.0.0.10", "prefixlen": 24},
+      {"family": "inet6", "local": "fe80::f6ee:8ff:fe11:2233", "prefixlen": 64}
+    ]
+  },
+  {
+    "ifindex": 3,
+    "ifname": "eno2",
+    "flags": ["BROADCAST","MULTICAST"],
+    "mtu": 1500,
+    "operstate": "DOWN",
+    "link_type": "ether",
+    "address": "f4:ee:08:11:22:34",
+    "addr_info": []
+  }
+]

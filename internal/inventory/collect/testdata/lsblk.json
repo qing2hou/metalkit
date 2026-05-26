@@ -1,0 +1,53 @@
+{
+   "blockdevices": [
+      {
+         "name": "sda",
+         "kname": "sda",
+         "type": "disk",
+         "size": 480103981056,
+         "model": "MZ7LH480HAHQ-00005",
+         "serial": "S455NY0M812345",
+         "rev": "GXT5404Q",
+         "wwn": "0x5002538e408b1234",
+         "tran": "sata",
+         "vendor": "ATA",
+         "rota": false,
+         "rm": false
+      },
+      {
+         "name": "nvme0n1",
+         "kname": "nvme0n1",
+         "type": "disk",
+         "size": 1600321314816,
+         "model": "Dell Ent NVMe AGN MU U.2 1.6TB",
+         "serial": "PHLN1234567890",
+         "rev": "1.0.4",
+         "wwn": "eui.01000000010000005cd2e4xxxxx",
+         "tran": "nvme",
+         "vendor": null,
+         "rota": false,
+         "rm": false
+      },
+      {
+         "name": "sr0",
+         "kname": "sr0",
+         "type": "rom",
+         "size": 1073741312,
+         "model": "DVD+-RW DS-8ABSH",
+         "serial": "K1234567",
+         "rev": "BD51",
+         "tran": "sata",
+         "rota": true,
+         "rm": true
+      },
+      {
+         "name": "sdb1",
+         "kname": "sdb1",
+         "type": "part",
+         "size": 100000000,
+         "tran": null,
+         "rota": false,
+         "rm": false
+      }
+   ]
+}

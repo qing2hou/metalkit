@@ -1,0 +1,19 @@
+#!/bin/bash
+# Enable metalkit inventory agent and chrony at boot.
+# The agent binary itself is staged into /usr/local/bin/metalkit-agent
+# by scripts/build-live.sh before `lb build` runs.
+set -e
+
+if [ -x /usr/local/bin/metalkit-agent ]; then
+    chmod 0755 /usr/local/bin/metalkit-agent
+else
+    echo "WARNING: /usr/local/bin/metalkit-agent missing — did build-live.sh stage it?" >&2
+fi
+
+# Reports/heartbeats include collected_at timestamps; the controller relies on
+# these for offline detection. Live boots have no RTC battery on some boxes,
+# so chrony fast-syncs to whatever upstream resolv.conf points at.
+systemctl enable chrony.service 2>/dev/null || true
+
+# The agent unit is staged via includes.chroot, just needs enabling.
+systemctl enable metalkit-agent.service

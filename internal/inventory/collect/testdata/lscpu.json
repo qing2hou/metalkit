@@ -1,0 +1,66 @@
+{
+   "lscpu": [
+      {
+         "field": "Architecture:",
+         "data": "x86_64"
+      },
+      {
+         "field": "CPU op-mode(s):",
+         "data": "32-bit, 64-bit"
+      },
+      {
+         "field": "Byte Order:",
+         "data": "Little Endian"
+      },
+      {
+         "field": "CPU(s):",
+         "data": "96"
+      },
+      {
+         "field": "Vendor ID:",
+         "data": "GenuineIntel"
+      },
+      {
+         "field": "Model name:",
+         "data": "Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz"
+      },
+      {
+         "field": "Thread(s) per core:",
+         "data": "2"
+      },
+      {
+         "field": "Core(s) per socket:",
+         "data": "24"
+      },
+      {
+         "field": "Socket(s):",
+         "data": "2"
+      },
+      {
+         "field": "NUMA node(s):",
+         "data": "2"
+      },
+      {
+         "field": "Caches (sum of all):",
+         "data": null,
+         "children": [
+            {
+               "field": "L1d:",
+               "data": "1.5 MiB (48 instances)"
+            },
+            {
+               "field": "L1i:",
+               "data": "1.5 MiB (48 instances)"
+            },
+            {
+               "field": "L2:",
+               "data": "48 MiB (48 instances)"
+            },
+            {
+               "field": "L3:",
+               "data": "71.5 MiB (2 instances)"
+            }
+         ]
+      }
+   ]
+}

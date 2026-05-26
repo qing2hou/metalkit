@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+lb config noauto \
+    --mode debian \
+    --distribution bookworm \
+    --architectures amd64 \
+    --binary-images netboot \
+    --net-tarball true \
+    --apt-recommends false \
+    --apt-indices false \
+    --memtest none \
+    --debian-installer false \
+    --firmware-binary true \
+    --firmware-chroot true \
+    --archive-areas "main contrib non-free-firmware" \
+    --linux-flavours amd64 \
+    --bootappend-live "boot=live components quiet noeject ip=dhcp" \
+    "$@"

@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="metalkit-api-base" content="/api/v1">
+  <title>metalkit - 机器详情</title>
+  <link rel="stylesheet" href="/ui/assets/style.css">
+</head>
+<body data-page="detail">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1 class="brand"><a href="/ui/">metalkit</a></h1>
+      <nav class="topnav">
+        <a href="/ui/">机器</a>
+        <a href="/ui/images">镜像</a>
+        <a href="/ui/profiles">配置</a>
+        <a href="/ui/bmc">BMC</a>
+        <a href="/ui/jobs">作业</a>
+      </nav>
+      <div class="topbar-actions">
+        <button id="refresh-btn" type="button" class="btn">刷新</button>
+        <span id="current-user" class="muted" title="当前登录用户"></span>
+        <button id="logout-btn" type="button" class="btn btn-ghost" title="退出登录">退出</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="page detail-page">
+    <div id="error-banner" class="error-banner" hidden></div>
+
+    <section id="machine-header" class="machine-header">
+      <div id="machine-header-loading" class="muted">加载机器&hellip;</div>
+      <div id="machine-header-body" hidden>
+        <div class="machine-title">
+          <span id="m-status-dot" class="status-dot" data-status="unknown"></span>
+          <h2 id="m-product">&mdash;</h2>
+          <span id="m-status-badge" class="badge" data-status="unknown">未知</span>
+        </div>
+        <dl class="kv-strip">
+          <div><dt>序列号</dt><dd id="m-serial" class="copyable" title="点击复制">&mdash;</dd></div>
+          <div><dt>UUID</dt><dd id="m-uuid" class="copyable mono" title="点击复制">&mdash;</dd></div>
+          <div><dt>厂商</dt><dd id="m-manufacturer">&mdash;</dd></div>
+          <div><dt>首次发现</dt><dd id="m-first-seen">&mdash;</dd></div>
+          <div><dt>最近上报</dt><dd id="m-last-seen">&mdash;</dd></div>
+          <div><dt>上报时间</dt><dd id="m-report-ts">&mdash;</dd></div>
+        </dl>
+        <div class="macs-strip">
+          <strong>MAC：</strong>
+          <span id="m-macs" class="muted">&mdash;</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="provisioning-panel" class="provisioning-panel" hidden>
+      <div class="section-head"><h3>装机管理</h3></div>
+      <div class="prov-grid">
+        <div class="prov-card" id="prov-binding">
+          <h4>当前绑定 <span id="prov-binding-state"></span></h4>
+          <div id="prov-binding-body" class="muted">加载中&hellip;</div>
+          <div class="action-row">
+            <button id="prov-binding-edit" type="button" class="btn">编辑绑定</button>
+            <button id="prov-binding-clear" type="button" class="btn btn-ghost">清除</button>
+          </div>
+        </div>
+        <div class="prov-card" id="prov-bmc">
+          <h4>BMC</h4>
+          <div id="prov-bmc-body" class="muted">加载中&hellip;</div>
+          <div class="action-row">
+            <button id="prov-bmc-test" type="button" class="btn">立即测试</button>
+            <button id="prov-bmc-edit" type="button" class="btn">编辑 BMC</button>
+          </div>
+        </div>
+        <div class="prov-card" id="prov-actions">
+          <h4>装机操作</h4>
+          <div id="prov-actions-body" class="muted">加载中&hellip;</div>
+        </div>
+        <div class="prov-card" id="prov-recent">
+          <h4>最近作业</h4>
+          <div id="prov-recent-body" class="muted">加载中&hellip;</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="detail-grid">
+      <aside class="sidebar">
+        <div class="section-head">
+          <h3>上报历史</h3>
+        </div>
+        <div id="reports-loading" class="muted">加载中&hellip;</div>
+        <ul id="reports-list" class="reports-list" hidden></ul>
+
+        <div class="sidebar-toggle">
+          <label>
+            <input type="checkbox" id="raw-toggle">
+            显示原始 JSON
+          </label>
+        </div>
+      </aside>
+
+      <article class="detail-body">
+        <div id="report-loading" class="muted">加载上报&hellip;</div>
+
+        <div id="report-body" hidden>
+          <details open><summary>机器</summary><div id="sec-machine" class="sec"></div></details>
+          <details><summary>固件</summary><div id="sec-firmware" class="sec"></div></details>
+          <details><summary>CPU</summary><div id="sec-cpu" class="sec"></div></details>
+          <details><summary>内存</summary><div id="sec-memory" class="sec"></div></details>
+          <details><summary>磁盘</summary><div id="sec-disks" class="sec"></div></details>
+          <details><summary>网卡</summary><div id="sec-nics" class="sec"></div></details>
+          <details><summary>PCI 设备</summary><div id="sec-pci" class="sec"></div></details>
+          <details><summary>加速卡</summary><div id="sec-accel" class="sec"></div></details>
+          <details><summary>BMC</summary><div id="sec-bmc" class="sec"></div></details>
+          <details><summary>传感器</summary><div id="sec-sensors" class="sec"></div></details>
+          <details><summary>系统</summary><div id="sec-system" class="sec"></div></details>
+          <details><summary>Agent</summary><div id="sec-agent" class="sec"></div></details>
+        </div>
+
+        <section id="raw-section" hidden>
+          <div class="section-head">
+            <h3>原始 JSON</h3>
+          </div>
+          <pre id="raw-json" class="raw"></pre>
+        </section>
+      </article>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <span class="muted">metalkit 运维控制台</span>
+  </footer>
+
+  <script src="/ui/assets/common.js" defer></script>
+  <script src="/ui/assets/app.js" defer></script>
+  <script src="/ui/assets/detail-prov.js" defer></script>
+</body>
+</html>

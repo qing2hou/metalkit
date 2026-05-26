@@ -1,0 +1,15 @@
+Settings for eno1:
+	Supported ports: [ TP ]
+	Supported link modes:   100baseT/Full
+	                        1000baseT/Full
+	                        10000baseT/Full
+	Supported pause frame use: Symmetric
+	Supports auto-negotiation: Yes
+	Speed: 10000Mb/s
+	Duplex: Full
+	Port: Twisted Pair
+	PHYAD: 1
+	Transceiver: internal
+	Auto-negotiation: on
+	MDI-X: off (auto)
+	Link detected: yes

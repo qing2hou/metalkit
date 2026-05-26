@@ -1,0 +1,7 @@
+{
+  "critical_warning": 0,
+  "temperature": 318,
+  "avail_spare": 100,
+  "spare_thresh": 10,
+  "percent_used": 5
+}

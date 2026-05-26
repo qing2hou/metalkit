@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+# Trim image size - docs/man pages aren't needed in a live installer
+rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/info/* || true
+rm -rf /var/cache/apt/archives/*.deb || true
+apt-get clean

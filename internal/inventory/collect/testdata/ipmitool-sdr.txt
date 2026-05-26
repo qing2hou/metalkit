@@ -1,0 +1,9 @@
+CPU1 Temp        | 01h | ok  |  3.1 | 35 degrees C
+CPU2 Temp        | 02h | ok  |  3.2 | 33 degrees C
+Inlet Temp       | 04h | ok  |  7.1 | 22 degrees C
+Fan1A            | 30h | ok  |  7.1 | 4800 RPM
+Fan1B            | 31h | ok  |  7.1 | 4920 RPM
+PS1 Voltage      | 70h | ok  | 10.1 | 208 Volts
+PS1 Current      | 03h | ok  | 10.1 | 0.40 Amps
+VR CPU1 PG       | 80h | ok  |  3.1 | State Deasserted
+Memory Status    | 90h | ns  |  7.1 | No Reading

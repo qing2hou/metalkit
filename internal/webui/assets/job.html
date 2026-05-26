@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="metalkit-api-base" content="/api/v1">
+  <title>metalkit - 作业详情</title>
+  <link rel="stylesheet" href="/ui/assets/style.css">
+</head>
+<body data-page="job">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1 class="brand"><a href="/ui/">metalkit</a></h1>
+      <nav class="topnav">
+        <a href="/ui/">机器</a>
+        <a href="/ui/images">镜像</a>
+        <a href="/ui/profiles">配置</a>
+        <a href="/ui/bmc">BMC</a>
+        <a href="/ui/jobs">作业</a>
+      </nav>
+      <div class="topbar-actions">
+        <a href="/ui/jobs" class="btn btn-ghost">← 返回作业列表</a>
+        <button id="refresh-btn" type="button" class="btn">刷新</button>
+        <span id="current-user" class="muted" title="当前登录用户"></span>
+        <button id="logout-btn" type="button" class="btn btn-ghost" title="退出登录">退出</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="page">
+    <div id="error-banner" class="error-banner" hidden></div>
+
+    <section id="job-header" class="machine-header">
+      <div class="machine-title">
+        <h2 id="job-title">作业 <span id="job-id-short" class="mono">…</span></h2>
+        <span id="job-status-badge"></span>
+      </div>
+      <dl class="kv-strip" id="job-kv"></dl>
+      <div id="job-error" class="error-banner" hidden></div>
+      <div class="action-row" id="job-actions" hidden>
+        <button type="button" id="cancel-btn" class="btn btn-danger" hidden>取消作业</button>
+        <button type="button" id="retry-btn" class="btn" hidden>重试（重新装机）</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head"><h3>阶段时间线</h3></div>
+      <div id="timeline" class="timeline"></div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h3>日志</h3>
+        <span class="muted">
+          <label class="filter-check">
+            <input id="follow-tail" type="checkbox" checked>
+            <span>跟随最新</span>
+          </label>
+        </span>
+      </div>
+      <div id="logs-loading" class="muted">加载日志&hellip;</div>
+      <div id="logs-empty" class="empty-state" hidden>
+        <p class="muted">暂无日志。</p>
+      </div>
+      <div id="logs-wrap" hidden>
+        <table class="log-table">
+          <thead>
+            <tr><th>时间戳</th><th>级别</th><th>消息</th></tr>
+          </thead>
+          <tbody id="logs-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer"><span class="muted">metalkit 运维控制台</span></footer>
+  <script src="/ui/assets/common.js" defer></script>
+  <script src="/ui/assets/job.js" defer></script>
+</body>
+</html>
