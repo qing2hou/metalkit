@@ -87,7 +87,10 @@ func (a *API) upsert(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrMachineUnknown):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
-	case errors.Is(err, ErrImageUnknown), errors.Is(err, ErrProfileUnknown):
+	case errors.Is(err, ErrImageUnknown), errors.Is(err, ErrProfileUnknown), errors.Is(err, ErrSubnetUnknown):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	case errors.Is(err, ErrFamilyMismatch):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	case err != nil:

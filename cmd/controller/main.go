@@ -29,6 +29,7 @@ import (
 	"metalkit/internal/profiles"
 	"metalkit/internal/sessions"
 	"metalkit/internal/sqlitedb"
+	"metalkit/internal/subnets"
 	"metalkit/internal/tftp"
 	"metalkit/internal/util"
 	"metalkit/internal/webui"
@@ -108,6 +109,15 @@ func main() {
 }
 
 func run() int {
+	// Subcommand routing. `metalkit-controller doctor [-config path]` runs the
+	// preflight checks and exits; anything else falls through to serve mode.
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+		cp := fs.String("config", "config.yaml", "path to config file")
+		_ = fs.Parse(os.Args[2:])
+		return runDoctor(*cp)
+	}
+
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	flag.Parse()
 
@@ -216,12 +226,28 @@ func run() int {
 
 	// Install profiles catalog. No on-disk side; lives entirely in the shared
 	// SQLite DB. Bindings (M2.3-2) will FK back into this table.
-	profileStore, err := profiles.NewStore(ctx, db, logger.With("component", "profiles"))
+	// Hash the cluster-wide default root password once at startup; profiles
+	// created with a blank root_password_hash will adopt this hash.
+	defaultRootHash, err := util.CryptSHA512(ctx, cfg.DefaultRootPassword)
+	if err != nil {
+		logger.Error("hash default root password", "err", err)
+		return 1
+	}
+	profileStore, err := profiles.NewStore(ctx, db, logger.With("component", "profiles"), defaultRootHash)
 	if err != nil {
 		logger.Error("profiles open", "err", err)
 		return 1
 	}
 	profileAPI := profiles.NewAPI(profileStore, logger.With("component", "profiles-api"))
+
+	// Subnet catalog. Operators pre-define network segments (CIDR / gateway /
+	// DNS / VLAN) once and pick a subnet per machine at install time.
+	subnetStore, err := subnets.NewStore(ctx, db, logger.With("component", "subnets"))
+	if err != nil {
+		logger.Error("subnets open", "err", err)
+		return 1
+	}
+	subnetAPI := subnets.NewAPI(subnetStore, logger.With("component", "subnets-api"))
 
 	// Per-machine install bindings (machine ↔ image ↔ profile). Schema must
 	// apply after machines/images/profiles so its FK declarations resolve.
@@ -250,6 +276,18 @@ func run() int {
 		return 1
 	}
 	bindAPI := bindings.NewAPI(bindStore, logger.With("component", "bindings-api"))
+
+	// Refuse subnet DELETE when any binding still points at it (until we
+	// promote the FK to ON DELETE RESTRICT proper).
+	subnetAPI = subnetAPI.WithBindingRefCount(bindStore.RefCountBySubnet)
+
+	// One-shot back-fill of bindings.subnet_id from legacy profile.network.
+	// Idempotent — re-runs find every binding already has subnet_id set and
+	// short-circuit. Logged so we can spot rows the heuristic skipped.
+	if err := migrateBindingSubnets(ctx, db, subnetStore, logger.With("component", "subnet-migrate")); err != nil {
+		logger.Error("subnet migration", "err", err)
+		return 1
+	}
 
 	bmcStore, err := bmc.NewStore(ctx, db, logger.With("component", "bmc"), cipher)
 	if err != nil {
@@ -299,7 +337,8 @@ func run() int {
 		return 1
 	}
 	jobsAPI := jobs.NewAPI(jobsStore, logger.With("component", "jobs-api"))
-	agentJobsAPI := jobs.NewAgentAPIWithFetchers(jobsStore, bindStore, profileStore, imgStore, logger.With("component", "agent-jobs-api"))
+	agentJobsAPI := jobs.NewAgentAPIWithFetchers(jobsStore, bindStore, profileStore, imgStore, logger.With("component", "agent-jobs-api")).
+		WithSubnets(subnetStore)
 
 	utilAPI := util.NewAPI(logger.With("component", "util-api"))
 
@@ -334,6 +373,7 @@ func run() int {
 		MachineBindings:  &bindingsDeleteAdapter{store: bindStore},
 		Images:           imgAPI,
 		Profiles:         profileAPI,
+		Subnets:          subnetAPI,
 		Bindings:         bindAPI,
 		BMC:              bmcAPI,
 		Jobs:             jobsAPI,

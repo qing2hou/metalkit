@@ -5,11 +5,7 @@
 (function () {
   "use strict";
 
-  const REFRESH_SECONDS = 30;
-  const API_BASE = (function () {
-    const m = document.querySelector('meta[name="metalkit-api-base"]');
-    return (m && m.getAttribute("content")) || "/api/v1";
-  })();
+  const { escapeHTML, fmtRelative, fmtAbsolute, fmtISO, fmtBytes, apiGet, flashError, clearError, copyText, wireCopyables, POLL } = window.MK;
 
   const page = document.body.dataset.page;
 
@@ -26,73 +22,6 @@
 
   function $(id) { return document.getElementById(id); }
 
-  function escapeHTML(s) {
-    if (s == null) return "";
-    return String(s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-  }
-
-  function showError(msg) {
-    const b = $("error-banner");
-    if (!b) return;
-    b.textContent = msg;
-    b.hidden = false;
-  }
-
-  function clearError() {
-    const b = $("error-banner");
-    if (b) { b.textContent = ""; b.hidden = true; }
-  }
-
-  // fmtBytes: render a byte count with a unit that keeps the leading digit
-  // group between 1 and 1023. Falsy / non-numeric input renders as a dash.
-  function fmtBytes(n) {
-    if (n == null || n === 0) return n === 0 ? "0 B" : "-";
-    const v = Number(n);
-    if (!isFinite(v)) return "-";
-    const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-    let i = 0;
-    let cur = v;
-    while (cur >= 1024 && i < units.length - 1) {
-      cur /= 1024;
-      i++;
-    }
-    return (cur >= 100 ? cur.toFixed(0) : cur.toFixed(1)) + " " + units[i];
-  }
-
-  // fmtRelative: render Unix seconds as a relative duration ("12s ago").
-  function fmtRelative(unixSec) {
-    if (unixSec == null) return "-";
-    const n = Number(unixSec);
-    if (!isFinite(n) || n <= 0) return "-";
-    const diff = Math.max(0, Math.floor(Date.now() / 1000 - n));
-    if (diff < 5) return "刚刚";
-    if (diff < 60) return diff + " 秒前";
-    if (diff < 3600) return Math.floor(diff / 60) + " 分钟前";
-    if (diff < 86400) return Math.floor(diff / 3600) + " 小时前";
-    if (diff < 86400 * 30) return Math.floor(diff / 86400) + " 天前";
-    if (diff < 86400 * 365) return Math.floor(diff / 86400 / 30) + " 月前";
-    return Math.floor(diff / 86400 / 365) + " 年前";
-  }
-
-  function fmtAbsolute(unixSec) {
-    if (unixSec == null) return "-";
-    const n = Number(unixSec);
-    if (!isFinite(n) || n <= 0) return "-";
-    return new Date(n * 1000).toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z");
-  }
-
-  function fmtISO(iso) {
-    if (!iso) return "-";
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return String(iso);
-    return d.toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z");
-  }
-
   function humanStatus(s) {
     if (!s) return "unknown";
     const v = String(s).toLowerCase();
@@ -104,42 +33,6 @@
     if (!u) return "-";
     if (u.length <= 12) return u;
     return u.slice(0, 8) + "…" + u.slice(-4);
-  }
-
-  async function fetchJSON(path) {
-    const url = API_BASE + path;
-    let resp;
-    try {
-      resp = await fetch(url, { headers: { "Accept": "application/json" } });
-    } catch (e) {
-      throw new Error("network error contacting " + url + ": " + e.message);
-    }
-    if (!resp.ok) {
-      let body = "";
-      try { body = await resp.text(); } catch (_) { /* ignore */ }
-      throw new Error("HTTP " + resp.status + " from " + url + (body ? ": " + body.slice(0, 200) : ""));
-    }
-    try {
-      return await resp.json();
-    } catch (e) {
-      throw new Error("invalid JSON from " + url + ": " + e.message);
-    }
-  }
-
-  // copy text to clipboard, briefly flash the element green
-  function copyToClipboard(text, flashEl) {
-    if (!navigator.clipboard || !navigator.clipboard.writeText) {
-      showError("浏览器不支持 clipboard API");
-      return;
-    }
-    navigator.clipboard.writeText(text).then(function () {
-      if (flashEl) {
-        flashEl.classList.add("copy-flash");
-        setTimeout(function () { flashEl.classList.remove("copy-flash"); }, 600);
-      }
-    }).catch(function (e) {
-      showError("复制失败：" + e.message);
-    });
   }
 
   function wireRefreshButton() {
@@ -160,18 +53,28 @@
   function initList() {
     loadMachines();
     scheduleListRefresh();
+    // jobs.js pattern: pause poll when tab hidden so background tabs don't burn cycles.
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible") {
+        loadMachines();
+        scheduleListRefresh();
+      } else {
+        if (listTimer) { clearTimeout(listTimer); listTimer = null; }
+        if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+      }
+    });
   }
 
   function scheduleListRefresh() {
     if (listTimer) clearTimeout(listTimer);
     if (countdownTimer) clearInterval(countdownTimer);
-    nextRefreshAt = Date.now() + REFRESH_SECONDS * 1000;
+    nextRefreshAt = Date.now() + POLL.LIST_MS;
     updateCountdown();
     countdownTimer = setInterval(updateCountdown, 1000);
     listTimer = setTimeout(function () {
       loadMachines();
       scheduleListRefresh();
-    }, REFRESH_SECONDS * 1000);
+    }, POLL.LIST_MS);
   }
 
   function updateCountdown() {
@@ -184,10 +87,10 @@
   async function loadMachines() {
     clearError();
     try {
-      const data = await fetchJSON("/machines");
+      const data = await apiGet("/machines");
       renderMachines(Array.isArray(data) ? data : []);
     } catch (e) {
-      showError(e.message);
+      flashError(e.message);
       $("machines-loading").hidden = true;
     }
   }
@@ -241,12 +144,7 @@
       tbody.appendChild(tr);
     }
 
-    // wire click-to-copy
-    tbody.querySelectorAll(".copyable").forEach(function (el) {
-      el.addEventListener("click", function () {
-        copyToClipboard(el.dataset.copy || el.textContent, el);
-      });
-    });
+    wireCopyables(tbody);
 
     // wire 装机/重装 buttons —— 拉 binding 预填，再开统一弹窗。
     tbody.querySelectorAll(".install-row-btn").forEach(function (btn) {
@@ -314,6 +212,9 @@
         profile_id: binding ? binding.profile_id : "",
         hostname: binding ? binding.hostname : "",
         static_address: binding ? binding.static_address : "",
+        subnet_id: binding ? (binding.subnet_id || "") : "",
+        bond: binding ? (binding.bond || null) : null,
+        nic_selector_override: binding ? (binding.nic_selector_override || "") : "",
         desired_state: suggestState,
       },
       suggestState: suggestState,
@@ -329,7 +230,7 @@
   function initDetail() {
     const m = window.location.pathname.match(/\/ui\/m\/([^/]+)\/?$/);
     if (!m) {
-      showError("无效的详情 URL：" + window.location.pathname);
+      flashError("无效的详情 URL：" + window.location.pathname);
       return;
     }
     currentUUID = decodeURIComponent(m[1]);
@@ -359,8 +260,8 @@
     clearError();
     try {
       const [machine, reports] = await Promise.all([
-        fetchJSON("/machines/" + encodeURIComponent(currentUUID)),
-        fetchJSON("/machines/" + encodeURIComponent(currentUUID) + "/reports"),
+        apiGet("/machines/" + encodeURIComponent(currentUUID)),
+        apiGet("/machines/" + encodeURIComponent(currentUUID) + "/reports"),
       ]);
       renderMachineHeader(machine);
       renderReportsList(Array.isArray(reports) ? reports : []);
@@ -376,15 +277,15 @@
       }
       if (targetID == null) {
         $("report-loading").hidden = true;
-        showError("该机器尚无上报记录");
+        flashError("该机器尚无上报记录");
         return;
       }
       currentReportID = targetID;
       highlightActiveReport(targetID);
-      const report = await fetchJSON("/machines/" + encodeURIComponent(currentUUID) + "/reports/" + encodeURIComponent(targetID));
+      const report = await apiGet("/machines/" + encodeURIComponent(currentUUID) + "/reports/" + encodeURIComponent(targetID));
       renderReport(report);
     } catch (e) {
-      showError(e.message);
+      flashError(e.message);
       $("machine-header-loading").hidden = true;
       $("reports-loading").hidden = true;
       $("report-loading").hidden = true;
@@ -413,6 +314,14 @@
     $("m-last-seen").textContent = fmtRelative(m.last_seen);
     $("m-last-seen").title = fmtAbsolute(m.last_seen);
 
+    const stale = $("m-stale-badge");
+    if (stale) {
+      const lastSeen = Number(m.last_seen || 0);
+      const ageSec = Math.floor(Date.now() / 1000 - lastSeen);
+      stale.hidden = !(lastSeen > 0 && ageSec > 24 * 3600);
+      if (!stale.hidden) stale.title = "上次上报已过 " + Math.floor(ageSec / 3600) + " 小时，数据可能过期";
+    }
+
     // The detail header shows "report timestamp" once the report itself loads.
     // For now, leave it as a dash.
     $("m-report-ts").textContent = "-";
@@ -440,13 +349,7 @@
       }
     }
 
-    // wire click-to-copy on header
-    document.querySelectorAll("#machine-header .copyable").forEach(function (el) {
-      el.addEventListener("click", function () {
-        const txt = el.dataset.copy || el.textContent;
-        if (txt && txt !== "-") copyToClipboard(txt, el);
-      });
-    });
+    wireCopyables(document.getElementById("machine-header"));
   }
 
   function renderReportsList(reports) {
@@ -493,7 +396,7 @@
     $("report-loading").hidden = true;
     $("report-body").hidden = false;
     if (!report || typeof report !== "object") {
-      showError("上报数据为空");
+      flashError("上报数据为空");
       return;
     }
 

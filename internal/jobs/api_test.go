@@ -159,6 +159,84 @@ func TestAPICancel(t *testing.T) {
 	}
 }
 
+func TestAPIDelete(t *testing.T) {
+	f, ts := newTestAPI(t)
+
+	// Cancelled job: deletable.
+	in := f.baseInput(t, '!')
+	j, _ := f.store.Create(t.Context(), in)
+	_ = f.store.Cancel(t.Context(), j.ID)
+	code, _ := apiDo(t, ts, "DELETE", "/api/v1/jobs/"+j.ID)
+	if code != http.StatusNoContent {
+		t.Fatalf("delete terminal code=%d", code)
+	}
+	if _, err := f.store.Get(t.Context(), j.ID); err == nil {
+		t.Errorf("job still present after delete")
+	}
+
+	// Pending job: 409.
+	in2 := f.baseInput(t, '$')
+	j2, _ := f.store.Create(t.Context(), in2)
+	code, _ = apiDo(t, ts, "DELETE", "/api/v1/jobs/"+j2.ID)
+	if code != http.StatusConflict {
+		t.Errorf("delete pending code=%d, want 409", code)
+	}
+
+	// Unknown id: 404.
+	code, _ = apiDo(t, ts, "DELETE", "/api/v1/jobs/00000000000000000000000000000000")
+	if code != http.StatusNotFound {
+		t.Errorf("delete unknown code=%d, want 404", code)
+	}
+}
+
+func TestAPIPurge(t *testing.T) {
+	f, ts := newTestAPI(t)
+
+	// One cancelled, one failed, one pending (should survive).
+	in1 := f.baseInput(t, 'p')
+	j1, _ := f.store.Create(t.Context(), in1)
+	_ = f.store.Cancel(t.Context(), j1.ID)
+
+	in2 := f.baseInput(t, 'q')
+	j2, _ := f.store.Create(t.Context(), in2)
+	_, _ = f.store.Claim(t.Context(), j2.ID)
+	_ = f.store.Fail(t.Context(), j2.ID, "boom")
+
+	in3 := f.baseInput(t, 'r')
+	j3, _ := f.store.Create(t.Context(), in3)
+
+	code, body := apiDo(t, ts, "POST", "/api/v1/jobs/purge")
+	if code != http.StatusOK {
+		t.Fatalf("purge code=%d body=%s", code, body)
+	}
+	var resp map[string]int
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["deleted"] != 2 {
+		t.Errorf("deleted=%d want 2", resp["deleted"])
+	}
+	if _, err := f.store.Get(t.Context(), j1.ID); err == nil {
+		t.Errorf("cancelled still present")
+	}
+	if _, err := f.store.Get(t.Context(), j2.ID); err == nil {
+		t.Errorf("failed still present")
+	}
+	if _, err := f.store.Get(t.Context(), j3.ID); err != nil {
+		t.Errorf("pending lost: %v", err)
+	}
+
+	// Idempotent: second purge returns 0.
+	code, body = apiDo(t, ts, "POST", "/api/v1/jobs/purge")
+	if code != http.StatusOK {
+		t.Fatalf("purge#2 code=%d body=%s", code, body)
+	}
+	_ = json.Unmarshal(body, &resp)
+	if resp["deleted"] != 0 {
+		t.Errorf("second purge deleted=%d want 0", resp["deleted"])
+	}
+}
+
 func itoa(n int64) string {
 	b := bytes.Buffer{}
 	if n == 0 {

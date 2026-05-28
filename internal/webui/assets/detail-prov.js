@@ -98,16 +98,20 @@
   // ---- loaders --------------------------------------------------------
 
   async function loadCatalog() {
-    const [imgs, profs] = await Promise.all([
+    const [imgs, profs, subs] = await Promise.all([
       MK.apiGet("/images").catch(function () { return []; }),
       MK.apiGet("/profiles").catch(function () { return []; }),
+      MK.apiGet("/subnets").catch(function () { return []; }),
     ]);
     catalog.images = Array.isArray(imgs) ? imgs : [];
     catalog.profiles = Array.isArray(profs) ? profs : [];
+    catalog.subnets = Array.isArray(subs) ? subs : [];
     catalog.imageByID = Object.create(null);
     catalog.profileByID = Object.create(null);
+    catalog.subnetByID = Object.create(null);
     catalog.images.forEach(function (i) { if (i && i.id) catalog.imageByID[i.id] = i; });
     catalog.profiles.forEach(function (p) { if (p && p.id) catalog.profileByID[p.id] = p; });
+    catalog.subnets.forEach(function (s) { if (s && s.id) catalog.subnetByID[s.id] = s; });
   }
 
   async function loadBinding() {
@@ -190,10 +194,38 @@
       ? MK.fmtISO(currentBinding.updated_at)
       : "-";
 
+    const sn = currentBinding.subnet_id
+      ? (catalog.subnetByID && catalog.subnetByID[currentBinding.subnet_id])
+      : null;
+    const snLabel = sn
+      ? (MK.escapeHTML(sn.name) + ' <span class="muted">(' + MK.escapeHTML(sn.cidr) +
+         ", gw " + MK.escapeHTML(sn.gateway) +
+         (sn.vlan_id ? ", vlan " + sn.vlan_id : "") + ")</span>")
+      : (currentBinding.subnet_id
+          ? '<span class="muted">' + MK.escapeHTML(currentBinding.subnet_id) + " (未在 catalog 找到)</span>"
+          : '<span class="muted">未绑定（沿用 profile.network）</span>');
+
+    const vlanLabel = currentBinding.vlan_override
+      ? String(currentBinding.vlan_override) +
+        ' <span class="muted">(覆盖 subnet 默认)</span>'
+      : (sn && sn.vlan_id
+          ? String(sn.vlan_id) + ' <span class="muted">(来自 subnet)</span>'
+          : '<span class="muted">无</span>');
+
+    const bondLabel = currentBinding.bond
+      ? MK.escapeHTML(currentBinding.bond.mode) +
+        ' <span class="muted">[' +
+        MK.escapeHTML((currentBinding.bond.slaves || []).join(", ")) +
+        "]</span>"
+      : '<span class="muted">无（单 NIC）</span>';
+
     const rows = [
       ["镜像", MK.escapeHTML(imgLabel)],
       ["配置", MK.escapeHTML(profLabel)],
+      ["子网", snLabel],
       ["静态地址", MK.escapeHTML(currentBinding.static_address || "—")],
+      ["VLAN", vlanLabel],
+      ["Bond", bondLabel],
       ["主机名", MK.escapeHTML(currentBinding.hostname || "—")],
       ["Root 密码", renderPasswordCell()],
       ["更新时间", MK.escapeHTML(updatedAt) +
@@ -275,12 +307,18 @@
       desired_state: "none",
       static_address: "",
       hostname: "",
+      subnet_id: "",
+      vlan_override: 0,
+      bond: null,
     };
 
     const images = (catalog.images || []).slice().sort(function (a, b) {
       return String(a.name || "").localeCompare(String(b.name || ""));
     });
     const profiles = (catalog.profiles || []).slice().sort(function (a, b) {
+      return String(a.name || "").localeCompare(String(b.name || ""));
+    });
+    const subnetsArr = (catalog.subnets || []).slice().sort(function (a, b) {
       return String(a.name || "").localeCompare(String(b.name || ""));
     });
 
@@ -298,10 +336,27 @@
     const profOpts = ['<option value="">— 选择配置 —</option>'].concat(
       profiles.map(function (p) {
         const sel = p.id === b.profile_id ? " selected" : "";
+        const label = (p.name || p.id) +
+          (p.os_family && p.os_family !== "any" ? " [" + p.os_family + "]" : "");
         return '<option value="' + MK.escapeHTML(p.id) + '"' + sel + ">" +
-          MK.escapeHTML(p.name || p.id) + "</option>";
+          MK.escapeHTML(label) + "</option>";
       })
     ).join("");
+
+    const snOpts = ['<option value="">— 不绑定（沿用 profile.network） —</option>'].concat(
+      subnetsArr.map(function (s) {
+        const sel = s.id === b.subnet_id ? " selected" : "";
+        const label = s.name + " (" + s.cidr + ", gw " + s.gateway +
+          (s.vlan_id ? ", vlan " + s.vlan_id : "") + ")";
+        return '<option value="' + MK.escapeHTML(s.id) + '"' + sel + ">" +
+          MK.escapeHTML(label) + "</option>";
+      })
+    ).join("");
+
+    const imgFamilyByID = {};
+    images.forEach(function (i) { imgFamilyByID[i.id] = (i.family || "").toLowerCase(); });
+    const profFamilyByID = {};
+    profiles.forEach(function (p) { profFamilyByID[p.id] = (p.os_family || "any").toLowerCase(); });
 
     const states = ["none", "install", "reinstall"];
     const radios = states.map(function (s) {
@@ -310,21 +365,56 @@
         s + '"' + checked + "> " + desiredStateLabel(s) + "</label>";
     }).join(" ");
 
+    // Bond initial values
+    const bondCur = b.bond || {};
+    const bondEnabled = !!b.bond;
+    const bondModes = ["active-backup", "802.3ad"];
+    const bondModeOpts = bondModes.map(function (m) {
+      const sel = m === (bondCur.mode || "active-backup") ? " selected" : "";
+      return '<option value="' + m + '"' + sel + ">" + m + "</option>";
+    }).join("");
+    const slavesCSV = (bondCur.slaves || []).join(", ");
+
     const body =
       '<div class="kv-form">' +
       '<label class="kv"><span>镜像</span>' +
         '<select id="prov-mod-image" required>' + imgOpts + "</select></label>" +
       '<label class="kv"><span>配置</span>' +
         '<select id="prov-mod-profile" required>' + profOpts + "</select></label>" +
+      '<div id="prov-mod-compat" class="kv-hint muted" hidden></div>' +
       '<div class="kv"><span>期望状态</span><div>' + radios + "</div></div>" +
+
+      '<label class="kv"><span>子网</span>' +
+        '<select id="prov-mod-subnet">' + snOpts + "</select></label>" +
+      '<div id="prov-mod-subnet-hint" class="kv-hint muted" hidden></div>' +
+
       '<label class="kv"><span>静态地址</span>' +
         '<input type="text" id="prov-mod-static" value="' +
         MK.escapeHTML(b.static_address || "") +
-        '" placeholder="可选（CIDR）" autocomplete="off"></label>' +
+        '" placeholder="例如 192.168.10.42" autocomplete="off"></label>' +
+      '<div id="prov-mod-static-hint" class="kv-hint muted" hidden></div>' +
+
+      '<label class="kv"><span>VLAN 覆盖</span>' +
+        '<input type="number" id="prov-mod-vlan" min="0" max="4094" value="' +
+        (b.vlan_override || 0) + '" placeholder="0=用 subnet 默认"></label>' +
+
       '<label class="kv"><span>主机名</span>' +
         '<input type="text" id="prov-mod-hostname" value="' +
         MK.escapeHTML(b.hostname || "") +
         '" placeholder="可选覆盖" autocomplete="off"></label>' +
+
+      '<label class="kv"><span>Bond</span>' +
+        '<label><input type="checkbox" id="prov-mod-bond-en"' +
+        (bondEnabled ? " checked" : "") + "> 启用 bond</label></label>" +
+      '<div id="prov-mod-bond-fields" ' + (bondEnabled ? "" : "hidden") + ">" +
+        '<label class="kv"><span>模式</span>' +
+          '<select id="prov-mod-bond-mode">' + bondModeOpts + "</select></label>" +
+        '<label class="kv"><span>Slaves</span>' +
+          '<input type="text" id="prov-mod-bond-slaves" value="' +
+          MK.escapeHTML(slavesCSV) +
+          '" placeholder="例如 eno1, eno2"></label>' +
+        '<div class="kv-hint muted">2..8 个 NIC，逗号分隔。可以是接口名（eno1）或 MAC 地址。</div>' +
+      "</div>" +
       "</div>";
 
     const footer =
@@ -334,10 +424,126 @@
     const title = currentBinding ? "编辑 binding" : "创建 binding";
     const dlg = MK.openModal(MK.modalShell(title, body, footer));
     const form = dlg.querySelector("form");
+    const imgSel = dlg.querySelector("#prov-mod-image");
+    const profSel = dlg.querySelector("#prov-mod-profile");
+    const compatEl = dlg.querySelector("#prov-mod-compat");
+    const snSel = dlg.querySelector("#prov-mod-subnet");
+    const snHint = dlg.querySelector("#prov-mod-subnet-hint");
+    const staticInp = dlg.querySelector("#prov-mod-static");
+    const staticHint = dlg.querySelector("#prov-mod-static-hint");
+    const bondEn = dlg.querySelector("#prov-mod-bond-en");
+    const bondFields = dlg.querySelector("#prov-mod-bond-fields");
+
+    function refreshCompat() {
+      const imgFam = imgFamilyByID[imgSel.value] || "";
+      const profFam = profFamilyByID[profSel.value] || "any";
+      if (!imgSel.value || !profSel.value) {
+        compatEl.hidden = true;
+        return;
+      }
+      if (profFam === "any" || imgFam === "" || imgFam === profFam) {
+        compatEl.hidden = true;
+        return;
+      }
+      compatEl.hidden = false;
+      compatEl.innerHTML =
+        '<span class="badge" data-status="pending">⚠ 兼容性</span> 镜像家族 <code>' +
+        MK.escapeHTML(imgFam) + "</code> 与配置 os_family <code>" +
+        MK.escapeHTML(profFam) + "</code> 不匹配，保存时后端会拒绝。";
+    }
+    function refreshSubnetHint() {
+      const id = snSel.value;
+      if (!id) {
+        snHint.hidden = true;
+        return;
+      }
+      const s = catalog.subnetByID && catalog.subnetByID[id];
+      if (!s) {
+        snHint.hidden = true;
+        return;
+      }
+      const dns = (s.dns || []).join(", ") || "—";
+      snHint.hidden = false;
+      snHint.innerHTML =
+        "CIDR <code>" + MK.escapeHTML(s.cidr) + "</code> · 网关 <code>" +
+        MK.escapeHTML(s.gateway) + "</code> · DNS " + MK.escapeHTML(dns) +
+        (s.vlan_id ? " · VLAN " + s.vlan_id : "");
+    }
+    function refreshStaticHint() {
+      const id = snSel.value;
+      const host = staticInp.value.trim();
+      if (!id || !host) {
+        staticHint.hidden = true;
+        return;
+      }
+      const s = catalog.subnetByID && catalog.subnetByID[id];
+      if (!s) {
+        staticHint.hidden = true;
+        return;
+      }
+      const err = hostInSubnetCheck(host, s.cidr, s.gateway);
+      if (err) {
+        staticHint.hidden = false;
+        staticHint.className = "kv-hint";
+        staticHint.style.color = "var(--accent-red, #c33)";
+        staticHint.textContent = err;
+      } else {
+        staticHint.hidden = false;
+        staticHint.className = "kv-hint muted";
+        staticHint.style.color = "";
+        staticHint.textContent = "✓ 在 " + s.cidr + " 范围内";
+      }
+    }
+    function refreshBondFields() {
+      bondFields.hidden = !bondEn.checked;
+    }
+    imgSel.addEventListener("change", refreshCompat);
+    profSel.addEventListener("change", refreshCompat);
+    snSel.addEventListener("change", function () {
+      refreshSubnetHint();
+      refreshStaticHint();
+    });
+    staticInp.addEventListener("input", refreshStaticHint);
+    bondEn.addEventListener("change", refreshBondFields);
+    refreshCompat();
+    refreshSubnetHint();
+    refreshStaticHint();
+    refreshBondFields();
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();
       submitBinding(dlg);
     });
+  }
+
+  // hostInSubnetCheck mirrors internal/subnets HostInSubnet for snappy
+  // client-side feedback. Returns "" if OK, else a Chinese error string.
+  function hostInSubnetCheck(host, cidr, gateway) {
+    const ip = parseIPv4(host);
+    if (!ip) return "地址不是合法 IPv4";
+    const m = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d{1,2})$/.exec(cidr);
+    if (!m) return "subnet CIDR 解析失败";
+    const net = parseIPv4(m[1]);
+    const prefix = parseInt(m[2], 10);
+    if (!net || prefix < 0 || prefix > 32) return "subnet CIDR 不合法";
+    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+    if ((ip & mask) !== (net & mask)) return "地址不在 " + cidr + " 范围内";
+    if (ip === (net & mask)) return "地址等于网络号";
+    const bcast = (net & mask) | (~mask >>> 0);
+    if (ip === bcast) return "地址等于广播地址";
+    const gw = parseIPv4(gateway);
+    if (gw && ip === gw) return "地址不能与网关相同";
+    return "";
+  }
+  function parseIPv4(s) {
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec((s || "").trim());
+    if (!m) return null;
+    let v = 0;
+    for (let i = 1; i <= 4; i++) {
+      const n = parseInt(m[i], 10);
+      if (n < 0 || n > 255) return null;
+      v = (v * 256 + n) >>> 0;
+    }
+    return v;
   }
 
   async function submitBinding(dlg) {
@@ -346,11 +552,54 @@
     const desired = (dlg.querySelector('input[name="prov-desired"]:checked') || {}).value || "none";
     const staticAddr = dlg.querySelector("#prov-mod-static").value.trim();
     const hostname = dlg.querySelector("#prov-mod-hostname").value.trim();
+    const subnetID = dlg.querySelector("#prov-mod-subnet").value.trim();
+    const vlanRaw = dlg.querySelector("#prov-mod-vlan").value.trim();
+    const bondEn = dlg.querySelector("#prov-mod-bond-en").checked;
 
     if (!imageID || !profileID) {
       MK.flashError("镜像与配置必填");
       return;
     }
+
+    // Client-side host-in-subnet pre-check for snappier UX. The backend repeats
+    // the check authoritatively.
+    if (subnetID && staticAddr) {
+      const s = catalog.subnetByID && catalog.subnetByID[subnetID];
+      if (s) {
+        const err = hostInSubnetCheck(staticAddr, s.cidr, s.gateway);
+        if (err) {
+          MK.flashError(err);
+          return;
+        }
+      }
+    }
+    if (subnetID && !staticAddr) {
+      MK.flashError("绑定 subnet 时必须填静态地址");
+      return;
+    }
+
+    let vlanInt = 0;
+    if (vlanRaw !== "") {
+      vlanInt = parseInt(vlanRaw, 10);
+      if (Number.isNaN(vlanInt) || vlanInt < 0 || vlanInt > 4094) {
+        MK.flashError("VLAN 覆盖必须是 0..4094 范围内的整数");
+        return;
+      }
+    }
+
+    let bond = null;
+    if (bondEn) {
+      const mode = dlg.querySelector("#prov-mod-bond-mode").value;
+      const slavesCSV = dlg.querySelector("#prov-mod-bond-slaves").value;
+      const slaves = slavesCSV.split(",").map(function (s) { return s.trim(); })
+        .filter(function (s) { return s.length > 0; });
+      if (slaves.length < 2 || slaves.length > 8) {
+        MK.flashError("Bond slaves 必须 2..8 个");
+        return;
+      }
+      bond = { mode: mode, slaves: slaves };
+    }
+
     const saveBtn = dlg.querySelector("#prov-mod-save");
     saveBtn.disabled = true;
     try {
@@ -360,6 +609,9 @@
         desired_state: desired,
         static_address: staticAddr,
         hostname: hostname,
+        subnet_id: subnetID,            // "" = explicit clear
+        vlan_override: vlanInt,         // 0 = clear
+        bond: bond,                     // null = explicit clear
       };
       currentBinding = await MK.apiSend("PUT", "/bindings/" + encodeURIComponent(muuid), body);
       MK.closeModal();
@@ -626,6 +878,12 @@
         profile_id: currentBinding ? currentBinding.profile_id : "",
         hostname: currentBinding ? currentBinding.hostname : "",
         static_address: currentBinding ? currentBinding.static_address : "",
+        subnet_id: currentBinding ? (currentBinding.subnet_id || "") : "",
+        // 把当前 bond override 喂进弹窗：复选框/字段能反映现状。
+        // 不勾选提交即清除（弹窗是 override 真相源）。
+        bond: currentBinding ? (currentBinding.bond || null) : null,
+        // 当前 NIC selector override（"" / "by-mac:..."），弹窗会据此预选 radio。
+        nic_selector_override: currentBinding ? (currentBinding.nic_selector_override || "") : "",
         desired_state: desiredState,
       },
       suggestState: desiredState,

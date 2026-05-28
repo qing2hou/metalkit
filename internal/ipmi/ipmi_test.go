@@ -98,9 +98,9 @@ func TestSetBootDevicePXE(t *testing.T) {
 		t.Fatalf("calls=%d want 1", len(fr.calls))
 	}
 	args := fr.calls[0].args
-	wantTail := []string{"chassis", "bootdev", "pxe"}
+	wantTail := []string{"chassis", "bootdev", "pxe", "options=efiboot"}
 	if !endsWith(args, wantTail) {
-		t.Errorf("args tail=%v want %v (full=%v)", args[len(args)-3:], wantTail, args)
+		t.Errorf("args tail=%v want %v (full=%v)", args[len(args)-4:], wantTail, args)
 	}
 	if !containsAll(args, []string{"-H", "10.0.0.7", "-p", "623", "-I", "lanplus", "-U", "ADMIN", "-E"}) {
 		t.Errorf("args missing standard fields: %v", args)
@@ -119,7 +119,7 @@ func TestSetBootDeviceDisk(t *testing.T) {
 	if err := c.SetBootDevice(context.Background(), sampleCred(), BootDeviceDisk); err != nil {
 		t.Fatalf("SetBootDevice disk: %v", err)
 	}
-	if !endsWith(fr.calls[0].args, []string{"chassis", "bootdev", "disk"}) {
+	if !endsWith(fr.calls[0].args, []string{"chassis", "bootdev", "disk", "options=efiboot"}) {
 		t.Errorf("disk args: %v", fr.calls[0].args)
 	}
 }
@@ -189,7 +189,7 @@ func TestBootForPXEComposite(t *testing.T) {
 	if len(fr.calls) != 2 {
 		t.Fatalf("calls=%d want 2", len(fr.calls))
 	}
-	if !endsWith(fr.calls[0].args, []string{"chassis", "bootdev", "pxe"}) {
+	if !endsWith(fr.calls[0].args, []string{"chassis", "bootdev", "pxe", "options=efiboot"}) {
 		t.Errorf("first call: %v", fr.calls[0].args)
 	}
 	if !endsWith(fr.calls[1].args, []string{"chassis", "power", "cycle"}) {
@@ -217,7 +217,7 @@ func TestFinalizeBootDisk(t *testing.T) {
 	if len(fr.calls) != 2 {
 		t.Fatalf("calls=%d want 2 (bootdev=disk + power cycle)", len(fr.calls))
 	}
-	if !endsWith(fr.calls[0].args, []string{"chassis", "bootdev", "disk"}) {
+	if !endsWith(fr.calls[0].args, []string{"chassis", "bootdev", "disk", "options=efiboot"}) {
 		t.Errorf("first call: %v", fr.calls[0].args)
 	}
 	if !endsWith(fr.calls[1].args, []string{"chassis", "power", "cycle"}) {

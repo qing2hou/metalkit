@@ -14,6 +14,7 @@ import (
 	"metalkit/internal/bindings"
 	"metalkit/internal/images"
 	"metalkit/internal/profiles"
+	"metalkit/internal/subnets"
 )
 
 // fakeBindingFetcher / fakeProfileFetcher / fakeImageFetcher are tiny test
@@ -59,6 +60,18 @@ func (f *fakeImageFetcher) GetImage(_ context.Context, id string) (*images.Image
 		return i, nil
 	}
 	return nil, ErrNotFound
+}
+
+// fakeSubnetFetcher is the spec-handler test double for subnets.Store.
+type fakeSubnetFetcher struct {
+	byID map[string]*subnets.Subnet
+}
+
+func (f *fakeSubnetFetcher) Get(_ context.Context, id string) (*subnets.Subnet, error) {
+	if s, ok := f.byID[id]; ok {
+		return s, nil
+	}
+	return nil, subnets.ErrNotFound
 }
 
 func newTestAgentAPI(t *testing.T) (*fixture, *httptest.Server) {
@@ -516,5 +529,126 @@ func TestAgentSpecBareAPIReturns503(t *testing.T) {
 		"/api/v1/agent/jobs/"+j.ID+"/spec?machine_uuid="+in.MachineUUID, "")
 	if code != http.StatusServiceUnavailable {
 		t.Errorf("bare-api spec code=%d want 503", code)
+	}
+}
+
+// newTestAgentAPIWithSubnets is the spec-test setup that also attaches a fake
+// subnet fetcher so the M2.3-12 phase ④ overlay can be exercised.
+func newTestAgentAPIWithSubnets(t *testing.T) (*fixture, *httptest.Server, *fakeBindingFetcher, *fakeProfileFetcher, *fakeImageFetcher, *fakeSubnetFetcher) {
+	t.Helper()
+	f := newFixture(t)
+	fb := &fakeBindingFetcher{byMUUID: map[string]*bindings.Binding{}, passwd: map[string]string{}}
+	fp := &fakeProfileFetcher{byID: map[string]*profiles.Profile{}}
+	fi := &fakeImageFetcher{byID: map[string]*images.Image{}}
+	fs := &fakeSubnetFetcher{byID: map[string]*subnets.Subnet{}}
+	a := NewAgentAPIWithFetchers(f.store, fb, fp, fi, slog.New(slog.NewTextHandler(io.Discard, nil))).
+		WithSubnets(fs)
+	mux := http.NewServeMux()
+	a.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return f, ts, fb, fp, fi, fs
+}
+
+// TestAgentSpecSubnetOverlay: when binding.subnet_id is set, the spec must
+// expose subnet's CIDR/gateway/DNS (and vlan if any) on profile.network.
+func TestAgentSpecSubnetOverlay(t *testing.T) {
+	f, ts, fb, fp, fi, fs := newTestAgentAPIWithSubnets(t)
+	in := f.baseInput(t, '6')
+	j, _ := f.store.Create(t.Context(), in)
+	b, p, _ := seedSpecFakes(t, j, fb, fp, fi)
+	// Profile was seeded with no network method — give it a meaningful
+	// starting point so we can prove the overlay replaced everything.
+	p.Network = profiles.NetworkConfig{
+		Method: "dhcp", NICSelector: "auto", VLAN: 999,
+	}
+	b.SubnetID = "11111111111111111111111111111111"
+	fs.byID[b.SubnetID] = &subnets.Subnet{
+		ID:      b.SubnetID,
+		Name:    "lab",
+		CIDR:    "10.20.0.0/22",
+		Gateway: "10.20.0.1",
+		DNS:     []string{"1.1.1.1", "8.8.8.8"},
+		VLANID:  100,
+	}
+
+	code, body := agentDo(t, ts, "GET",
+		"/api/v1/agent/jobs/"+j.ID+"/spec?machine_uuid="+in.MachineUUID, "")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", code, body)
+	}
+	var got InstallSpec
+	_ = json.Unmarshal(body, &got)
+	nc := got.Profile.Network
+	if nc.Method != "static" {
+		t.Errorf("method=%q want static", nc.Method)
+	}
+	if nc.PrefixLen != 22 {
+		t.Errorf("prefix=%d want 22", nc.PrefixLen)
+	}
+	if nc.Gateway != "10.20.0.1" {
+		t.Errorf("gateway=%q want 10.20.0.1", nc.Gateway)
+	}
+	if len(nc.DNS) != 2 || nc.DNS[0] != "1.1.1.1" || nc.DNS[1] != "8.8.8.8" {
+		t.Errorf("dns=%v", nc.DNS)
+	}
+	if nc.VLAN != 100 {
+		t.Errorf("vlan=%d want 100 (subnet's)", nc.VLAN)
+	}
+}
+
+// TestAgentSpecVLANOverrideWinsOverSubnet: binding.vlan_override > 0 should
+// take precedence over the subnet's vlan_id.
+func TestAgentSpecVLANOverrideWinsOverSubnet(t *testing.T) {
+	f, ts, fb, fp, fi, fs := newTestAgentAPIWithSubnets(t)
+	in := f.baseInput(t, '7')
+	j, _ := f.store.Create(t.Context(), in)
+	b, _, _ := seedSpecFakes(t, j, fb, fp, fi)
+	b.SubnetID = "22222222222222222222222222222222"
+	b.VLANOverride = 200
+	fs.byID[b.SubnetID] = &subnets.Subnet{
+		ID:      b.SubnetID,
+		CIDR:    "192.168.0.0/24",
+		Gateway: "192.168.0.1",
+		VLANID:  100,
+	}
+
+	code, body := agentDo(t, ts, "GET",
+		"/api/v1/agent/jobs/"+j.ID+"/spec?machine_uuid="+in.MachineUUID, "")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", code, body)
+	}
+	var got InstallSpec
+	_ = json.Unmarshal(body, &got)
+	if got.Profile.Network.VLAN != 200 {
+		t.Errorf("vlan=%d want 200 (binding override wins)", got.Profile.Network.VLAN)
+	}
+}
+
+// TestAgentSpecNoSubnetLeavesProfileIntact: binding.subnet_id empty → the
+// profile.network is sent through unmodified (legacy path).
+func TestAgentSpecNoSubnetLeavesProfileIntact(t *testing.T) {
+	f, ts, fb, fp, fi, _ := newTestAgentAPIWithSubnets(t)
+	in := f.baseInput(t, '8')
+	j, _ := f.store.Create(t.Context(), in)
+	_, p, _ := seedSpecFakes(t, j, fb, fp, fi)
+	p.Network = profiles.NetworkConfig{
+		Method:    "static",
+		PrefixLen: 24,
+		Gateway:   "10.0.0.1",
+		DNS:       []string{"10.0.0.53"},
+		VLAN:      50,
+	}
+
+	code, body := agentDo(t, ts, "GET",
+		"/api/v1/agent/jobs/"+j.ID+"/spec?machine_uuid="+in.MachineUUID, "")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", code, body)
+	}
+	var got InstallSpec
+	_ = json.Unmarshal(body, &got)
+	nc := got.Profile.Network
+	if nc.Gateway != "10.0.0.1" || nc.PrefixLen != 24 || nc.VLAN != 50 {
+		t.Errorf("profile mutated unexpectedly: %+v", nc)
 	}
 }

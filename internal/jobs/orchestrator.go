@@ -150,7 +150,7 @@ func (o *Orchestrator) handleInstallRequests(ctx context.Context) {
                 AND (
                     j.status IN ('pending', 'running')
                     OR (j.status IN ('succeeded', 'failed', 'cancelled')
-                        AND j.created_at >= b.updated_at)
+                        AND (j.created_at >= b.updated_at OR j.finished_at >= b.updated_at))
                 )
           )`)
 	if err != nil {

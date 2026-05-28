@@ -6,6 +6,9 @@ import (
 	"net"
 	"regexp"
 	"strings"
+
+	"metalkit/internal/profiles"
+	"metalkit/internal/subnets"
 )
 
 // Canonical SMBIOS UUID — same form the inventory store accepts.
@@ -110,6 +113,60 @@ func validatePassword(p string) error {
 		return errors.New("root_password: longer than 128 characters")
 	}
 	return nil
+}
+
+// validateVLANOverride accepts 0 (= no override, fall back to subnet.vlan_id)
+// or 1..4094. Anything else is rejected. nil pointer = field not provided
+// (kept unchanged on PUT). Returns the canonical int and whether the caller
+// should write NULL (0 → NULL so the row stays nullable).
+func validateVLANOverride(p *int) (writeNull bool, val int, err error) {
+	if p == nil {
+		return false, 0, errors.New("validateVLANOverride: called with nil — caller bug")
+	}
+	v := *p
+	if v == 0 {
+		return true, 0, nil
+	}
+	if v < 1 || v > 4094 {
+		return false, 0, fmt.Errorf("vlan_override %d: must be 0 (no override) or 1..4094", v)
+	}
+	return false, v, nil
+}
+
+// validateSubnetID accepts an empty string (= clear / DHCP, no subnet) or a
+// 32 lowercase hex id. Empty maps to NULL in the row.
+func validateSubnetID(id string) (string, error) {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "" {
+		return "", nil
+	}
+	if !hex32RE.MatchString(id) {
+		return "", fmt.Errorf("subnet_id %q: must be 32 lowercase hex chars (or empty)", id)
+	}
+	return id, nil
+}
+
+// validateNICSelectorOverride accepts the same shapes as
+// profile.network.nic_selector ("auto", "by-mac:<MAC>", "by-name:<ifname>"),
+// plus the empty string which maps to NULL (= inherit profile). Trimmed +
+// lowercased before validation so the stored form is canonical.
+func validateNICSelectorOverride(sel string) (string, error) {
+	sel = strings.ToLower(strings.TrimSpace(sel))
+	if sel == "" {
+		return "", nil
+	}
+	if err := profiles.ValidateNICSelector(sel); err != nil {
+		return "", fmt.Errorf("nic_selector_override: %w", err)
+	}
+	return sel, nil
+}
+
+// hostInSubnet wraps subnets.HostInSubnet so callers in this package don't
+// need to import the subnets package directly. The rule is: host must be a
+// valid IPv4 inside cidr, not the network/broadcast address, and not equal
+// to gateway.
+func hostInSubnet(host, cidr, gateway string) error {
+	return subnets.HostInSubnet(host, cidr, gateway)
 }
 
 // isClearJSON returns true when raw represents an explicit "clear" intent for

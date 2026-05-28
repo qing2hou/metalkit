@@ -25,7 +25,7 @@ func newTestStore(t *testing.T) *Store {
 		t.Fatalf("sqlitedb.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	s, err := NewStore(context.Background(), db, logger)
+	s, err := NewStore(context.Background(), db, logger, "")
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -78,6 +78,44 @@ func TestCreateGet(t *testing.T) {
 	}
 	if got.Network.Gateway != "10.99.0.1" || len(got.Network.DNS) != 1 {
 		t.Errorf("network roundtrip lost data: %+v", got.Network)
+	}
+}
+
+// TestCreateUsesDefaultRootHash verifies that when the operator leaves
+// RootPasswordHash blank and the Store has been initialised with a default,
+// Create backfills the field instead of returning the "must be $6$" error.
+func TestCreateUsesDefaultRootHash(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger})
+	if err != nil {
+		t.Fatalf("sqlitedb.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s, err := NewStore(context.Background(), db, logger, validSha512crypt)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	in := validInput("def")
+	in.RootPasswordHash = ""
+	p, err := s.Create(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Create with empty hash: %v", err)
+	}
+	if p.RootPasswordHash != validSha512crypt {
+		t.Errorf("default hash not applied: got %q want %q", p.RootPasswordHash, validSha512crypt)
+	}
+}
+
+// TestCreateNoDefaultStillRejectsEmpty: when no default is configured, blank
+// hash must still error (preserves old validation for callers that don't opt in).
+func TestCreateNoDefaultStillRejectsEmpty(t *testing.T) {
+	s := newTestStore(t)
+	in := validInput("nodef")
+	in.RootPasswordHash = ""
+	if _, err := s.Create(context.Background(), in); err == nil {
+		t.Fatal("want error, got nil")
 	}
 }
 

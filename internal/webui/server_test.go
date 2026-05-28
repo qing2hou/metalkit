@@ -100,6 +100,23 @@ func TestProfilesPage(t *testing.T) {
 	}
 }
 
+func TestSubnetsPage(t *testing.T) {
+	ts := newTestServer(t)
+	status, ct, body := get(t, ts, "/ui/subnets")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("content-type = %q, want text/html...", ct)
+	}
+	if !strings.Contains(body, `data-page="subnets"`) {
+		t.Errorf("subnets body missing data-page=\"subnets\" marker; got first 200 bytes: %q", truncate(body, 200))
+	}
+	if !strings.Contains(body, "/ui/assets/subnets.js") {
+		t.Errorf("subnets body missing subnets.js script tag")
+	}
+}
+
 func TestImagesJSAsset(t *testing.T) {
 	ts := newTestServer(t)
 	status, _, body := get(t, ts, "/ui/assets/images.js")

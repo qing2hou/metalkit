@@ -92,6 +92,14 @@ func (OSFS) Exists(path string) bool {
 	return err == nil
 }
 
+func (OSFS) Symlink(oldname, newname string) error {
+	return os.Symlink(oldname, newname)
+}
+
+func (OSFS) Remove(path string) error {
+	return os.Remove(path)
+}
+
 // ---- HTTPDownloader -------------------------------------------------------
 
 // HTTPDownloader streams image blobs over HTTP with on-the-fly sha256

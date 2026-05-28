@@ -99,14 +99,20 @@ func NewClient(logger *slog.Logger, opts ClientOptions) (*Client, error) {
 	return &Client{bin: bin, runner: runner, timeout: timeout, logger: logger}, nil
 }
 
-// SetBootDevice issues `chassis bootdev <dev>`. One-shot (resets after next boot).
+// SetBootDevice issues `chassis bootdev <dev> options=efiboot`. One-shot
+// (resets after next boot). The efiboot flag is what makes the override
+// actually stick on UEFI systems — without it Dell BIOS encodes "PC
+// Compatible (legacy) boot" in the next-boot params and a UEFI-only system
+// silently ignores the override, falling back to its existing BootOrder
+// (which on a freshly-installed RHEL family box now points at the OS shim
+// at NVRAM position #0). Legacy-only hardware ignores the bit.
 func (c *Client) SetBootDevice(ctx context.Context, cred bmc.PasswordedCredential, dev BootDevice) error {
 	switch dev {
 	case BootDevicePXE, BootDeviceDisk:
 	default:
 		return fmt.Errorf("ipmi: unsupported boot device %q", dev)
 	}
-	_, err := c.run(ctx, cred, "chassis", "bootdev", string(dev))
+	_, err := c.run(ctx, cred, "chassis", "bootdev", string(dev), "options=efiboot")
 	return err
 }
 

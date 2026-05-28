@@ -15,7 +15,7 @@
 (function () {
   "use strict";
 
-  const POLL_MS = 5000;
+  const POLL_MS = MK.POLL.JOBS_MS;
   const KNOWN_STATUSES = ["pending", "running", "succeeded", "failed", "cancelled"];
 
   let pollTimer = null;
@@ -117,6 +117,11 @@
     document.getElementById("refresh-btn").addEventListener("click", function () {
       tick();
     });
+
+    const purgeBtn = document.getElementById("purge-btn");
+    if (purgeBtn) {
+      purgeBtn.addEventListener("click", function () { purgeAll(purgeBtn); });
+    }
   }
 
   // ---- polling --------------------------------------------------------
@@ -338,11 +343,20 @@
       html +=
         ' <button type="button" class="btn btn-danger cancel-btn" data-id="' +
         MK.escapeHTML(j.id) + '">取消</button>';
+    } else {
+      // succeeded | failed | cancelled — log is no longer mutating, allow purge.
+      html +=
+        ' <button type="button" class="btn btn-danger delete-btn" data-id="' +
+        MK.escapeHTML(j.id) + '">删除</button>';
     }
     td.innerHTML = html;
     const cancelBtn = td.querySelector(".cancel-btn");
     if (cancelBtn) {
       cancelBtn.addEventListener("click", function () { cancelJob(j); });
+    }
+    const deleteBtn = td.querySelector(".delete-btn");
+    if (deleteBtn) {
+      deleteBtn.addEventListener("click", function () { deleteJob(j); });
     }
     return td;
   }
@@ -358,5 +372,42 @@
     } catch (err) {
       MK.flashError("取消失败：" + err.message);
     }
+  }
+
+  async function deleteJob(j) {
+    if (!confirm("删除作业 " + uuid8(j.id) + " 及其所有日志？此操作不可撤销。")) {
+      return;
+    }
+    try {
+      await MK.apiSend("DELETE", "/jobs/" + encodeURIComponent(j.id), null);
+      MK.flashSuccess("已删除作业 " + uuid8(j.id));
+      tick();
+    } catch (err) {
+      MK.flashError("删除失败：" + err.message);
+    }
+  }
+
+  async function purgeAll(btn) {
+    // Count terminal jobs in latestJobs to show in the confirm message.
+    const terminal = latestJobs.filter(function (j) {
+      return j.status === "succeeded" || j.status === "failed" || j.status === "cancelled";
+    });
+    if (terminal.length === 0) {
+      MK.flashError("当前没有可清除的已完成作业");
+      return;
+    }
+    if (!confirm("将删除全部 " + terminal.length + " 个已完成 / 失败 / 已取消的作业及其日志。\n\n此操作不可撤销。确定继续？")) {
+      return;
+    }
+    await MK.withBusy(btn, "清除中…", async function () {
+      try {
+        const resp = await MK.apiSend("POST", "/jobs/purge", null);
+        const n = (resp && typeof resp.deleted === "number") ? resp.deleted : terminal.length;
+        MK.flashSuccess("已清除 " + n + " 个作业");
+        tick();
+      } catch (err) {
+        MK.flashError("清除失败：" + err.message);
+      }
+    });
   }
 })();

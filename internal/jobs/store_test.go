@@ -354,6 +354,127 @@ func TestCancelTerminalRejected(t *testing.T) {
 	}
 }
 
+func TestDeleteTerminalAlsoRemovesLogs(t *testing.T) {
+	f := newFixture(t)
+	in := f.baseInput(t, '*')
+	j, _ := f.store.Create(context.Background(), in)
+	_, _ = f.store.Claim(context.Background(), j.ID)
+	if err := f.store.AppendLog(context.Background(), j.ID, "info", "hello"); err != nil {
+		t.Fatalf("AppendLog: %v", err)
+	}
+	_ = f.store.Succeed(context.Background(), j.ID)
+	if err := f.store.Delete(context.Background(), j.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := f.store.Get(context.Background(), j.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Get after Delete: want ErrNotFound, got %v", err)
+	}
+	logs, err := f.store.Logs(context.Background(), j.ID, 0, 100)
+	if err != nil {
+		t.Fatalf("Logs after Delete: %v", err)
+	}
+	if len(logs) != 0 {
+		t.Errorf("logs after Delete: got %d, want 0", len(logs))
+	}
+}
+
+func TestDeletePendingRejected(t *testing.T) {
+	f := newFixture(t)
+	in := f.baseInput(t, '?')
+	j, _ := f.store.Create(context.Background(), in)
+	if err := f.store.Delete(context.Background(), j.ID); !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("Delete pending: want ErrInvalidTransition, got %v", err)
+	}
+}
+
+func TestDeleteRunningRejected(t *testing.T) {
+	f := newFixture(t)
+	in := f.baseInput(t, '#')
+	j, _ := f.store.Create(context.Background(), in)
+	_, _ = f.store.Claim(context.Background(), j.ID)
+	if err := f.store.Delete(context.Background(), j.ID); !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("Delete running: want ErrInvalidTransition, got %v", err)
+	}
+}
+
+func TestDeleteAllTerminal(t *testing.T) {
+	f := newFixture(t)
+
+	// Seed: 1 succeeded, 1 failed, 1 cancelled, 1 pending, 1 running.
+	makeTerminal := func(n int, finisher func(string) error) string {
+		in := f.baseInput(t, n)
+		j, _ := f.store.Create(context.Background(), in)
+		_, _ = f.store.Claim(context.Background(), j.ID)
+		_ = f.store.AppendLog(context.Background(), j.ID, "info", "x")
+		if err := finisher(j.ID); err != nil {
+			t.Fatalf("finisher: %v", err)
+		}
+		return j.ID
+	}
+	makeTerminal('1', func(id string) error { return f.store.Succeed(context.Background(), id) })
+	makeTerminal('2', func(id string) error { return f.store.Fail(context.Background(), id, "boom") })
+	// cancel goes from pending, so a slightly different path:
+	inC := f.baseInput(t, '3')
+	jC, _ := f.store.Create(context.Background(), inC)
+	_ = f.store.Cancel(context.Background(), jC.ID)
+
+	// Pending job — survives.
+	inP := f.baseInput(t, '4')
+	jP, _ := f.store.Create(context.Background(), inP)
+
+	// Running job — survives.
+	inR := f.baseInput(t, '5')
+	jR, _ := f.store.Create(context.Background(), inR)
+	_, _ = f.store.Claim(context.Background(), jR.ID)
+	_ = f.store.AppendLog(context.Background(), jR.ID, "info", "still going")
+
+	n, err := f.store.DeleteAllTerminal(context.Background())
+	if err != nil {
+		t.Fatalf("DeleteAllTerminal: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("deleted=%d want 3", n)
+	}
+	// Pending + running remain.
+	all, _ := f.store.List(context.Background(), ListFilter{})
+	if len(all) != 2 {
+		t.Errorf("remaining=%d want 2", len(all))
+	}
+	for _, j := range all {
+		if j.Status != "pending" && j.Status != "running" {
+			t.Errorf("survivor status=%s", j.Status)
+		}
+	}
+	// Running job's logs preserved.
+	logs, _ := f.store.Logs(context.Background(), jR.ID, 0, 100)
+	if len(logs) != 1 {
+		t.Errorf("running logs=%d want 1", len(logs))
+	}
+	// And pending stayed reachable.
+	if _, err := f.store.Get(context.Background(), jP.ID); err != nil {
+		t.Errorf("pending Get: %v", err)
+	}
+}
+
+func TestDeleteAllTerminalEmpty(t *testing.T) {
+	f := newFixture(t)
+	n, err := f.store.DeleteAllTerminal(context.Background())
+	if err != nil {
+		t.Fatalf("DeleteAllTerminal empty: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("deleted=%d want 0", n)
+	}
+}
+
+func TestDeleteNotFound(t *testing.T) {
+	f := newFixture(t)
+	bogus := strings.Repeat("a", 32)
+	if err := f.store.Delete(context.Background(), bogus); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete nonexistent: want ErrNotFound, got %v", err)
+	}
+}
+
 func TestErrorMessageTruncated(t *testing.T) {
 	f := newFixture(t)
 	in := f.baseInput(t, '~')

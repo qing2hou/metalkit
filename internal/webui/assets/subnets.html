@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="metalkit-api-base" content="/api/v1">
+  <title>metalkit - 子网</title>
+  <link rel="stylesheet" href="/ui/assets/style.css">
+</head>
+<body data-page="subnets">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1 class="brand"><a href="/ui/">metalkit</a></h1>
+      <nav class="topnav">
+        <a href="/ui/">机器</a>
+        <a href="/ui/images">镜像</a>
+        <a href="/ui/subnets">子网</a>
+        <a href="/ui/profiles">配置</a>
+        <a href="/ui/bmc">BMC</a>
+        <a href="/ui/jobs">作业</a>
+      </nav>
+      <div class="topbar-actions">
+        <button id="new-subnet-btn" type="button" class="btn btn-primary">+ 新建子网</button>
+        <button id="refresh-btn" type="button" class="btn">刷新</button>
+        <span id="current-user" class="muted" title="当前登录用户"></span>
+        <button id="logout-btn" type="button" class="btn btn-ghost" title="退出登录">退出</button>
+      </div>
+    </div>
+  </header>
+  <main class="page">
+    <div id="error-banner" class="error-banner" hidden></div>
+    <section>
+      <div class="section-head">
+        <h2>子网</h2>
+        <span id="subnets-count" class="muted"></span>
+      </div>
+      <p class="muted">
+        子网捕获网段共享的 L3 参数（CIDR / 网关 / DNS / 可选 VLAN）。装机时选择子网即可，
+        无需为每台机器重复输入网关和 DNS；机器特有的 host IP 在装机弹窗里逐台填写。
+      </p>
+      <div id="subnets-loading" class="muted">加载中&hellip;</div>
+      <div id="subnets-empty" class="empty-state" hidden>
+        <p>暂无子网，点击 <strong>+ 新建子网</strong>。</p>
+      </div>
+      <div id="subnets-wrap" hidden>
+        <table id="subnets-table" class="data-table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>CIDR</th>
+              <th>网关</th>
+              <th>DNS</th>
+              <th>VLAN</th>
+              <th>描述</th>
+              <th>更新时间</th>
+              <th class="col-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody id="subnets-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <footer class="footer"><span class="muted">metalkit 运维控制台</span></footer>
+  <script src="/ui/assets/common.js" defer></script>
+  <script src="/ui/assets/subnets.js" defer></script>
+</body>
+</html>

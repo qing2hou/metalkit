@@ -32,20 +32,47 @@ var ErrDuplicateName = errors.New("profiles: duplicate name")
 type Store struct {
 	db     *sql.DB
 	logger *slog.Logger
+	// defaultRootPasswordHash is the $6$ sha512crypt hash of the cluster's
+	// default root password (see config.DefaultRootPassword). Filled in for
+	// any Create where the operator left RootPasswordHash blank — keeps the
+	// "fast path" profile creation flow from forcing operators through the
+	// hashing dance for a value that will be the same across most profiles.
+	// Empty string is allowed (legacy callers / tests); Create then falls
+	// back to strict validation and rejects empty input as before.
+	defaultRootPasswordHash string
 }
 
-// NewStore applies the profiles schema and returns a Store.
-func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger) (*Store, error) {
+// NewStore applies the profiles schema and returns a Store. defaultRootHash
+// (optional) is used to backfill CreateInput.RootPasswordHash when blank.
+func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger, defaultRootHash string) (*Store, error) {
 	if db == nil {
 		return nil, errors.New("profiles: db is required")
 	}
 	if logger == nil {
 		return nil, errors.New("profiles: logger is required")
 	}
+	if defaultRootHash != "" && !sha512cryptRE.MatchString(defaultRootHash) {
+		return nil, fmt.Errorf("profiles: default root password hash is not $6$ sha512crypt")
+	}
 	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
 		return nil, fmt.Errorf("apply profiles schema: %w", err)
 	}
-	return &Store{db: db, logger: logger}, nil
+	// Run idempotent column-additions for pre-existing DBs. SQLite has no
+	// IF NOT EXISTS on ADD COLUMN; we execute each ALTER on its own and
+	// tolerate "duplicate column" individually (combining them into one
+	// multi-statement Exec would skip later statements when an earlier one
+	// errors, leaving newer columns un-added on partially-migrated DBs).
+	for _, stmt := range strings.Split(migrationSQL, ";") {
+		s := strings.TrimSpace(stmt)
+		if s == "" {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, s); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			return nil, fmt.Errorf("apply profiles migration: %w", err)
+		}
+	}
+	return &Store{db: db, logger: logger, defaultRootPasswordHash: defaultRootHash}, nil
 }
 
 // Profile is the public, JSON-friendly record. TargetDisk and Network are
@@ -58,6 +85,11 @@ type Profile struct {
 	RootPasswordHash string        `json:"root_password_hash"`
 	TargetDisk       TargetDisk    `json:"target_disk"`
 	Network          NetworkConfig `json:"network"`
+	OSFamily         string        `json:"os_family"`
+	// SubnetID optionally references a subnets row that supplies CIDR /
+	// gateway / DNS / VLAN defaults for any binding that uses this profile.
+	// Empty string = no default subnet. Bindings can still override.
+	SubnetID         string        `json:"subnet_id,omitempty"`
 	CreatedAt        time.Time     `json:"created_at"`
 	UpdatedAt        time.Time     `json:"updated_at"`
 	CreatedBy        string        `json:"created_by"`
@@ -72,6 +104,8 @@ type CreateInput struct {
 	RootPasswordHash string          `json:"root_password_hash"`
 	TargetDisk       json.RawMessage `json:"target_disk"`
 	Network          json.RawMessage `json:"network"`
+	OSFamily         string          `json:"os_family,omitempty"`
+	SubnetID         string          `json:"subnet_id,omitempty"`
 	CreatedBy        string          `json:"-"` // injected by handler
 }
 
@@ -84,6 +118,10 @@ type UpdateInput struct {
 	RootPasswordHash *string         `json:"root_password_hash,omitempty"`
 	TargetDisk       json.RawMessage `json:"target_disk,omitempty"`
 	Network          json.RawMessage `json:"network,omitempty"`
+	OSFamily         *string         `json:"os_family,omitempty"`
+	// SubnetID is three-state via *string: nil = unchanged, "" = clear,
+	// non-empty = set.
+	SubnetID         *string         `json:"subnet_id,omitempty"`
 }
 
 // Create validates input and inserts a new profile row.
@@ -102,6 +140,9 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Profile, error) {
 	if err := validateHostnameTemplate(in.HostnameTemplate); err != nil {
 		return nil, err
 	}
+	if in.RootPasswordHash == "" && s.defaultRootPasswordHash != "" {
+		in.RootPasswordHash = s.defaultRootPasswordHash
+	}
 	if !sha512cryptRE.MatchString(in.RootPasswordHash) {
 		return nil, errors.New("root_password_hash: must be $6$... sha512crypt (use `mkpasswd -m sha-512` or equivalent)")
 	}
@@ -109,7 +150,17 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Profile, error) {
 	if err != nil {
 		return nil, err
 	}
-	nc, err := validateNetwork(in.Network)
+	if err := ValidateOSFamily(in.OSFamily); err != nil {
+		return nil, err
+	}
+	osFamily := CanonicalOSFamily(in.OSFamily)
+	subnetID, err := validateSubnetID(in.SubnetID)
+	if err != nil {
+		return nil, err
+	}
+	// validateNetwork needs to know whether a subnet is in play so it can
+	// skip strict checks on CIDR/gateway/DNS/VLAN (subnet supplies them).
+	nc, err := validateNetwork(in.Network, subnetID != "")
 	if err != nil {
 		return nil, err
 	}
@@ -129,10 +180,11 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Profile, error) {
 	_, err = s.db.ExecContext(ctx, `
         INSERT INTO profiles
             (id, name, description, hostname_template, root_password_hash,
-             target_disk_json, network_json, created_at, updated_at, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             target_disk_json, network_json, os_family, subnet_id,
+             created_at, updated_at, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, in.Name, in.Description, in.HostnameTemplate, in.RootPasswordHash,
-		string(tdBlob), string(ncBlob), now, now, in.CreatedBy,
+		string(tdBlob), string(ncBlob), osFamily, subnetID, now, now, in.CreatedBy,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -149,6 +201,8 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Profile, error) {
 		RootPasswordHash: in.RootPasswordHash,
 		TargetDisk:       td,
 		Network:          nc,
+		OSFamily:         osFamily,
+		SubnetID:         subnetID,
 		CreatedAt:        time.Unix(now, 0).UTC(),
 		UpdatedAt:        time.Unix(now, 0).UTC(),
 		CreatedBy:        in.CreatedBy,
@@ -161,15 +215,18 @@ func (s *Store) Get(ctx context.Context, id string) (*Profile, error) {
 		p           Profile
 		description sql.NullString
 		tdBlob, ncBlob string
+		osFamily    sql.NullString
+		subnetID    sql.NullString
 		createdAt, updatedAt int64
 	)
 	err := s.db.QueryRowContext(ctx, `
         SELECT id, name, COALESCE(description,''), hostname_template,
                root_password_hash, target_disk_json, network_json,
+               COALESCE(os_family,'any'), COALESCE(subnet_id,''),
                created_at, updated_at, created_by
         FROM profiles WHERE id = ?`, id).Scan(
 		&p.ID, &p.Name, &description, &p.HostnameTemplate, &p.RootPasswordHash,
-		&tdBlob, &ncBlob, &createdAt, &updatedAt, &p.CreatedBy,
+		&tdBlob, &ncBlob, &osFamily, &subnetID, &createdAt, &updatedAt, &p.CreatedBy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -184,6 +241,8 @@ func (s *Store) Get(ctx context.Context, id string) (*Profile, error) {
 	if err := json.Unmarshal([]byte(ncBlob), &p.Network); err != nil {
 		return nil, fmt.Errorf("decode network for %s: %w", id, err)
 	}
+	p.OSFamily = CanonicalOSFamily(osFamily.String)
+	p.SubnetID = subnetID.String
 	p.CreatedAt = time.Unix(createdAt, 0).UTC()
 	p.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 	return &p, nil
@@ -194,6 +253,7 @@ func (s *Store) List(ctx context.Context) ([]Profile, error) {
 	rows, err := s.db.QueryContext(ctx, `
         SELECT id, name, COALESCE(description,''), hostname_template,
                root_password_hash, target_disk_json, network_json,
+               COALESCE(os_family,'any'), COALESCE(subnet_id,''),
                created_at, updated_at, created_by
         FROM profiles
         ORDER BY created_at DESC, id DESC`)
@@ -208,10 +268,12 @@ func (s *Store) List(ctx context.Context) ([]Profile, error) {
 			p              Profile
 			description    sql.NullString
 			tdBlob, ncBlob string
+			osFamily       sql.NullString
+			subnetID       sql.NullString
 			createdAt, updatedAt int64
 		)
 		if err := rows.Scan(&p.ID, &p.Name, &description, &p.HostnameTemplate, &p.RootPasswordHash,
-			&tdBlob, &ncBlob, &createdAt, &updatedAt, &p.CreatedBy); err != nil {
+			&tdBlob, &ncBlob, &osFamily, &subnetID, &createdAt, &updatedAt, &p.CreatedBy); err != nil {
 			return nil, fmt.Errorf("scan profile: %w", err)
 		}
 		p.Description = description.String
@@ -221,6 +283,8 @@ func (s *Store) List(ctx context.Context) ([]Profile, error) {
 		if err := json.Unmarshal([]byte(ncBlob), &p.Network); err != nil {
 			return nil, fmt.Errorf("decode network for %s: %w", p.ID, err)
 		}
+		p.OSFamily = CanonicalOSFamily(osFamily.String)
+		p.SubnetID = subnetID.String
 		p.CreatedAt = time.Unix(createdAt, 0).UTC()
 		p.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 		out = append(out, p)
@@ -264,12 +328,36 @@ func (s *Store) Update(ctx context.Context, id string, in UpdateInput) (*Profile
 		}
 		cur.TargetDisk = td
 	}
+	// Resolve effective subnet_id BEFORE validating the network blob, since
+	// validateNetwork needs to know whether subnet is supplying CIDR/gateway/
+	// DNS/VLAN (and should skip strict checks on those fields when so).
+	if in.SubnetID != nil {
+		sid, err := validateSubnetID(*in.SubnetID)
+		if err != nil {
+			return nil, err
+		}
+		cur.SubnetID = sid
+	}
 	if len(in.Network) > 0 {
-		nc, err := validateNetwork(in.Network)
+		nc, err := validateNetwork(in.Network, cur.SubnetID != "")
 		if err != nil {
 			return nil, err
 		}
 		cur.Network = nc
+	} else if in.SubnetID != nil && cur.SubnetID != "" {
+		// Network not changing this PUT, but subnet just got set/changed.
+		// Re-canonicalise the stored network blob so any previously-set
+		// static fields / VLAN get stripped (subnet now supplies them).
+		cur.Network.PrefixLen = 0
+		cur.Network.Gateway = ""
+		cur.Network.DNS = nil
+		cur.Network.VLAN = 0
+	}
+	if in.OSFamily != nil {
+		if err := ValidateOSFamily(*in.OSFamily); err != nil {
+			return nil, err
+		}
+		cur.OSFamily = CanonicalOSFamily(*in.OSFamily)
 	}
 
 	tdBlob, _ := json.Marshal(cur.TargetDisk)
@@ -279,10 +367,11 @@ func (s *Store) Update(ctx context.Context, id string, in UpdateInput) (*Profile
 	_, err = s.db.ExecContext(ctx, `
         UPDATE profiles
         SET description = ?, hostname_template = ?, root_password_hash = ?,
-            target_disk_json = ?, network_json = ?, updated_at = ?
+            target_disk_json = ?, network_json = ?, os_family = ?,
+            subnet_id = ?, updated_at = ?
         WHERE id = ?`,
 		cur.Description, cur.HostnameTemplate, cur.RootPasswordHash,
-		string(tdBlob), string(ncBlob), now, id,
+		string(tdBlob), string(ncBlob), cur.OSFamily, cur.SubnetID, now, id,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update profile: %w", err)

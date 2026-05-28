@@ -23,7 +23,7 @@ func TestValidateNetwork_DHCPAuto(t *testing.T) {
 	nc, err := validateNetwork(ncJSON(t, map[string]any{
 		"method":       "dhcp",
 		"nic_selector": "auto",
-	}))
+	}), false)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestValidateNetwork_StaticByMAC(t *testing.T) {
 		"gateway":      "10.0.0.1",
 		"dns":          []string{"8.8.8.8", "1.1.1.1"},
 		"nic_selector": "by-mac:AA:BB:CC:DD:EE:FF",
-	}))
+	}), false)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestValidateNetwork_BondActiveBackup(t *testing.T) {
 			},
 			"primary": "eno1",
 		},
-	}))
+	}), false)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestValidateNetwork_BondLACPDefaults(t *testing.T) {
 				"eno2",
 			},
 		},
-	}))
+	}), false)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestValidateNetwork_BondErrors(t *testing.T) {
 				"method":       "dhcp",
 				"nic_selector": "auto",
 				"bond":         tc.bond,
-			}))
+			}), false)
 			if err == nil {
 				t.Fatalf("want error containing %q, got nil", tc.wants)
 			}

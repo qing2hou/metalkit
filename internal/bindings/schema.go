@@ -33,8 +33,24 @@ CREATE INDEX IF NOT EXISTS idx_bindings_profile_id ON bindings(profile_id);
 
 // migrations runs idempotent ALTERs for columns added after the initial
 // schema. SQLite errors on duplicate column add — we swallow that one.
+//
+// subnet_id (M2.3-12) decouples per-machine network params (gateway, DNS,
+// VLAN) from the install profile. When set, the agent renders network
+// config from the referenced subnets row, not from profile.network. The
+// binding's existing static_address is reinterpreted as the host IP inside
+// the chosen subnet. vlan_override (0 = use subnet's VLAN as-is, 1..4094 =
+// per-binding tag) covers the edge case of one host needing a different tag
+// than the rest of the subnet.
 var migrations = []string{
 	`ALTER TABLE bindings ADD COLUMN root_password_enc BLOB`,
 	`ALTER TABLE bindings ADD COLUMN target_disk_override TEXT`,
 	`ALTER TABLE bindings ADD COLUMN bond_override TEXT`,
+	`ALTER TABLE bindings ADD COLUMN subnet_id TEXT`,
+	`ALTER TABLE bindings ADD COLUMN vlan_override INTEGER`,
+	`CREATE INDEX IF NOT EXISTS idx_bindings_subnet_id ON bindings(subnet_id)`,
+	// nic_selector_override (per-binding override of profile.network.nic_selector).
+	// Empty / NULL = inherit profile. Same one-shot semantics as bond_override and
+	// vlan_override: install modal becomes the source of truth, operator picks the
+	// concrete physical NIC by MAC at install time.
+	`ALTER TABLE bindings ADD COLUMN nic_selector_override TEXT`,
 }

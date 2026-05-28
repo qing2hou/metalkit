@@ -93,7 +93,11 @@ func GrowLastPartition(ctx context.Context, deps Deps, devPath string) (GrowResu
 // rootPartitionOf enumerates partitions on devPath via lsblk and probes
 // each with blkid (in reverse numeric order) to find the rootfs candidate.
 // Returns (partition device path, FS type). See the file header for why
-// reverse-iteration with FS filtering beats "last partition".
+// reverse-iteration with FS filtering beats "last partition", AND why
+// LABEL inspection beats reverse-iteration on Ubuntu 24.04+ images that
+// carry a separate /boot partition (LABEL=BOOT) — its ext4 fs would
+// otherwise outrank the real root partition (LABEL=cloudimg-rootfs)
+// purely because BOOT is numbered higher (e.g. sdc16 vs sdc1).
 func rootPartitionOf(ctx context.Context, deps Deps, devPath string) (string, string, error) {
 	out, err := deps.Exec.Run(ctx, "lsblk", "-lnpo", "NAME,TYPE", devPath)
 	if err != nil {
@@ -110,22 +114,85 @@ func rootPartitionOf(ctx context.Context, deps Deps, devPath string) (string, st
 	if len(parts) == 0 {
 		return "", "", fmt.Errorf("install: no partitions on %s", devPath)
 	}
-	// Reverse iteration: prefer the highest-numbered partition with a
-	// growable rootfs FS. Stubs (BIOS-boot) have no FS so blkid errors;
-	// vfat/swap/iso9660 are non-rootfs and skipped.
-	for i := len(parts) - 1; i >= 0; i-- {
-		out, err := deps.Exec.Run(ctx, "blkid", "-o", "value", "-s", "TYPE", parts[i])
+
+	// Pass 1: collect every partition whose blkid TYPE is a real Linux fs.
+	type cand struct {
+		dev   string
+		fs    string
+		label string
+	}
+	var cands []cand
+	for _, p := range parts {
+		typeOut, err := deps.Exec.Run(ctx, "blkid", "-o", "value", "-s", "TYPE", p)
 		if err != nil {
 			continue
 		}
-		fs := strings.TrimSpace(string(out))
+		fs := strings.TrimSpace(string(typeOut))
 		switch fs {
 		case "", "vfat", "swap", "iso9660", "linux_raid_member", "LVM2_member":
 			continue
 		}
-		return parts[i], fs, nil
+		labelOut, _ := deps.Exec.Run(ctx, "blkid", "-o", "value", "-s", "LABEL", p)
+		cands = append(cands, cand{
+			dev:   p,
+			fs:    fs,
+			label: strings.TrimSpace(string(labelOut)),
+		})
 	}
-	return "", "", fmt.Errorf("install: no rootfs candidate partition on %s", devPath)
+	if len(cands) == 0 {
+		return "", "", fmt.Errorf("install: no rootfs candidate partition on %s", devPath)
+	}
+
+	// Pass 2: prefer candidates whose LABEL clearly identifies them as
+	// rootfs (cloudimg-rootfs, *-rootfs, root, *_root). Penalise labels
+	// that clearly identify them as a non-root system partition (BOOT,
+	// EFI, ESP). This is what disambiguates Noble's sdc1 from sdc16.
+	for _, c := range cands {
+		if isRootLabel(c.label) {
+			return c.dev, c.fs, nil
+		}
+	}
+	// No positive root label found. Fall back to the original reverse-
+	// numeric scan, BUT skip candidates whose label screams "not root"
+	// (BOOT/EFI/ESP). This keeps backward compat on Jammy/RHEL/CentOS
+	// images that don't bother labelling root, while still avoiding the
+	// Noble trap when the image happens to label BOOT but not root.
+	for i := len(cands) - 1; i >= 0; i-- {
+		if isAntiRootLabel(cands[i].label) {
+			continue
+		}
+		return cands[i].dev, cands[i].fs, nil
+	}
+	// Every candidate had an anti-root label — last resort, just return
+	// the highest-numbered one and let install fail loudly downstream
+	// rather than picking the wrong partition silently.
+	last := cands[len(cands)-1]
+	return last.dev, last.fs, nil
+}
+
+// isRootLabel reports whether a blkid LABEL clearly identifies a
+// partition as the rootfs of a Linux distro image. Match is
+// case-insensitive and based on the labels real-world cloud images use.
+func isRootLabel(label string) bool {
+	l := strings.ToLower(label)
+	switch l {
+	case "cloudimg-rootfs", "rootfs", "root", "_root":
+		return true
+	}
+	return strings.HasSuffix(l, "-rootfs") ||
+		strings.HasSuffix(l, "_root") ||
+		strings.HasPrefix(l, "cloudimg-")
+}
+
+// isAntiRootLabel reports whether a blkid LABEL identifies a partition
+// that definitely is NOT the rootfs (a separate /boot, ESP, or EFI
+// system partition labelled at image build time).
+func isAntiRootLabel(label string) bool {
+	switch strings.ToUpper(label) {
+	case "BOOT", "EFI", "ESP", "UEFI":
+		return true
+	}
+	return false
 }
 
 // PartitionNumber returns the partition number embedded in partDev given

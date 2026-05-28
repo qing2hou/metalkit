@@ -7,9 +7,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
+	"testing"
 	"time"
 )
 
@@ -168,6 +170,21 @@ func (m *mockFS) Exists(path string) bool {
 	return ok
 }
 
+func (m *mockFS) Symlink(oldname, newname string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.files[newname] = []byte("symlink:" + oldname)
+	m.dirs[filepath.Dir(newname)] = true
+	return nil
+}
+
+func (m *mockFS) Remove(path string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.files, path)
+	return nil
+}
+
 type mockFileInfo struct {
 	name  string
 	size  int64
@@ -265,5 +282,10 @@ type errReader struct {
 }
 
 func (e errReader) Read(_ []byte) (int, error)   { return 0, e.err }
+
+func testLogger(t *testing.T) *slog.Logger {
+	t.Helper()
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 var _ = errors.New // keep errors imported for future use

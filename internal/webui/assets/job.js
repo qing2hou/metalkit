@@ -15,8 +15,8 @@
 (function () {
   "use strict";
 
-  const POLL_RUNNING_MS = 1000;
-  const POLL_TERMINAL_MS = 5000;
+  const POLL_RUNNING_MS = MK.POLL.JOB_RUNNING_MS;
+  const POLL_TERMINAL_MS = MK.POLL.JOB_TERMINAL_MS;
   const LOG_PAGE_LIMIT = 500;
 
   // Authoritative stage sequence for the timeline. Mirrors installer pipeline.
@@ -47,6 +47,8 @@
       followTail = !!e.target.checked;
       if (followTail) scrollToBottom();
     });
+    const dl = document.getElementById("job-download-log");
+    if (dl) dl.addEventListener("click", function () { downloadLogs(dl); });
 
     tick(true);
     document.addEventListener("visibilitychange", function () {
@@ -229,15 +231,19 @@
     const actions = document.getElementById("job-actions");
     const cancelBtn = document.getElementById("cancel-btn");
     const retryBtn = document.getElementById("retry-btn");
+    const deleteBtn = document.getElementById("delete-btn");
     const canCancel = j.status === "pending" || j.status === "running";
     const canRetry = j.status === "failed" || j.status === "cancelled";
+    const canDelete = TERMINAL.has(j.status);
     cancelBtn.hidden = !canCancel;
     retryBtn.hidden = !canRetry;
-    actions.hidden = !(canCancel || canRetry);
+    if (deleteBtn) deleteBtn.hidden = !canDelete;
+    actions.hidden = !(canCancel || canRetry || canDelete);
 
     // Re-attach to avoid double-fires across renders.
     cancelBtn.onclick = function () { cancelJob(j); };
     retryBtn.onclick = function () { retryJob(j); };
+    if (deleteBtn) deleteBtn.onclick = function () { deleteJob(j); };
   }
 
   function appendLogs(lines) {
@@ -292,6 +298,30 @@
 
   // ---- actions --------------------------------------------------------
 
+  async function downloadLogs(btn) {
+    await MK.withBusy(btn, "导出中…", async function () {
+      try {
+        const lines = await MK.apiGet("/jobs/" + encodeURIComponent(jobID) + "/logs");
+        const arr = Array.isArray(lines) ? lines.slice() : [];
+        arr.sort(function (a, b) { return (a.id || 0) - (b.id || 0); });
+        const text = arr.map(function (ln) {
+          return (ln.ts || "") + "  [" + (ln.level || "info") + "]  " + (ln.message || "");
+        }).join("\n") + (arr.length ? "\n" : "");
+        const blob = new Blob([text], { type: "text/plain" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "job-" + jobID + ".log";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        MK.flashError("导出日志失败：" + err.message);
+      }
+    });
+  }
+
   async function cancelJob(j) {
     if (!confirm("取消作业 " + (j.id || "").slice(0, 8) + "？\n\nagent 会在下一个安全断点停止。")) return;
     try {
@@ -300,6 +330,18 @@
       tick(true);
     } catch (err) {
       MK.flashError("取消失败：" + err.message);
+    }
+  }
+
+  async function deleteJob(j) {
+    if (!confirm("删除作业 " + (j.id || "").slice(0, 8) + " 及其所有日志？此操作不可撤销。")) return;
+    try {
+      await MK.apiSend("DELETE", "/jobs/" + encodeURIComponent(j.id), null);
+      MK.flashSuccess("已删除作业 " + (j.id || "").slice(0, 8));
+      // Job no longer exists — go back to the list.
+      setTimeout(function () { window.location.href = "/ui/jobs"; }, 600);
+    } catch (err) {
+      MK.flashError("删除失败：" + err.message);
     }
   }
 

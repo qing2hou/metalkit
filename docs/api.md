@@ -1,4 +1,4 @@
-# metalkit Inventory & Images & Profiles & BMC API（M2.1 / M2.2 / M2.3）
+# metalkit Inventory & Images & Profiles & Subnets & BMC API（M2.1 / M2.2 / M2.3）
 
 机内 agent 和 Web UI 之间共享的 HTTP API 参考。base URL 是 controller 的
 `http://<serverIP>:<httpPort>`（例：`http://192.168.10.147:8080`）。
@@ -943,4 +943,101 @@ curl -b /tmp/cj http://192.168.10.147:8080/api/v1/auth/me
   （session_id 也只截前 8 位作摘要）
 - 安全模型：M2 内网 HTTP + 单 admin 帐号 + SameSite=Strict 已足够；
   CSRF token / rate limit / 多用户 / SSO 都推到 M3+
+
+## 17. 子网 API（M2.3-12 新增）
+
+base 路径 `/api/v1/subnets*`，**整个子树 Basic Auth / cookie**。Subnet = 一个 IPv4 网段
+的运维登记：CIDR、网关、DNS、可选 VLAN。装机时 binding 选一个 subnet + 填一个 host_ip（在
+该 subnet 范围内），controller 据此渲染 cloud-init 网络配置，免去每台机器重复填 gateway /
+DNS / VLAN。
+
+Subnet 是**纯目录数据**——这里不实际参与 IP 分配，也不维护「哪些 IP 已用」。bindings 表
+保留 host_ip 字段；冲突由后端校验时按 bindings 表查重。
+
+### 17.1 schema
+
+```json
+{
+  "id":          "<32 hex>",
+  "name":        "lab-net-10",
+  "description": "host147 实验网段",
+  "cidr":        "192.168.10.0/24",
+  "gateway":     "192.168.10.1",
+  "dns":         ["8.8.8.8", "1.1.1.1"],
+  "vlan_id":     0,
+  "created_at":  "2026-05-27T03:00:00Z",
+  "updated_at":  "2026-05-27T03:00:00Z",
+  "created_by":  "admin",
+  "updated_by":  "admin"
+}
+```
+
+字段校验摘要（细节见 `internal/subnets/validate.go`）：
+
+- `name`：唯一；`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`
+- `cidr`：IPv4 only；接收非规范输入并入库前规范化（`192.168.10.5/24` → `192.168.10.0/24`）
+- `gateway`：必填；IPv4；必须落在 `cidr` 范围内；不能等于网络号 / 广播号（/31、/32 例外）
+- `dns[]`：可选；每项 IPv4；自动去重
+- `vlan_id`：`0` 表示不打 VLAN tag；其它范围 `1..4094`
+- `description`：可选；≤ 256 字符
+
+### 17.2 端点
+
+```
+GET    /api/v1/subnets           → [Subnet, ...]，按 created_at DESC
+POST   /api/v1/subnets           → 创建；201 Subnet / 400 校验失败 / 409 duplicate name
+GET    /api/v1/subnets/{id}      → Subnet / 404
+PUT    /api/v1/subnets/{id}      → 部分更新（name 不可改）；200 Subnet / 400 / 404
+DELETE /api/v1/subnets/{id}      → 204 / 404
+```
+
+错误响应同 §5。
+
+### 17.3 部分更新规则
+
+PUT 接受所有 POST 字段（除 `name` 不可改），未给的字段保持不变。`cidr` 变更时 `gateway`
+会被重新校验是否仍在新 CIDR 范围内；任何字段失败整个请求 400。
+
+### 17.4 注意事项
+
+- subnet DELETE：当任何 binding 仍指向此 subnet 时返回 422 `subnet still in use by N
+  binding(s)`，操作员需先把这些 binding 改到别的 subnet 或清空 subnet_id 再删。FK 的
+  ON DELETE RESTRICT 留到 M3 schema 大改时一起做。
+- IPAM 自动分配仍不在范围内（M2 决议 B8）；M2 内 host_ip 由 admin 在 binding 表里手填。
+- 802.1Q VLAN tag 由 agent 在 cloud-init network-config 里直接渲染为 `vlans:` 子项，目标
+  机的网卡驱动必须支持（绝大多数 ixgbe / igb / bnxt / mlx5 都行）。
+
+## 18. Binding 上的 subnet_id 和 vlan_override（M2.3-12 phase ② 新增）
+
+binding 表新增两个字段，让操作员在不改 profile 的前提下：(a) 把机器绑到一个 subnet，
+继承 CIDR/gateway/DNS/vlan；(b) 用 VLAN 覆盖在 subnet 上叠一个不同的 tag（例如同 subnet
+但走管理 VLAN）。
+
+### 18.1 schema 增量
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `subnet_id` | string，32 hex，可空 | 指向 `/api/v1/subnets/{id}`；空 = 不绑定（沿用旧 profile.network 路径） |
+| `vlan_override` | int，0 或 1..4094，可空 | 0 / 省略 = 沿用 `subnet.vlan_id`；1..4094 = 强制覆盖 |
+
+PUT `/api/v1/bindings/{uuid}` 接受这两个字段（与现有 subnet_id 三态语义一致）：
+- 省略 → 保留旧值
+- `""` / `0` → 显式清空（NULL）
+- 合法值 → 校验后写入
+
+### 18.2 校验规则
+
+- 设 `subnet_id` 时必须同时设 `static_address`（否则 422 `static_address: required when
+  subnet_id is set`）—— subnet 没有 host IP 的话没法落地。
+- `static_address` 必须在 `subnet.cidr` 范围内，不可等于 `subnet.gateway`、网络号或广播地址
+  （422，附错误码细节）。
+- `subnet_id` 必须命中现存的 subnet 行，否则 422 `bindings: subnet_id not in catalog`。
+- `vlan_override` 不在 [1,4094] 报 400。
+
+### 18.3 一次性迁移
+
+controller 启动时会跑一次 `migrateBindingSubnets`：对所有 `static_address IS NOT NULL
+AND subnet_id IS NULL` 的 binding，按 profile.network 的 prefix_len/gateway/dns 算出
+CIDR，find-or-create 一个 `auto-<cidr_slug>` 命名的 subnet 行，把 binding 指过去。
+幂等，每次启动安全重跑。日志关键字 `subnet migration complete`。
 

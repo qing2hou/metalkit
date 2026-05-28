@@ -16,6 +16,8 @@ import (
 //   GET    /api/v1/jobs/{id}                  one
 //   GET    /api/v1/jobs/{id}/logs             logs (?since_id= ?limit=)
 //   POST   /api/v1/jobs/{id}/cancel           cancel a pending/running job
+//   DELETE /api/v1/jobs/{id}                  delete a terminal job + its logs
+//   POST   /api/v1/jobs/purge                 delete all terminal jobs + their logs
 //
 // Agent-facing endpoints (claim, append log, update stage, succeed/fail) live
 // under /api/v1/agent/jobs/* and are mounted by a separate handler (M2.3-6) so
@@ -38,6 +40,8 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/jobs/{id}", a.get)
 	mux.HandleFunc("GET /api/v1/jobs/{id}/logs", a.logs)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", a.cancel)
+	mux.HandleFunc("DELETE /api/v1/jobs/{id}", a.delete)
+	mux.HandleFunc("POST /api/v1/jobs/purge", a.purge)
 }
 
 func (a *API) list(w http.ResponseWriter, r *http.Request) {
@@ -143,6 +147,41 @@ func (a *API) cancel(w http.ResponseWriter, r *http.Request) {
 	// Record who cancelled so operators can trace it in the logs.
 	_ = a.store.AppendLog(r.Context(), id, "info", fmt.Sprintf("cancelled by %s", basicAuthUser(r)))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) delete(w http.ResponseWriter, r *http.Request) {
+	id := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	err := a.store.Delete(r.Context(), id)
+	if errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if errors.Is(err, ErrInvalidTransition) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err != nil {
+		if strings.Contains(err.Error(), "job_id") {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		a.logger.Error("delete job", "err", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "delete failed")
+		return
+	}
+	a.logger.Info("job deleted", "id", id, "actor", basicAuthUser(r))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) purge(w http.ResponseWriter, r *http.Request) {
+	n, err := a.store.DeleteAllTerminal(r.Context())
+	if err != nil {
+		a.logger.Error("purge jobs", "err", err)
+		writeError(w, http.StatusInternalServerError, "purge failed")
+		return
+	}
+	a.logger.Info("jobs purged", "count", n, "actor", basicAuthUser(r))
+	writeJSON(w, http.StatusOK, map[string]int{"deleted": n})
 }
 
 // ---- helpers ----

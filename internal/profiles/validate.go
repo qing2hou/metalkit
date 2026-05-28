@@ -14,6 +14,10 @@ import (
 var (
 	profileIDRE   = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	profileNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	// subnetIDRE mirrors the bindings package: 32 lowercase hex chars.
+	// Existence in the subnets catalog is NOT checked here — that's a
+	// follow-up at install time / by the install modal UI.
+	subnetIDRE    = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 	// hostnameTemplateRE accepts RFC-1123 label characters plus the placeholder
 	// syntax `{serial}`, `{uuid8}`, `{mac}`. Each label between dots must start
@@ -33,7 +37,49 @@ var (
 	validDiskModes = map[string]bool{
 		"smallest": true, "by-path": true, "by-wwn": true, "by-model": true,
 	}
+
+	// validOSFamilies is the closed set accepted by os_family.
+	// "any" = profile is OS-agnostic (compat check skipped).
+	// Specific values must match Image.Family on the chosen image.
+	validOSFamilies = map[string]bool{
+		"any": true, "ubuntu": true, "debian": true, "rhel": true, "rhel7": true,
+	}
 )
+
+// ValidateOSFamily returns nil if s is a recognised os_family value (case-
+// insensitive). Empty string is accepted and treated as "any" by callers.
+func ValidateOSFamily(s string) error {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return nil
+	}
+	if !validOSFamilies[s] {
+		return fmt.Errorf("os_family %q: must be one of any/ubuntu/debian/rhel/rhel7", s)
+	}
+	return nil
+}
+
+// CanonicalOSFamily normalises empty → "any" and lowercases.
+func CanonicalOSFamily(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return "any"
+	}
+	return s
+}
+
+// validateSubnetID accepts empty string (= no default subnet) or a 32-hex
+// subnet ID. Existence in the subnets catalog is not verified here.
+func validateSubnetID(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	if !subnetIDRE.MatchString(s) {
+		return "", fmt.Errorf("subnet_id %q: must be 32 lowercase hex chars (or empty)", s)
+	}
+	return s, nil
+}
 
 // Maximum lengths enforced at the API boundary.
 const (
@@ -79,12 +125,12 @@ type NetworkConfig struct {
 // port-channel; metalkit does not configure the switch, that's on the
 // operator per plan §F6).
 //
-// Slaves is the list of two-or-more underlying NIC interface names (e.g.
-// "eno1", "eno2"). At install time the agent resolves each name to its MAC
-// on the live system and emits a match.macaddress block in netplan; if the
-// NIC list is unavailable it falls back to match.name. Using names keeps the
-// profile template portable across machines — the same "eno1+eno2" bond
-// profile works on any machine that has those interfaces.
+// Slaves is the list of two-or-more underlying NIC specifiers — either
+// interface names (e.g. "eno1", "eth0") or, recommended, raw MAC addresses
+// (e.g. "24:6e:96:4f:f8:f0"). MAC addresses are portable across server
+// brands, NIC models, boot modes, and OS naming conventions. Interface
+// names are resolved to MACs on the live system at install time via the
+// agent NIC list; a MAC literal skips that resolution step entirely.
 type BondConfig struct {
 	Mode           string   `json:"mode"`                       // active-backup | 802.3ad
 	Slaves         []string `json:"slaves"`                     // 2..8 interface names
@@ -164,8 +210,12 @@ func validateTargetDisk(raw json.RawMessage) (TargetDisk, error) {
 	return td, nil
 }
 
-// validateNetwork parses+validates the JSON network template.
-func validateNetwork(raw json.RawMessage) (NetworkConfig, error) {
+// validateNetwork parses+validates the JSON network template. hasSubnet=true
+// means the enclosing profile has a default subnet — CIDR / gateway / DNS /
+// VLAN come from that subnet, so the profile's static-network fields are not
+// authoritative and we both skip strict validation and strip them so the
+// persisted blob doesn't carry stale duplicates.
+func validateNetwork(raw json.RawMessage, hasSubnet bool) (NetworkConfig, error) {
 	var nc NetworkConfig
 	if len(raw) == 0 {
 		return nc, errors.New("network is required")
@@ -176,6 +226,13 @@ func validateNetwork(raw json.RawMessage) (NetworkConfig, error) {
 	nc.Method = strings.ToLower(strings.TrimSpace(nc.Method))
 	switch nc.Method {
 	case "static":
+		if hasSubnet {
+			// Subnet supplies these — drop whatever the client sent.
+			nc.PrefixLen = 0
+			nc.Gateway = ""
+			nc.DNS = nil
+			break
+		}
 		if nc.PrefixLen < 1 || nc.PrefixLen > 32 {
 			return nc, fmt.Errorf("network.prefix_len %d: must be 1..32", nc.PrefixLen)
 		}
@@ -204,7 +261,12 @@ func validateNetwork(raw json.RawMessage) (NetworkConfig, error) {
 	if err := validateNICSelector(nc.NICSelector); err != nil {
 		return nc, err
 	}
-	if nc.VLAN != 0 && (nc.VLAN < 1 || nc.VLAN > 4094) {
+	if hasSubnet {
+		// VLAN, like the static fields, comes from subnet.vlan_id when a
+		// subnet is set. Drop any value the client passed so the persisted
+		// blob can't drift from the subnet.
+		nc.VLAN = 0
+	} else if nc.VLAN != 0 && (nc.VLAN < 1 || nc.VLAN > 4094) {
 		return nc, fmt.Errorf("network.vlan %d: must be 1..4094", nc.VLAN)
 	}
 	if nc.Bond != nil {
@@ -270,6 +332,9 @@ func validateBond(b *BondConfig) error {
 			if err := validateIFName(b.Primary); err != nil {
 				return fmt.Errorf("network.bond.primary %q: %w", b.Primary, err)
 			}
+			if _, err := net.ParseMAC(b.Primary); err == nil {
+				b.Primary = strings.ToLower(b.Primary)
+			}
 			if _, ok := seen[b.Primary]; !ok {
 				return fmt.Errorf("network.bond.primary %q: must be one of slaves", b.Primary)
 			}
@@ -296,6 +361,15 @@ func validateBond(b *BondConfig) error {
 	return nil
 }
 
+// ValidateNICSelector parses+validates a nic_selector string against the same
+// rules as profile.network.nic_selector. Exported so bindings can validate
+// per-binding NIC selector overrides without duplicating the regex set.
+//
+// Accepts: "auto" | "by-mac:<MAC>" | "by-name:<ifname-or-MAC>".
+func ValidateNICSelector(sel string) error {
+	return validateNICSelector(sel)
+}
+
 func validateNICSelector(sel string) error {
 	switch {
 	case sel == "auto":
@@ -317,13 +391,42 @@ func validateNICSelector(sel string) error {
 	}
 }
 
-// validateIFName checks that s is a valid Linux interface name: 1–15 chars,
-// no whitespace, no slash. Used for bond slaves and by-name NIC selectors.
+// validateIFName checks that s is a valid Linux interface name (1–15 chars,
+// no whitespace, no slash) or a valid MAC address. Used for by-name NIC
+// selectors (name only), bond slaves, and primary (both name and MAC).
 func validateIFName(s string) error {
-	if s == "" || len(s) > 15 || strings.ContainsAny(s, " /\t\n") {
-		return fmt.Errorf("invalid interface name %q (1-15 chars, no space/slash)", s)
+	if s == "" {
+		return fmt.Errorf("empty specifier")
+	}
+	// MAC addresses are valid bond slave/primary specifiers.
+	if _, err := net.ParseMAC(s); err == nil {
+		return nil
+	}
+	if len(s) > 15 || strings.ContainsAny(s, " /\t\n") {
+		return fmt.Errorf("invalid interface name or MAC %q", s)
 	}
 	return nil
+}
+
+// validateSlaveSpec checks that s is either a valid Linux interface name
+// (1–15 chars) or a valid MAC address (xx:xx:xx:xx:xx:xx). MAC addresses
+// are the recommended portable form — they work across server brands, NIC
+// models, and OS naming conventions. On success it returns the canonical
+// form: interface names are trimmed; MAC addresses are lowercased.
+func validateSlaveSpec(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", fmt.Errorf("empty bond slave specifier")
+	}
+	// MAC address.
+	if _, err := net.ParseMAC(s); err == nil {
+		return strings.ToLower(s), nil
+	}
+	// Interface name.
+	if len(s) > 15 || strings.ContainsAny(s, " /\t\n") {
+		return "", fmt.Errorf("invalid interface name or MAC %q", s)
+	}
+	return s, nil
 }
 
 // validateHostnameTemplate enforces the regex *and* the 253-char cap. The

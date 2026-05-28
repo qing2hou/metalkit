@@ -319,6 +319,68 @@ func (s *Store) Cancel(ctx context.Context, id string) error {
 	return s.terminate(ctx, id, "cancelled", "", []string{"pending", "running"})
 }
 
+// DeleteAllTerminal removes every job in a terminal state (succeeded / failed /
+// cancelled) plus its log lines, in a single transaction. Returns the count of
+// jobs removed. Pending and running jobs are untouched — the orchestrator and
+// agent's state machine assumptions stay valid.
+func (s *Store) DeleteAllTerminal(ctx context.Context) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+        DELETE FROM job_logs
+        WHERE job_id IN (
+            SELECT id FROM jobs WHERE status IN ('succeeded','failed','cancelled')
+        )`); err != nil {
+		return 0, fmt.Errorf("delete logs: %w", err)
+	}
+	res, err := tx.ExecContext(ctx,
+		`DELETE FROM jobs WHERE status IN ('succeeded','failed','cancelled')`)
+	if err != nil {
+		return 0, fmt.Errorf("delete jobs: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// Delete removes a terminal-state job and its log lines. Pending/running jobs
+// are rejected with ErrInvalidTransition — the caller must Cancel first so the
+// orchestrator state machine stays consistent. ErrNotFound if no such id.
+func (s *Store) Delete(ctx context.Context, id string) error {
+	id, err := validateJobID(id)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+	var status string
+	err = tx.QueryRowContext(ctx, `SELECT status FROM jobs WHERE id = ?`, id).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lookup: %w", err)
+	}
+	if status != "succeeded" && status != "failed" && status != "cancelled" {
+		return fmt.Errorf("%w: status=%s (cancel first)", ErrInvalidTransition, status)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM job_logs WHERE job_id = ?`, id); err != nil {
+		return fmt.Errorf("delete logs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("delete job: %w", err)
+	}
+	return tx.Commit()
+}
+
 func (s *Store) terminate(ctx context.Context, id, target, errMsg string, allowedFrom []string) error {
 	id, err := validateJobID(id)
 	if err != nil {

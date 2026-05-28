@@ -19,9 +19,22 @@ CREATE TABLE IF NOT EXISTS profiles (
     root_password_hash  TEXT NOT NULL,
     target_disk_json    TEXT NOT NULL,
     network_json        TEXT NOT NULL,
+    os_family           TEXT NOT NULL DEFAULT 'any',
+    subnet_id           TEXT NOT NULL DEFAULT '',
     created_at          INTEGER NOT NULL,
     updated_at          INTEGER NOT NULL,
     created_by          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_profiles_created_at ON profiles(created_at DESC);
+-- Idempotent ALTER for pre-existing DBs that pre-date the os_family column.
+-- SQLite has no IF NOT EXISTS on ADD COLUMN; we swallow the duplicate error
+-- in Go by running the ALTER unconditionally and ignoring "duplicate column".
+`
+
+// migrationSQL is run after schemaSQL to add columns to pre-existing DBs.
+// Each statement may fail with "duplicate column name" on a fresh DB where
+// the column was already created by CREATE TABLE — that error is ignored.
+const migrationSQL = `
+ALTER TABLE profiles ADD COLUMN os_family TEXT NOT NULL DEFAULT 'any';
+ALTER TABLE profiles ADD COLUMN subnet_id TEXT NOT NULL DEFAULT '';
 `

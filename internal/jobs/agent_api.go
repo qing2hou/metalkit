@@ -6,11 +6,13 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strings"
 
 	"metalkit/internal/bindings"
 	"metalkit/internal/images"
 	"metalkit/internal/profiles"
+	"metalkit/internal/subnets"
 	"metalkit/internal/util"
 )
 
@@ -34,6 +36,13 @@ type ImageFetcher interface {
 	GetImage(ctx context.Context, id string) (*images.Image, error)
 }
 
+// SubnetFetcher is the slice of subnets.Store the agent spec endpoint needs.
+// Optional: when nil (or when the binding has no subnet_id), no resolution
+// happens and profile.network is sent through unchanged.
+type SubnetFetcher interface {
+	Get(ctx context.Context, id string) (*subnets.Subnet, error)
+}
+
 // AgentAPI exposes the agent-facing slice of the jobs state machine:
 //
 //   GET  /api/v1/agent/jobs/current?machine_uuid=<uuid>   poll for assigned job
@@ -55,6 +64,7 @@ type AgentAPI struct {
 	bindings BindingFetcher
 	profiles ProfileFetcher
 	images   ImageFetcher
+	subnets  SubnetFetcher
 	logger   *slog.Logger
 }
 
@@ -77,6 +87,15 @@ func NewAgentAPIWithFetchers(store *Store, bindings BindingFetcher, profiles Pro
 		images:   images,
 		logger:   logger,
 	}
+}
+
+// WithSubnets attaches the subnet fetcher. When set and the binding carries a
+// subnet_id, the spec handler overlays subnet network params (cidr/gateway/
+// dns/vlan) onto the profile's network block before sending the spec to the
+// agent. Returns the receiver for chaining at construction time.
+func (a *AgentAPI) WithSubnets(s SubnetFetcher) *AgentAPI {
+	a.subnets = s
+	return a
 }
 
 // RegisterRoutes mounts the agent endpoints on mux.
@@ -177,6 +196,47 @@ func (a *AgentAPI) getSpec(w http.ResponseWriter, r *http.Request) {
 		bondCopy := *binding.Bond
 		profile.Network.Bond = &bondCopy
 		profile.Network.NICSelector = "auto"
+	} else if binding.NICSelectorOverride != "" {
+		// Per-binding NIC selector override: the install modal's NIC picker
+		// is the source of truth for which physical NIC carries the IP. Only
+		// honoured when there's no bond — bond.Slaves already selects NICs.
+		profile.Network.NICSelector = binding.NICSelectorOverride
+	}
+
+	// Subnet overlay (M2.3-12 phase ④): when the operator picked a subnet on
+	// the binding, the subnet is the source of truth for gateway/DNS/VLAN —
+	// not the profile. We overlay those fields onto the profile copy so the
+	// agent / installer contract (read everything off Profile.Network) stays
+	// unchanged downstream. binding.vlan_override > 0 trumps subnet.vlan_id.
+	// Method is forced to "static" since subnet pins the binding to a specific
+	// host IP; bindings.Upsert already refuses subnet_id without static_address.
+	if binding.SubnetID != "" && a.subnets != nil {
+		sn, err := a.subnets.Get(r.Context(), binding.SubnetID)
+		if err != nil {
+			a.logger.Error("agent spec: load subnet", "err", err,
+				"job_id", id, "subnet_id", binding.SubnetID)
+			writeError(w, http.StatusInternalServerError, "load subnet failed")
+			return
+		}
+		prefix, err := prefixLenFromCIDR(sn.CIDR)
+		if err != nil {
+			a.logger.Error("agent spec: subnet cidr invalid", "err", err,
+				"subnet_id", binding.SubnetID, "cidr", sn.CIDR)
+			writeError(w, http.StatusInternalServerError, "subnet cidr invalid")
+			return
+		}
+		profile.Network.Method = "static"
+		profile.Network.PrefixLen = prefix
+		profile.Network.Gateway = sn.Gateway
+		profile.Network.DNS = append([]string(nil), sn.DNS...)
+		switch {
+		case binding.VLANOverride > 0:
+			profile.Network.VLAN = binding.VLANOverride
+		case sn.VLANID > 0:
+			profile.Network.VLAN = sn.VLANID
+		default:
+			profile.Network.VLAN = 0
+		}
 	}
 
 	// Per-binding password override: if the operator set a plaintext password
@@ -388,4 +448,15 @@ func (a *AgentAPI) fail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// prefixLenFromCIDR extracts the prefix length from a canonical IPv4 CIDR
+// (e.g. "192.168.10.0/24" → 24). subnets.Store stores already-validated
+// CIDRs so any parse failure here means table corruption.
+func prefixLenFromCIDR(cidr string) (int, error) {
+	p, err := netip.ParsePrefix(strings.TrimSpace(cidr))
+	if err != nil {
+		return 0, err
+	}
+	return p.Bits(), nil
 }

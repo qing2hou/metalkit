@@ -34,6 +34,7 @@ const defaultMount = "/ui"
 //	GET {mount}/m/{uuid}     -> machine detail (detail.html)
 //	GET {mount}/images       -> image catalog + upload (images.html)
 //	GET {mount}/profiles     -> install profiles (profiles.html)
+//	GET {mount}/subnets      -> subnet catalog (subnets.html)
 //	GET {mount}/bmc          -> BMC credentials (bmc.html)
 //	GET {mount}/jobs         -> jobs list (jobs.html)
 //	GET {mount}/jobs/{id}    -> job detail (job.html)
@@ -88,6 +89,11 @@ func Handler(cfg Config) http.Handler {
 	// Install profiles. Static shell; profiles.js drives CRUD.
 	mux.HandleFunc("GET "+mount+"/profiles", func(w http.ResponseWriter, r *http.Request) {
 		serveEmbeddedHTML(w, assetsFS, "profiles.html")
+	})
+
+	// Subnet catalog. Static shell; subnets.js drives CRUD.
+	mux.HandleFunc("GET "+mount+"/subnets", func(w http.ResponseWriter, r *http.Request) {
+		serveEmbeddedHTML(w, assetsFS, "subnets.html")
 	})
 
 	// BMC credentials. Static shell; bmc.js drives CRUD + test endpoint.

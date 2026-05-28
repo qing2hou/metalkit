@@ -14,6 +14,7 @@
       <nav class="topnav">
         <a href="/ui/">机器</a>
         <a href="/ui/images">镜像</a>
+        <a href="/ui/subnets">子网</a>
         <a href="/ui/profiles">配置</a>
         <a href="/ui/bmc">BMC</a>
         <a href="/ui/jobs">作业</a>
@@ -40,6 +41,10 @@
       <div class="action-row" id="job-actions" hidden>
         <button type="button" id="cancel-btn" class="btn btn-danger" hidden>取消作业</button>
         <button type="button" id="retry-btn" class="btn" hidden>重试（重新装机）</button>
+        <button type="button" id="delete-btn" class="btn btn-danger" hidden>删除作业</button>
+      </div>
+      <div class="action-row">
+        <button id="job-download-log" type="button" class="btn btn-ghost">下载日志</button>
       </div>
     </section>
 

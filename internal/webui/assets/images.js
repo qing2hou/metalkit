@@ -244,16 +244,85 @@
   function onFilePicked() {
     const f = $("upload-file").files[0];
     const startBtn = $("upload-start");
+    const hint = $("upload-detected-hint");
     if (!f) {
       startBtn.disabled = true;
       $("upload-status").textContent = "";
+      if (hint) hint.hidden = true;
       return;
     }
     $("upload-status").textContent = f.name + " (" + fmtBytes(f.size) + ")";
     if (!$("upload-name").value) {
       $("upload-name").value = f.name;
     }
+    // Filename-based family/version suggestion (mirrors backend detect.go).
+    // Auto-fills empty fields; existing operator values are not overwritten.
+    const det = detectFromFilename(f.name);
+    if (det.family) {
+      const sel = $("upload-family");
+      if (sel && !sel.value) sel.value = det.family;
+    }
+    if (det.version) {
+      const ver = $("upload-version");
+      if (ver && !ver.value) ver.value = det.version;
+    }
+    if (hint) {
+      if (det.family || det.version) {
+        hint.textContent = "（识别：" + (det.family || "?") + (det.version ? " / " + det.version : "") + "）";
+        hint.hidden = false;
+      } else {
+        hint.hidden = true;
+      }
+    }
     startBtn.disabled = false;
+  }
+
+  // detectFromFilename — client-side mirror of internal/images/detect.go.
+  // Best-effort: matches well-known cloud-image naming conventions and returns
+  // {family, version}. Empty values mean "no match". The backend re-runs the
+  // same logic at upload init time, so this is purely a UX preview.
+  function detectFromFilename(name) {
+    if (!name) return { family: "", version: "" };
+    const n = name.toLowerCase();
+    const ubuntuCodename = { noble: "24.04", jammy: "22.04", focal: "20.04",
+      bionic: "18.04", xenial: "16.04", trusty: "14.04" };
+    const debianCodename = { trixie: "13", bookworm: "12", bullseye: "11",
+      buster: "10", stretch: "9" };
+    let m;
+    if ((m = n.match(/(?:^|[-_./])(noble|jammy|focal|bionic|xenial|trusty)(?:[-_./]|$)/))) {
+      return { family: "ubuntu", version: ubuntuCodename[m[1]] || "" };
+    }
+    if ((m = n.match(/ubuntu[-_.]?(\d+\.\d+)/))) {
+      return { family: "ubuntu", version: m[1] };
+    }
+    if ((m = n.match(/(?:^|[-_./])(bookworm|bullseye|buster|stretch|trixie)(?:[-_./]|$)/))) {
+      return { family: "debian", version: debianCodename[m[1]] || "" };
+    }
+    if ((m = n.match(/debian[-_.]?(\d+)/))) {
+      return { family: "debian", version: m[1] };
+    }
+    if ((m = n.match(/centos[-_.]?(7(?:\.\d+)?)\b/))) {
+      return { family: "rhel7", version: m[1] };
+    }
+    if ((m = n.match(/rocky[-_.]?(\d+(?:\.\d+)?)/))) {
+      return { family: "rhel", version: m[1] };
+    }
+    if ((m = n.match(/almalinux[-_.]?(\d+(?:\.\d+)?)/))) {
+      return { family: "rhel", version: m[1] };
+    }
+    if ((m = n.match(/centos[-_.]?(\d+(?:\.\d+)?)/))) {
+      return { family: "rhel", version: m[1] };
+    }
+    if ((m = n.match(/rhel[-_.]?(\d+(?:\.\d+)?)/))) {
+      return { family: "rhel", version: m[1] };
+    }
+    if ((m = n.match(/(?:ol|oracle)[-_.]?(\d+(?:\.\d+)?)/))) {
+      return { family: "rhel", version: m[1] };
+    }
+    if (/fedora/.test(n) && (m = n.match(/fedora[^0-9]+(\d{2,3})\b/))) {
+      return { family: "rhel", version: m[1] };
+    }
+    return { family: "", version: "" };
   }
 
   function setProgress(done, total, label) {

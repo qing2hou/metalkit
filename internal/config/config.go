@@ -38,6 +38,12 @@ type Config struct {
 	// startup. AdminUser defaults to "admin".
 	AdminUser string `yaml:"adminUser"`
 	AdminPass string `yaml:"adminPass"`
+
+	// DefaultRootPassword is the plaintext password installer baselines all
+	// freshly created profiles to when the operator leaves the field blank.
+	// Hashed once at controller startup; the hash is what hits SQLite. Default
+	// "metalkit" — change in config.yaml per-environment.
+	DefaultRootPassword string `yaml:"defaultRootPassword"`
 }
 
 func Load(path string) (*Config, error) {
@@ -74,6 +80,9 @@ func Load(path string) (*Config, error) {
 	}
 	if c.AdminUser == "" {
 		c.AdminUser = "admin"
+	}
+	if c.DefaultRootPassword == "" {
+		c.DefaultRootPassword = "metalkit"
 	}
 	return &c, nil
 }

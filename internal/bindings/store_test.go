@@ -18,15 +18,17 @@ import (
 	"metalkit/internal/inventory"
 	"metalkit/internal/profiles"
 	"metalkit/internal/sqlitedb"
+	"metalkit/internal/subnets"
 )
 
-// testFixture holds the four stores a binding test needs.
+// testFixture holds the stores a binding test needs.
 type testFixture struct {
-	db        *sql.DB
-	machines  *inventory.Store
-	images    *images.Store
-	profiles  *profiles.Store
-	bindings  *Store
+	db       *sql.DB
+	machines *inventory.Store
+	images   *images.Store
+	profiles *profiles.Store
+	subnets  *subnets.Store
+	bindings *Store
 }
 
 func newFixture(t *testing.T) *testFixture {
@@ -47,9 +49,13 @@ func newFixture(t *testing.T) *testFixture {
 	if err != nil {
 		t.Fatalf("images.NewStore: %v", err)
 	}
-	profStore, err := profiles.NewStore(context.Background(), db, logger)
+	profStore, err := profiles.NewStore(context.Background(), db, logger, "")
 	if err != nil {
 		t.Fatalf("profiles.NewStore: %v", err)
+	}
+	subStore, err := subnets.NewStore(context.Background(), db, logger)
+	if err != nil {
+		t.Fatalf("subnets.NewStore: %v", err)
 	}
 	bindStore, err := NewStore(context.Background(), db, logger, nil)
 	if err != nil {
@@ -60,8 +66,25 @@ func newFixture(t *testing.T) *testFixture {
 		machines: inv,
 		images:   imgStore,
 		profiles: profStore,
+		subnets:  subStore,
 		bindings: bindStore,
 	}
+}
+
+// seedSubnet creates a subnet and returns its id.
+func (f *testFixture) seedSubnet(t *testing.T, name, cidr, gateway string) string {
+	t.Helper()
+	sn, err := f.subnets.Create(context.Background(), subnets.CreateInput{
+		Name:      name,
+		CIDR:      cidr,
+		Gateway:   gateway,
+		DNS:       []string{"1.1.1.1"},
+		CreatedBy: "admin",
+	})
+	if err != nil {
+		t.Fatalf("seed subnet %s: %v", name, err)
+	}
+	return sn.ID
 }
 
 const validSha512crypt = `$6$rounds=4096$abcdefghijklmnop$` +
@@ -421,7 +444,7 @@ func newCipheredFixture(t *testing.T) *testFixture {
 	if err != nil {
 		t.Fatalf("images.NewStore: %v", err)
 	}
-	profStore, err := profiles.NewStore(context.Background(), db, logger)
+	profStore, err := profiles.NewStore(context.Background(), db, logger, "")
 	if err != nil {
 		t.Fatalf("profiles.NewStore: %v", err)
 	}
@@ -730,5 +753,232 @@ func TestBondOverrideThreeState(t *testing.T) {
 		Bond: tooFew,
 	}); err == nil || !strings.Contains(err.Error(), "slaves") {
 		t.Fatalf("want bond.slaves validation error, got %v", err)
+	}
+}
+
+func TestUpsertWithSubnetHappy(t *testing.T) {
+	f := newFixture(t)
+	mu := f.seedMachine(t, '0')
+	im := f.seedImage(t, "5")
+	pr := f.seedProfile(t, "p-sn", "static")
+	sn := f.seedSubnet(t, "lab-10", "10.0.0.0/24", "10.0.0.1")
+
+	sid := sn
+	vlan := 100
+	b, err := f.bindings.Upsert(context.Background(), UpsertInput{
+		MachineUUID:   mu,
+		ImageID:       im,
+		ProfileID:     pr,
+		DesiredState:  "install",
+		StaticAddress: "10.0.0.42",
+		SubnetID:      &sid,
+		VLANOverride:  &vlan,
+		UpdatedBy:     "admin",
+	})
+	if err != nil {
+		t.Fatalf("Upsert with subnet: %v", err)
+	}
+	if b.SubnetID != sn {
+		t.Errorf("SubnetID = %q, want %q", b.SubnetID, sn)
+	}
+	if b.VLANOverride != 100 {
+		t.Errorf("VLANOverride = %d, want 100", b.VLANOverride)
+	}
+
+	// Get round-trip preserves both fields.
+	got, err := f.bindings.Get(context.Background(), mu)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.SubnetID != sn || got.VLANOverride != 100 {
+		t.Errorf("Get mismatch: subnet=%q vlan=%d", got.SubnetID, got.VLANOverride)
+	}
+}
+
+func TestUpsertSubnetUnknown(t *testing.T) {
+	f := newFixture(t)
+	mu := f.seedMachine(t, '1')
+	im := f.seedImage(t, "6")
+	pr := f.seedProfile(t, "p-sn-bad", "static")
+
+	missing := "00000000000000000000000000000000"
+	_, err := f.bindings.Upsert(context.Background(), UpsertInput{
+		MachineUUID:   mu,
+		ImageID:       im,
+		ProfileID:     pr,
+		DesiredState:  "install",
+		StaticAddress: "10.0.0.42",
+		SubnetID:      &missing,
+		UpdatedBy:     "admin",
+	})
+	if !errors.Is(err, ErrSubnetUnknown) {
+		t.Fatalf("want ErrSubnetUnknown, got %v", err)
+	}
+}
+
+func TestUpsertHostOutsideSubnet(t *testing.T) {
+	f := newFixture(t)
+	mu := f.seedMachine(t, '2')
+	im := f.seedImage(t, "7")
+	pr := f.seedProfile(t, "p-sn-out", "static")
+	sn := f.seedSubnet(t, "lab-out", "10.0.0.0/24", "10.0.0.1")
+
+	sid := sn
+	_, err := f.bindings.Upsert(context.Background(), UpsertInput{
+		MachineUUID:   mu,
+		ImageID:       im,
+		ProfileID:     pr,
+		DesiredState:  "install",
+		StaticAddress: "10.0.1.42", // /24 → outside
+		SubnetID:      &sid,
+		UpdatedBy:     "admin",
+	})
+	if err == nil || !strings.Contains(err.Error(), "static_address") {
+		t.Fatalf("want host-outside-subnet error, got %v", err)
+	}
+}
+
+func TestUpsertHostEqualsGateway(t *testing.T) {
+	f := newFixture(t)
+	mu := f.seedMachine(t, '3')
+	im := f.seedImage(t, "8")
+	pr := f.seedProfile(t, "p-sn-gw", "static")
+	sn := f.seedSubnet(t, "lab-gw", "10.0.0.0/24", "10.0.0.1")
+
+	sid := sn
+	_, err := f.bindings.Upsert(context.Background(), UpsertInput{
+		MachineUUID:   mu,
+		ImageID:       im,
+		ProfileID:     pr,
+		DesiredState:  "install",
+		StaticAddress: "10.0.0.1", // == gateway
+		SubnetID:      &sid,
+		UpdatedBy:     "admin",
+	})
+	if err == nil || !strings.Contains(err.Error(), "static_address") {
+		t.Fatalf("want host-equals-gateway error, got %v", err)
+	}
+}
+
+func TestUpsertSubnetRequiresStaticAddress(t *testing.T) {
+	f := newFixture(t)
+	mu := f.seedMachine(t, '4')
+	im := f.seedImage(t, "9")
+	// dhcp profile (no static_address required at profile level)
+	pr := f.seedProfile(t, "p-sn-dhcp", "dhcp")
+	sn := f.seedSubnet(t, "lab-dhcp", "10.0.0.0/24", "10.0.0.1")
+
+	sid := sn
+	_, err := f.bindings.Upsert(context.Background(), UpsertInput{
+		MachineUUID:  mu,
+		ImageID:      im,
+		ProfileID:    pr,
+		DesiredState: "install",
+		SubnetID:     &sid,
+		UpdatedBy:    "admin",
+	})
+	if err == nil || !strings.Contains(err.Error(), "static_address") {
+		t.Fatalf("want static_address-required-with-subnet error, got %v", err)
+	}
+}
+
+func TestUpsertSubnetClearAndKeep(t *testing.T) {
+	f := newFixture(t)
+	mu := f.seedMachine(t, '5')
+	im := f.seedImage(t, "a")
+	pr := f.seedProfile(t, "p-sn-3s", "static")
+	sn := f.seedSubnet(t, "lab-3s", "10.0.0.0/24", "10.0.0.1")
+	ctx := context.Background()
+
+	sid := sn
+	vlan := 200
+	if _, err := f.bindings.Upsert(ctx, UpsertInput{
+		MachineUUID:   mu,
+		ImageID:       im,
+		ProfileID:     pr,
+		DesiredState:  "install",
+		StaticAddress: "10.0.0.42",
+		SubnetID:      &sid,
+		VLANOverride:  &vlan,
+		UpdatedBy:     "admin",
+	}); err != nil {
+		t.Fatalf("Upsert 1: %v", err)
+	}
+
+	// Re-upsert without SubnetID/VLANOverride pointers → keep existing.
+	b, err := f.bindings.Upsert(ctx, UpsertInput{
+		MachineUUID:   mu,
+		ImageID:       im,
+		ProfileID:     pr,
+		DesiredState:  "reinstall",
+		StaticAddress: "10.0.0.42",
+		UpdatedBy:     "admin",
+	})
+	if err != nil {
+		t.Fatalf("Upsert 2 (keep): %v", err)
+	}
+	if b.SubnetID != sn || b.VLANOverride != 200 {
+		t.Fatalf("keep failed: subnet=%q vlan=%d", b.SubnetID, b.VLANOverride)
+	}
+
+	// Explicit clear: empty subnet_id + vlan_override=0 → NULL.
+	empty := ""
+	zero := 0
+	// We also need a method=dhcp profile to allow clearing static_address,
+	// because clearing subnet must allow either DHCP or keeping the static.
+	// Easier: rebind to dhcp profile, then clear.
+	prDHCP := f.seedProfile(t, "p-sn-3s-dhcp", "dhcp")
+	b, err = f.bindings.Upsert(ctx, UpsertInput{
+		MachineUUID:  mu,
+		ImageID:      im,
+		ProfileID:    prDHCP,
+		DesiredState: "install",
+		SubnetID:     &empty,
+		VLANOverride: &zero,
+		UpdatedBy:    "admin",
+	})
+	if err != nil {
+		t.Fatalf("Upsert 3 (clear): %v", err)
+	}
+	if b.SubnetID != "" || b.VLANOverride != 0 {
+		t.Fatalf("clear failed: subnet=%q vlan=%d", b.SubnetID, b.VLANOverride)
+	}
+}
+
+func TestRefCountBySubnet(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	sn := f.seedSubnet(t, "lab-rc", "10.0.0.0/24", "10.0.0.1")
+	otherSn := f.seedSubnet(t, "lab-rc-other", "10.0.1.0/24", "10.0.1.1")
+
+	// Start: 0.
+	if n, err := f.bindings.RefCountBySubnet(ctx, sn); err != nil || n != 0 {
+		t.Fatalf("initial RefCountBySubnet = (%d, %v)", n, err)
+	}
+
+	// Two bindings on the same subnet.
+	im := f.seedImage(t, "b")
+	pr := f.seedProfile(t, "p-rc", "static")
+	sid := sn
+	for i, suffix := range []byte{'6', '7'} {
+		mu := f.seedMachine(t, suffix)
+		addr := "10.0.0.4" + string(byte('0'+i))
+		if _, err := f.bindings.Upsert(ctx, UpsertInput{
+			MachineUUID:   mu,
+			ImageID:       im,
+			ProfileID:     pr,
+			DesiredState:  "install",
+			StaticAddress: addr,
+			SubnetID:      &sid,
+			UpdatedBy:     "admin",
+		}); err != nil {
+			t.Fatalf("Upsert %d: %v", i, err)
+		}
+	}
+	if n, err := f.bindings.RefCountBySubnet(ctx, sn); err != nil || n != 2 {
+		t.Fatalf("RefCountBySubnet after 2 = (%d, %v)", n, err)
+	}
+	if n, err := f.bindings.RefCountBySubnet(ctx, otherSn); err != nil || n != 0 {
+		t.Fatalf("other subnet RefCountBySubnet = (%d, %v)", n, err)
 	}
 }

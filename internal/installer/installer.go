@@ -57,9 +57,11 @@ func Run(ctx context.Context, deps Deps, spec jobs.InstallSpec) (retErr error) {
 	if err := deps.Reporter.Stage(ctx, StageBootDetect); err != nil {
 		return fmt.Errorf("install: stage %s: %w", StageBootDetect, err)
 	}
-	if err := RequireUEFI(deps.FS); err != nil {
+	bootMode, err := DetectBootMode(deps.FS)
+	if err != nil {
 		return err
 	}
+	_ = deps.Reporter.Log(ctx, "info", fmt.Sprintf("boot mode: %s", bootMode))
 
 	// --- disk-pick -------------------------------------------------------
 	if err := deps.Reporter.Stage(ctx, StageDiskPick); err != nil {
@@ -99,6 +101,12 @@ func Run(ctx context.Context, deps Deps, spec jobs.InstallSpec) (retErr error) {
 		return err
 	}
 
+	// If the live system booted UEFI but the image has no ESP, create one
+	// before growing so growpart stops at the ESP boundary.
+	if _, err := createESPIfMissing(ctx, deps, target.DevPath, "", bootMode); err != nil {
+		return err
+	}
+
 	// --- grow ------------------------------------------------------------
 	if err := deps.Reporter.Stage(ctx, StageGrow); err != nil {
 		return fmt.Errorf("install: stage %s: %w", StageGrow, err)
@@ -113,7 +121,7 @@ func Run(ctx context.Context, deps Deps, spec jobs.InstallSpec) (retErr error) {
 		return fmt.Errorf("install: stage %s: %w", StageMount, err)
 	}
 	mntRoot := filepath.Join(workDir, "rootfs")
-	_, cleanup, err := Mount(ctx, deps, grown.PartDev, mntRoot)
+	espMount, cleanup, err := Mount(ctx, deps, grown.PartDev, mntRoot)
 	if err != nil {
 		return err
 	}
@@ -149,7 +157,7 @@ func Run(ctx context.Context, deps Deps, spec jobs.InstallSpec) (retErr error) {
 	if err := deps.Reporter.Stage(ctx, StageGrubInstall); err != nil {
 		return fmt.Errorf("install: stage %s: %w", StageGrubInstall, err)
 	}
-	if err := InstallGRUB(ctx, deps, mntRoot, target.DevPath); err != nil {
+	if err := InstallGRUB(ctx, deps, mntRoot, target.DevPath, espMount); err != nil {
 		return err
 	}
 

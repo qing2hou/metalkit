@@ -64,15 +64,24 @@ func TestGrowLastPartition_Ext4_HappyPath(t *testing.T) {
 		t.Fatal("ext4 must not flag XFSPendingGrow")
 	}
 
-	// Sequence: lsblk, blkid (rootfs probe), growpart, e2fsck, resize2fs.
+	// Verify the growth actions ran in the right order on sda3. We don't
+	// pin the blkid call count: rootPartitionOf may probe LABEL on
+	// candidates, which is an internal detail.
 	calls := exec.Calls()
-	wantSeq := []string{"lsblk", "blkid", "growpart", "e2fsck", "resize2fs"}
-	if len(calls) != len(wantSeq) {
-		t.Fatalf("call count: got %d, want %d. Calls: %+v", len(calls), len(wantSeq), calls)
+	var names []string
+	for _, c := range calls {
+		switch c.Name {
+		case "growpart", "e2fsck", "resize2fs":
+			names = append(names, c.Name)
+		}
 	}
-	for i, w := range wantSeq {
-		if calls[i].Name != w {
-			t.Fatalf("call[%d]=%s want %s", i, calls[i].Name, w)
+	want := []string{"growpart", "e2fsck", "resize2fs"}
+	if len(names) != len(want) {
+		t.Fatalf("growth ops: got %v want %v (all calls=%+v)", names, want, calls)
+	}
+	for i, w := range want {
+		if names[i] != w {
+			t.Fatalf("growth op[%d]=%q want %q", i, names[i], w)
 		}
 	}
 }
@@ -199,5 +208,84 @@ func TestGrowLastPartition_UbuntuCloudimgLayout(t *testing.T) {
 	}
 	if res.PartDev != "/dev/sda1" || res.PartNum != 1 || res.FSType != "ext4" {
 		t.Fatalf("Ubuntu cloudimg layout: got %+v, want /dev/sda1/1/ext4", res)
+	}
+}
+
+// TestGrowLastPartition_NobleSeparateBoot pins the LABEL-driven rootfs
+// selector. Ubuntu 24.04 cloud images carry both an ext4 root (sda1,
+// LABEL=cloudimg-rootfs) and a separate ext4 /boot (sda16, LABEL=BOOT).
+// The naive "last ext4 wins" rule would grow sda16, masking root grub
+// install and ending in `grub rescue>` at first real boot. The fix
+// must select sda1.
+func TestGrowLastPartition_NobleSeparateBoot(t *testing.T) {
+	const lsblkNoble = `/dev/sda    disk
+/dev/sda1   part
+/dev/sda14  part
+/dev/sda15  part
+/dev/sda16  part
+`
+	exec := newMockExec()
+	exec.OnFull["lsblk -lnpo NAME,TYPE /dev/sda"] = mockExecResult{Out: []byte(lsblkNoble)}
+	// FS types
+	exec.OnFull["blkid -o value -s TYPE /dev/sda1"] = mockExecResult{Out: []byte("ext4")}
+	exec.OnFull["blkid -o value -s TYPE /dev/sda14"] = mockExecResult{Err: errString("no fs")}
+	exec.OnFull["blkid -o value -s TYPE /dev/sda15"] = mockExecResult{Out: []byte("vfat")}
+	exec.OnFull["blkid -o value -s TYPE /dev/sda16"] = mockExecResult{Out: []byte("ext4")}
+	// LABELs — only ext4 candidates get probed.
+	exec.OnFull["blkid -o value -s LABEL /dev/sda1"] = mockExecResult{Out: []byte("cloudimg-rootfs")}
+	exec.OnFull["blkid -o value -s LABEL /dev/sda16"] = mockExecResult{Out: []byte("BOOT")}
+	deps := Deps{Exec: exec, FS: newMockFS()}
+
+	res, err := GrowLastPartition(context.Background(), deps, "/dev/sda")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if res.PartDev != "/dev/sda1" || res.PartNum != 1 || res.FSType != "ext4" {
+		t.Fatalf("Noble layout: got %+v, want sda1/1/ext4 (LABEL=cloudimg-rootfs)", res)
+	}
+
+	// Belt and braces: BOOT must NOT have been grown.
+	for _, c := range exec.Calls() {
+		if c.Name == "growpart" && len(c.Args) >= 1 {
+			if strings.HasSuffix(strings.Join(c.Args, " "), "16") {
+				t.Fatalf("growpart targeted partition 16 (BOOT), should be 1: %v", c)
+			}
+		}
+		if (c.Name == "e2fsck" || c.Name == "resize2fs") &&
+			len(c.Args) > 0 && c.Args[len(c.Args)-1] == "/dev/sda16" {
+			t.Fatalf("%s ran against /dev/sda16 (BOOT), should be /dev/sda1: %v", c.Name, c)
+		}
+	}
+}
+
+// TestRootLabelHelpers documents which blkid LABEL values count as
+// "rootfs" and which count as "definitely not rootfs". If a future
+// distro shows up with a label not covered here and the resulting
+// disambiguation breaks installs, the fix lives in these tables.
+func TestRootLabelHelpers(t *testing.T) {
+	root := []string{"cloudimg-rootfs", "rootfs", "root", "_root",
+		"my-rootfs", "system_root", "cloudimg-noble"}
+	for _, l := range root {
+		if !isRootLabel(l) {
+			t.Errorf("isRootLabel(%q) = false, want true", l)
+		}
+	}
+	notRoot := []string{"", "BOOT", "EFI", "ESP", "UEFI", "data", "home"}
+	for _, l := range notRoot {
+		if isRootLabel(l) {
+			t.Errorf("isRootLabel(%q) = true, want false", l)
+		}
+	}
+	anti := []string{"BOOT", "boot", "EFI", "efi", "ESP", "UEFI"}
+	for _, l := range anti {
+		if !isAntiRootLabel(l) {
+			t.Errorf("isAntiRootLabel(%q) = false, want true", l)
+		}
+	}
+	notAnti := []string{"", "cloudimg-rootfs", "data", "system"}
+	for _, l := range notAnti {
+		if isAntiRootLabel(l) {
+			t.Errorf("isAntiRootLabel(%q) = true, want false", l)
+		}
 	}
 }

@@ -3,6 +3,7 @@ package images
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -72,7 +73,9 @@ func (a *API) initUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	sess, err := a.store.CreateUpload(r.Context(), CreateUploadInput{
+	// Best-effort backfill from filename when operator left family/version
+	// blank. Explicit operator values always win (see MergeDetected).
+	input := CreateUploadInput{
 		Name:           in.Name,
 		Version:        in.Version,
 		Family:         in.Family,
@@ -81,7 +84,26 @@ func (a *API) initUpload(w http.ResponseWriter, r *http.Request) {
 		TotalSize:      in.TotalSize,
 		ChunkSize:      in.ChunkSize,
 		UploadedBy:     basicAuthUser(r),
-	})
+	}
+	det := DetectFromFilename(in.Name)
+	// Reject obvious operator-vs-detection conflicts on family at the API
+	// boundary, before any chunk hits disk. The classic footgun this stops:
+	// uploading CentOS-7-*.qcow2 with family=rhel will silently produce a
+	// "rhel" image that profile.os_family=rhel7 can't bind against, and the
+	// failure only surfaces at install time. Family case-insensitive. We do
+	// NOT enforce the same on version: version is freeform metadata operators
+	// often customise (e.g. "centos7.9-our-build"); only family is
+	// load-bearing for installer code-path selection.
+	if det.Family != "" && strings.TrimSpace(in.Family) != "" &&
+		!strings.EqualFold(strings.TrimSpace(in.Family), det.Family) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"family mismatch: filename %q looks like family=%q but you supplied family=%q. "+
+				"Either leave family blank to use auto-detection, or rename the file to match.",
+			in.Name, det.Family, in.Family))
+		return
+	}
+	input = MergeDetected(input, det)
+	sess, err := a.store.CreateUpload(r.Context(), input)
 	if errors.Is(err, ErrDuplicate) {
 		writeError(w, http.StatusConflict, err.Error())
 		return

@@ -60,6 +60,10 @@ type FS interface {
 	// Exists is a convenience for the boot-mode probe; equivalent to
 	// Stat-and-check-IsNotExist but keeps callers tidy.
 	Exists(path string) bool
+	// Symlink creates oldname → newname (os.Symlink semantics).
+	Symlink(oldname, newname string) error
+	// Remove deletes the named file or empty directory.
+	Remove(path string) error
 }
 
 // Downloader streams the image bytes. The returned ReadCloser MUST verify

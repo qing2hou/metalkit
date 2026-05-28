@@ -93,26 +93,44 @@ func TestRun_HappyPath(t *testing.T) {
 	}
 }
 
-func TestRun_BIOS_FailsAtBootDetect(t *testing.T) {
+func TestRun_BIOS_Succeeds(t *testing.T) {
 	h := newHappyHarness(t)
-	// Remove efivars
+	// Remove efivars to simulate BIOS boot.
 	delete(h.fs.dirs, "/sys/firmware/efi/efivars")
+	// Make sda1 not vfat so findESP returns empty (no ESP = BIOS path).
+	h.exec.OnFull["blkid -o value -s TYPE /dev/sda1"] = mockExecResult{Out: []byte("ext4")}
+
 	err := Run(context.Background(), h.deps, happySpec())
-	if err == nil {
-		t.Fatal("BIOS environment must fail")
+	if err != nil {
+		t.Fatalf("BIOS install should succeed: %v", err)
 	}
-	if h.reporter.failed == "" {
-		t.Fatal("Fail not called on BIOS rejection")
+	if !h.reporter.success {
+		t.Fatal("Succeed not called on BIOS path")
 	}
-	if h.reporter.success {
-		t.Fatal("Succeed must not be called on BIOS rejection")
+	if h.reporter.failed != "" {
+		t.Fatalf("Fail was called with %q on BIOS success path", h.reporter.failed)
 	}
-	if !strings.Contains(h.reporter.failed, "UEFI") {
-		t.Fatalf("Fail message %q should mention UEFI", h.reporter.failed)
+
+	// Verify BIOS grub-install --target=i386-pc was invoked (host binary,
+	// not chroot).
+	var sawBIOS bool
+	for _, c := range h.exec.Calls() {
+		if c.Name == "grub-install" {
+			full := strings.Join(c.Args, " ")
+			if strings.Contains(full, "--target=i386-pc") {
+				sawBIOS = true
+			}
+		}
 	}
-	stages := h.reporter.Stages()
-	if len(stages) != 1 || stages[0] != StageBootDetect {
-		t.Fatalf("only boot-detect stage should have been emitted, got %v", stages)
+	if !sawBIOS {
+		t.Fatal("BIOS grub-install --target=i386-pc was not invoked")
+	}
+
+	// efibootmgr must not be called on BIOS path.
+	for _, c := range h.exec.Calls() {
+		if c.Name == "efibootmgr" {
+			t.Fatal("efibootmgr must not be called on BIOS path")
+		}
 	}
 }
 

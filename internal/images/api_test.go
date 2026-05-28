@@ -374,6 +374,62 @@ func TestGetBlobBadID(t *testing.T) {
 	}
 }
 
+// TestAPIInitFamilyMismatch: the upload-init path must reject operator-supplied
+// family values that contradict what DetectFromFilename derives from the
+// filename. The classic case is CentOS-7-*.qcow2 + family=rhel, which silently
+// produces an image that profile.os_family=rhel7 can't bind against — caught
+// only at install time. Detection-empty filenames and case-only differences
+// must NOT trip this guard.
+func TestAPIInitFamilyMismatch(t *testing.T) {
+	cases := []struct {
+		name     string
+		filename string
+		family   string
+		wantCode int
+	}{
+		// CentOS-7 detects as "rhel7"; operator-supplied "rhel" is the bug we're
+		// catching. 400 expected.
+		{"centos7-vs-rhel", "CentOS-7-x86_64-GenericCloud.qcow2", "rhel", http.StatusBadRequest},
+		// Same family, different case — fine.
+		{"case-insensitive-match", "ubuntu-22.04-server.qcow2", "Ubuntu", http.StatusCreated},
+		// Operator left family blank: detection backfills, no conflict possible.
+		{"empty-operator-family", "CentOS-7-x86_64-GenericCloud.qcow2", "", http.StatusCreated},
+		// Filename that detection can't classify: nothing to conflict with.
+		{"unknown-filename", "homebrew.qcow2", "ubuntu", http.StatusCreated},
+		// Operator family matches detection — fine.
+		{"matching-family", "CentOS-7-x86_64-GenericCloud.qcow2", "rhel7", http.StatusCreated},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ts := newTestAPI(t)
+			body := bytes.Repeat([]byte{0x99}, 10)
+			init := map[string]any{
+				"name":            tc.filename,
+				"family":          tc.family,
+				"expected_sha256": sha256Hex(body),
+				"total_size":      len(body),
+				"chunk_size":      len(body),
+			}
+			b, _ := json.Marshal(init)
+			resp, err := http.Post(ts.URL+"/api/v1/images/uploads", "application/json", bytes.NewReader(b))
+			if err != nil {
+				t.Fatalf("post: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantCode {
+				dump, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, tc.wantCode, dump)
+			}
+			if tc.wantCode == http.StatusBadRequest {
+				dump, _ := io.ReadAll(resp.Body)
+				if !bytes.Contains(dump, []byte("family mismatch")) {
+					t.Errorf("error body does not mention family mismatch: %s", dump)
+				}
+			}
+		})
+	}
+}
+
 // background context is unused in this file but keeps go vet from warning if a
 // test imports it conditionally.
 var _ = context.Background

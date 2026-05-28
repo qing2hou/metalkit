@@ -14,6 +14,7 @@
       <nav class="topnav">
         <a href="/ui/">机器</a>
         <a href="/ui/images">镜像</a>
+        <a href="/ui/subnets">子网</a>
         <a href="/ui/profiles">配置</a>
         <a href="/ui/bmc">BMC</a>
         <a href="/ui/jobs">作业</a>
@@ -46,12 +47,13 @@
             <input id="upload-name" type="text" placeholder="自动：使用文件名">
           </label>
           <label class="upload-field">
-            <span>家族</span>
+            <span>家族 <span id="upload-detected-hint" class="muted" hidden></span></span>
             <select id="upload-family">
-              <option value="">（未指定）</option>
+              <option value="">（自动 / 未指定）</option>
               <option value="ubuntu">ubuntu</option>
               <option value="debian">debian</option>
-              <option value="rhel">rhel（rocky / alma / rhel）</option>
+              <option value="rhel">rhel（rocky / alma / rhel 8+ / fedora）</option>
+              <option value="rhel7">rhel7（centos 7 — ifcfg fallback）</option>
             </select>
           </label>
           <label class="upload-field">

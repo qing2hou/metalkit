@@ -14,6 +14,7 @@
       <nav class="topnav">
         <a href="/ui/">机器</a>
         <a href="/ui/images">镜像</a>
+        <a href="/ui/subnets">子网</a>
         <a href="/ui/profiles">配置</a>
         <a href="/ui/bmc">BMC</a>
         <a href="/ui/jobs">作业</a>
@@ -42,7 +43,7 @@
           <div><dt>UUID</dt><dd id="m-uuid" class="copyable mono" title="点击复制">&mdash;</dd></div>
           <div><dt>厂商</dt><dd id="m-manufacturer">&mdash;</dd></div>
           <div><dt>首次发现</dt><dd id="m-first-seen">&mdash;</dd></div>
-          <div><dt>最近上报</dt><dd id="m-last-seen">&mdash;</dd></div>
+          <div><dt>最近上报</dt><dd><span id="m-last-seen">&mdash;</span> <span id="m-stale-badge" class="badge badge-warn" hidden>报告陈旧</span></dd></div>
           <div><dt>上报时间</dt><dd id="m-report-ts">&mdash;</dd></div>
         </dl>
         <div class="macs-strip">
