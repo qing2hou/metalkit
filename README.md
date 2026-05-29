@@ -294,3 +294,4 @@ sudo systemctl restart metalkit-controller
 - **查看日志**：`journalctl -u metalkit-controller -f`
 - **运行自检**：`/opt/metalkit/bin/metalkit-controller doctor -config /etc/metalkit/config.yaml`
 - **文档**：[DEPLOY.md](./DEPLOY.md) | [DEVELOP.md](./DEVELOP.md)
+- **live系统默认密码：root/metalkit
