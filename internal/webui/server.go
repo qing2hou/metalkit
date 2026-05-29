@@ -38,6 +38,7 @@ const defaultMount = "/ui"
 //	GET {mount}/bmc          -> BMC credentials (bmc.html)
 //	GET {mount}/jobs         -> jobs list (jobs.html)
 //	GET {mount}/jobs/{id}    -> job detail (job.html)
+//	GET {mount}/settings     -> settings (DHCP) page (settings.html)
 //	GET {mount}/assets/*     -> embedded static assets
 //
 // All other paths under the mount return 404.
@@ -113,6 +114,12 @@ func Handler(cfg Config) http.Handler {
 		// is a static shell and job.js reads the ID from window.location.
 		_ = r.PathValue("id")
 		serveEmbeddedHTML(w, assetsFS, "job.html")
+	})
+
+	// Settings (currently just DHCP config). Static shell; settings.js
+	// drives the form. Persists via /api/v1/settings/dhcp.
+	mux.HandleFunc("GET "+mount+"/settings", func(w http.ResponseWriter, r *http.Request) {
+		serveEmbeddedHTML(w, assetsFS, "settings.html")
 	})
 
 	// Static assets with no-cache so browsers always revalidate.

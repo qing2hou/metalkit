@@ -159,6 +159,8 @@ func needsAuth(path string) bool {
 		return true
 	case path == "/api/v1/util", strings.HasPrefix(path, "/api/v1/util/"):
 		return true
+	case path == "/api/v1/settings", strings.HasPrefix(path, "/api/v1/settings/"):
+		return true
 	}
 	return false
 }

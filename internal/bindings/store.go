@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"time"
 
@@ -252,21 +253,31 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 		}
 	}
 
-	// When a subnet is in effect, the host IP (static_address) must lie inside
-	// its CIDR and may not collide with the gateway/network/broadcast. We
-	// require addr to be non-empty in that case — DHCP with a subnet pinned is
-	// nonsensical: the agent would have nothing to pin to. This rule is the
-	// gentle migration step; phase ④ will make subnet+host_ip the only path.
-	if resolvedSubnetID != "" {
-		if addr == "" {
-			return nil, errors.New("static_address: required when subnet_id is set")
-		}
+	// When a subnet is in effect AND the profile uses static addressing, the
+	// host IP (static_address) must lie inside its CIDR and may not collide with
+	// the gateway/network/broadcast. If static_address is empty, we auto-allocate
+	// an unused IP from the subnet. For DHCP profiles we never assign a static
+	// address — the host gets its lease from DHCP at boot.
+	if resolvedSubnetID != "" && networkMethod == "static" {
 		cidr, gw, err := s.fetchSubnetCIDRGateway(ctx, resolvedSubnetID)
 		if err != nil {
 			return nil, err
 		}
-		if err := hostInSubnet(addr, cidr, gw); err != nil {
-			return nil, fmt.Errorf("static_address %w", err)
+
+		// Auto-allocate IP if not provided
+		if addr == "" {
+			allocated, err := s.allocateIPFromSubnet(ctx, muuid, cidr, gw)
+			if err != nil {
+				return nil, fmt.Errorf("auto-allocate IP: %w", err)
+			}
+			addr = allocated
+			s.logger.Info("auto-allocated IP for binding",
+				"machine_uuid", muuid, "subnet_id", resolvedSubnetID, "ip", addr)
+		} else {
+			// Validate provided IP
+			if err := hostInSubnet(addr, cidr, gw); err != nil {
+				return nil, fmt.Errorf("static_address %w", err)
+			}
 		}
 	}
 
@@ -774,3 +785,89 @@ func familyCompatible(profileFam, imageFam string) error {
 	}
 	return fmt.Errorf("%w: profile expects %q, image is %q", ErrFamilyMismatch, p, i)
 }
+
+// allocateIPFromSubnet finds an unused IP address within the subnet's CIDR range.
+// It excludes the network address, broadcast address, gateway, and any IPs already
+// assigned to other bindings. Returns the first available IP in the range.
+func (s *Store) allocateIPFromSubnet(ctx context.Context, machineUUID, cidr, gateway string) (string, error) {
+	// Parse CIDR to get network range
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", fmt.Errorf("parse CIDR %q: %w", cidr, err)
+	}
+
+	// Get all IPs currently assigned in bindings (excluding this machine)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT static_address FROM bindings WHERE static_address IS NOT NULL AND machine_uuid != ?`,
+		machineUUID)
+	if err != nil {
+		return "", fmt.Errorf("query existing IPs: %w", err)
+	}
+	defer rows.Close()
+
+	usedIPs := make(map[string]bool)
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			return "", fmt.Errorf("scan IP: %w", err)
+		}
+		usedIPs[ip] = true
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+
+	// Mark gateway as used
+	usedIPs[gateway] = true
+
+	// Iterate through the subnet range to find first available IP
+	ip := ipnet.IP.Mask(ipnet.Mask)
+	for ipnet.Contains(ip) {
+		candidate := ip.String()
+
+		// Skip network address (first IP)
+		if ip.Equal(ipnet.IP) {
+			ip = nextIP(ip)
+			continue
+		}
+
+		// Skip broadcast address (last IP)
+		if isBroadcast(ip, ipnet) {
+			break
+		}
+
+		// Skip if already used
+		if usedIPs[candidate] {
+			ip = nextIP(ip)
+			continue
+		}
+
+		// Found an available IP
+		return candidate, nil
+	}
+
+	return "", errors.New("no available IP addresses in subnet range")
+}
+
+// nextIP returns the next IP address
+func nextIP(ip net.IP) net.IP {
+	next := make(net.IP, len(ip))
+	copy(next, ip)
+	for i := len(next) - 1; i >= 0; i-- {
+		next[i]++
+		if next[i] > 0 {
+			break
+		}
+	}
+	return next
+}
+
+// isBroadcast checks if an IP is the broadcast address for the given network
+func isBroadcast(ip net.IP, ipnet *net.IPNet) bool {
+	broadcast := make(net.IP, len(ip))
+	for i := range ip {
+		broadcast[i] = ip[i] | ^ipnet.Mask[i]
+	}
+	return ip.Equal(broadcast)
+}
+

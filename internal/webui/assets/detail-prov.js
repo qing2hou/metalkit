@@ -573,10 +573,11 @@
         }
       }
     }
-    if (subnetID && !staticAddr) {
-      MK.flashError("绑定 subnet 时必须填静态地址");
-      return;
-    }
+    // 允许空的静态地址 - 后端会自动分配一个未使用的 IP
+    // if (subnetID && !staticAddr) {
+    //   MK.flashError("绑定 subnet 时必须填静态地址");
+    //   return;
+    // }
 
     let vlanInt = 0;
     if (vlanRaw !== "") {

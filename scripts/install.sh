@@ -242,7 +242,7 @@ log "installing systemd unit: $UNIT_FILE"
 cat > "$UNIT_FILE" <<EOF
 [Unit]
 Description=metalkit bare-metal provisioning controller
-Documentation=https://github.com/metalkit/metalkit
+Documentation=https://github.com/qing2hou/metalkit
 After=network-online.target
 Wants=network-online.target
 

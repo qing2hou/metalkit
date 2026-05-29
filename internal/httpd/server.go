@@ -19,6 +19,7 @@ import (
 	"metalkit/internal/jobs"
 	"metalkit/internal/profiles"
 	"metalkit/internal/sessions"
+	"metalkit/internal/settings"
 	"metalkit/internal/subnets"
 	"metalkit/internal/util"
 )
@@ -68,6 +69,11 @@ type Config struct {
 	// Optional util API. When set, mounts /api/v1/util/* (currently just
 	// the SHA-512 crypt helper used by the operator UI).
 	Util *util.API
+
+	// Optional settings API. When set, mounts /api/v1/settings/* — used by
+	// the UI to read and persist runtime DHCP config without rewriting
+	// config.yaml on disk.
+	Settings *settings.API
 
 	// Optional sessions store. When set, the auth middleware will accept
 	// a metalkit_session cookie in addition to Basic Auth. Required for the
@@ -207,6 +213,9 @@ func (s *Server) routes() *http.ServeMux {
 	if s.cfg.Util != nil {
 		s.cfg.Util.RegisterRoutes(mux)
 	}
+	if s.cfg.Settings != nil {
+		s.cfg.Settings.RegisterRoutes(mux)
+	}
 	if s.cfg.Auth != nil {
 		s.cfg.Auth.RegisterRoutes(mux)
 	}
@@ -218,9 +227,15 @@ func (s *Server) routes() *http.ServeMux {
 		mux.Handle("/ui/", s.cfg.UI)
 	}
 
-	// Anything else: 404. ServeMux's default "/" would catch everything, so we
-	// register an explicit catch-all that 404s for unknown paths.
+	// Anything else: 404 — but bare "/" redirects to the Web UI when one is
+	// mounted so operators can just point their browser at the controller's
+	// port and land on the dashboard ("访问端口就能访问到平台"). Unknown
+	// non-root paths still 404.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" && s.cfg.UI != nil {
+			http.Redirect(w, r, "/ui/", http.StatusFound)
+			return
+		}
 		http.NotFound(w, r)
 	})
 	return mux

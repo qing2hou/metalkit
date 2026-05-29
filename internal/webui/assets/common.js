@@ -897,14 +897,10 @@
       return;
     }
     // 子网 + 静态地址联动校验：
-    //   绑定 subnet → 必须填静态地址，且地址在 CIDR 范围内
+    //   绑定 subnet → 静态地址可选（为空时后端自动分配），若填写则验证在 CIDR 范围内
     //   不绑定 subnet → 不做校验
-    if (subnetID) {
+    if (subnetID && staticAddr) {
       const hostOnly = staticAddr.split("/")[0];
-      if (!hostOnly) {
-        flashError("绑定 subnet 时必须填静态地址");
-        return;
-      }
       const s = subnetByID && subnetByID[subnetID];
       if (s) {
         const err = hostInSubnetCheck(hostOnly, s.cidr, s.gateway);

@@ -208,8 +208,12 @@ func (a *AgentAPI) getSpec(w http.ResponseWriter, r *http.Request) {
 	// not the profile. We overlay those fields onto the profile copy so the
 	// agent / installer contract (read everything off Profile.Network) stays
 	// unchanged downstream. binding.vlan_override > 0 trumps subnet.vlan_id.
-	// Method is forced to "static" since subnet pins the binding to a specific
-	// host IP; bindings.Upsert already refuses subnet_id without static_address.
+	// For static profiles the subnet pins the host IP and we force method=static.
+	// For DHCP profiles we keep method=dhcp — the subnet only contributes VLAN
+	// (gateway/DNS/prefix come from the DHCP server). Without this carve-out a
+	// DHCP profile bound to a subnet would render an unconfigured netplan
+	// stanza (dhcp4=false with no static addresses) and the host would have
+	// no IP after first boot.
 	if binding.SubnetID != "" && a.subnets != nil {
 		sn, err := a.subnets.Get(r.Context(), binding.SubnetID)
 		if err != nil {
@@ -218,17 +222,19 @@ func (a *AgentAPI) getSpec(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "load subnet failed")
 			return
 		}
-		prefix, err := prefixLenFromCIDR(sn.CIDR)
-		if err != nil {
-			a.logger.Error("agent spec: subnet cidr invalid", "err", err,
-				"subnet_id", binding.SubnetID, "cidr", sn.CIDR)
-			writeError(w, http.StatusInternalServerError, "subnet cidr invalid")
-			return
+		if profile.Network.Method != "dhcp" {
+			prefix, err := prefixLenFromCIDR(sn.CIDR)
+			if err != nil {
+				a.logger.Error("agent spec: subnet cidr invalid", "err", err,
+					"subnet_id", binding.SubnetID, "cidr", sn.CIDR)
+				writeError(w, http.StatusInternalServerError, "subnet cidr invalid")
+				return
+			}
+			profile.Network.Method = "static"
+			profile.Network.PrefixLen = prefix
+			profile.Network.Gateway = sn.Gateway
+			profile.Network.DNS = append([]string(nil), sn.DNS...)
 		}
-		profile.Network.Method = "static"
-		profile.Network.PrefixLen = prefix
-		profile.Network.Gateway = sn.Gateway
-		profile.Network.DNS = append([]string(nil), sn.DNS...)
 		switch {
 		case binding.VLANOverride > 0:
 			profile.Network.VLAN = binding.VLANOverride

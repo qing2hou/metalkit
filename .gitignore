@@ -1,14 +1,29 @@
+# 构建产物（本地开发）
 /bin/
 /boot/
 /controller
+/metalkit
+
+# 发布包输出目录
+/dist/
+
+# live-image 构建缓存
 /live-image/binary/
 /live-image/cache/
 /live-image/.build/
 /live-image/chroot/
 /live-image/auto/local
+
+# 临时文件
 *.deb
 *.iso
 *.tar
+*.tar.gz
+
+# 本地配置
 config.host147.yaml
 config.smoke.yaml
+config.auto.yaml
+
+# Claude Code
 .claude/

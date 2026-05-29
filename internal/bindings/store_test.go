@@ -860,16 +860,18 @@ func TestUpsertHostEqualsGateway(t *testing.T) {
 	}
 }
 
-func TestUpsertSubnetRequiresStaticAddress(t *testing.T) {
+// TestUpsertDHCPSubnetNoStaticAddress: a DHCP profile bound to a subnet must
+// succeed without a static_address — the host gets its IP from DHCP at boot.
+// (Static profiles auto-allocate from the subnet pool; DHCP profiles never do.)
+func TestUpsertDHCPSubnetNoStaticAddress(t *testing.T) {
 	f := newFixture(t)
 	mu := f.seedMachine(t, '4')
 	im := f.seedImage(t, "9")
-	// dhcp profile (no static_address required at profile level)
 	pr := f.seedProfile(t, "p-sn-dhcp", "dhcp")
 	sn := f.seedSubnet(t, "lab-dhcp", "10.0.0.0/24", "10.0.0.1")
 
 	sid := sn
-	_, err := f.bindings.Upsert(context.Background(), UpsertInput{
+	b, err := f.bindings.Upsert(context.Background(), UpsertInput{
 		MachineUUID:  mu,
 		ImageID:      im,
 		ProfileID:    pr,
@@ -877,8 +879,11 @@ func TestUpsertSubnetRequiresStaticAddress(t *testing.T) {
 		SubnetID:     &sid,
 		UpdatedBy:    "admin",
 	})
-	if err == nil || !strings.Contains(err.Error(), "static_address") {
-		t.Fatalf("want static_address-required-with-subnet error, got %v", err)
+	if err != nil {
+		t.Fatalf("dhcp+subnet without static_address must succeed, got %v", err)
+	}
+	if b.StaticAddress != "" {
+		t.Fatalf("dhcp profile must not get a static_address; got %q", b.StaticAddress)
 	}
 }
 

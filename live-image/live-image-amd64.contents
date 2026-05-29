@@ -11,8 +11,8 @@
 /live/filesystem.packages-remove
 /live/filesystem.squashfs
 /live/initrd.img
-/live/initrd.img-6.1.0-48-amd64
+/live/initrd.img-6.1.0-49-amd64
 /live/vmlinuz
-/live/vmlinuz-6.1.0-48-amd64
+/live/vmlinuz-6.1.0-49-amd64
 /sha256sum.README
 /sha256sum.txt

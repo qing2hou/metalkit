@@ -1,213 +1,296 @@
 # metalkit
 
-Single-binary bare-metal PXE provisioning controller. Bundles a ProxyDHCP, TFTP, and HTTP server to PXE-boot bare-metal hosts into a Debian live system over the network.
+单二进制裸机 PXE 自动装机系统。集成 DHCP、TFTP、HTTP 服务器，通过 PXE 网络启动裸机进入 Debian live 系统并自动安装操作系统。
 
-## Status: M1 — boot chain only
+---
 
-This milestone delivers the cold-boot chain: client PXE ROM → ProxyDHCP → TFTP (iPXE) → iPXE second-stage DHCP → HTTP (iPXE script + kernel + initrd + squashfs) → Debian live root shell.
+## ✨ 特性
 
-**Out of scope for M1**: installer agent inside the live image, OS image writing, cloud-init injection, IPMI/Redfish, SQLite state, Web UI. See the plan file for the full M1→M7 roadmap.
+- **零依赖部署**：单个二进制 + boot 文件，无需 Docker/K8s
+- **多发行版支持**：Ubuntu、Debian、Rocky Linux、AlmaLinux、CentOS
+- **自动化装机**：PXE 启动 → 自动分区 → 写入镜像 → cloud-init 配置 → 重启进入系统
+- **Web UI 管理**：机器清单、装机任务、网络配置、镜像管理
+- **灵活网络配置**：支持 DHCP、静态 IP、bond、VLAN
+- **IPMI 集成**：自动上下电、设置启动设备
 
-## Prerequisites
+---
 
-- Go ≥ 1.23 (the `insomniacslk/dhcp` library requires it; if your system Go is older, `GOTOOLCHAIN=auto` will fetch the right one)
-- Docker (for the Debian live-image build; live-build needs a Debian/Ubuntu host)
-- `curl` (for fetching iPXE binaries)
-- Linux host with `CAP_NET_BIND_SERVICE` or root to bind UDP 67/69/4011 and TCP 80/8080
+## 📋 系统要求
 
-## Build
+### 部署服务器
 
-```
-make tidy        # resolve Go deps
-make ipxe        # fetch undionly.kpxe / snponly.efi / ipxe.efi → internal/ipxebin/assets/
-make build       # produce bin/controller (~8MB, CGO-free, static)
-make live        # build Debian live image via docker → boot/{vmlinuz,initrd.img,filesystem.squashfs}
-                 # (10–25 min, downloads ~600MB of apt packages)
-```
+- **操作系统**：Ubuntu 20.04+、Debian 11+、Rocky Linux 8+、AlmaLinux 8+
+- **架构**：x86_64 (amd64)
+- **网络**：至少一个物理网卡，UDP 67/69/4011 和 TCP 8080/9090 可绑定
+- **权限**：root 或 sudo
 
-If `make` invokes the wrong Go: `make GO=/path/to/go build`.
+### 目标机器（被装机的裸机）
 
-The iPXE binaries are pulled fresh from `boot.ipxe.org` by `scripts/fetch-ipxe.sh`. The script prints SHA-256 hashes — to make builds reproducible, copy them into the script and add a verification step.
+- **启动方式**：支持 PXE（BIOS 或 UEFI，需禁用 Secure Boot）
+- **BMC**：可选，用于 IPMI 远程上下电
 
-## Run
+---
 
-Edit `config.example.yaml` (or create your own) and set `serverIP` to the IP your control plane will bind. **Must be an IPv4 literal**: live-boot's initramfs busybox-wget does not resolve DNS, so the URL in the iPXE script must be a numeric IP.
+## 🚀 快速开始
 
-```yaml
-serverIP: 10.99.0.1           # IPv4 literal; clients fetch boot files from this IP
-interface: br-pxe             # network interface to bind DHCP/TFTP (Linux SO_BINDTODEVICE)
-httpAddr: ":8080"
-dhcpAddr: ":67"
-bsdpAddr: ":4011"             # PXE Boot Server Discovery (Layer 3), used by strict ROMs (Dell)
-tftpAddr: ":69"
-bootDir: ./boot               # must contain vmlinuz, initrd.img, filesystem.squashfs
-logLevel: info                # debug|info|warn|error
-```
+### 1. 下载发布包
 
-```
-sudo ./bin/controller -config config.example.yaml
-```
+从开发机获取最新的 `metalkit-<version>.tar.gz`（约 660MB）。
 
-Logs are structured JSON on stderr. SIGTERM/SIGINT triggers graceful shutdown (5s timeout).
+---
 
-## End-to-end test with QEMU
+### 2. 部署到服务器
 
-Tested in an isolated bridge — **do not run this on your office LAN**, it will start replying to PXE clients.
+```bash
+# 传输到目标服务器
+scp metalkit-*.tar.gz root@<server-ip>:/root/
 
-1. **Create an isolated bridge** (Linux):
-   ```
-   sudo ip link add br-pxe type bridge
-   sudo ip addr add 10.99.0.1/24 dev br-pxe
-   sudo ip link set br-pxe up
-   ```
+# SSH 登录
+ssh root@<server-ip>
 
-2. **Start dnsmasq for IP assignment only** (no PXE options — those come from metalkit):
-   ```
-   sudo dnsmasq \
-     --interface=br-pxe --bind-interfaces \
-     --dhcp-range=10.99.0.100,10.99.0.200,12h \
-     --port=0 --no-daemon
-   ```
-   `--port=0` disables DNS, leaving only DHCP. Coexisting with metalkit's ProxyDHCP on 67 works because dnsmasq does not set option 60.
-
-3. **Build everything** (see Build above), then start metalkit:
-   ```
-   sudo ./bin/controller -config config.example.yaml
-   ```
-
-4. **Allow QEMU bridge helper** (one-time host setup):
-   ```
-   sudo install -d /etc/qemu
-   echo 'allow br-pxe' | sudo tee /etc/qemu/bridge.conf
-   sudo chmod u+s /usr/lib/qemu/qemu-bridge-helper   # path varies per distro
-   ```
-
-5. **Boot a BIOS PXE client**:
-   ```
-   qemu-system-x86_64 -enable-kvm -m 2048 -boot n -nographic \
-     -netdev bridge,id=n0,br=br-pxe \
-     -device e1000,netdev=n0,mac=52:54:00:12:34:56
-   ```
-
-6. **Boot a UEFI PXE client** (add OVMF firmware):
-   ```
-   qemu-system-x86_64 -enable-kvm -m 2048 -boot n -nographic \
-     -bios /usr/share/OVMF/OVMF_CODE.fd \
-     -netdev bridge,id=n0,br=br-pxe \
-     -device e1000,netdev=n0,mac=52:54:00:12:34:57
-   ```
-
-Expected timeline (~1–2 min on a fast link):
-- PXE ROM gets IP from dnsmasq
-- PXE ROM gets ProxyDHCP offer from metalkit pointing at `undionly.kpxe` (BIOS) or `snponly.efi` (UEFI x64)
-- TFTP fetch of the iPXE binary
-- iPXE re-does DHCP — metalkit identifies it via DHCP option 77=`iPXE` and responds with `http://<serverIP>:8080/boot/ipxe` as filename
-- iPXE chainloads the HTTP script; `kernel`/`initrd` lines pull from HTTP
-- Kernel boots, live-boot initramfs runs `fetch=` to pull squashfs (~800MB) into RAM
-- Debian login prompt appears (no agent yet — just `root` shell via getty on tty1)
-
-## How the boot chain works
-
-```
-client PXE ROM
-   │ option 60 = PXEClient:Arch:NNNN:...
-   │ option 93 = client architecture
-   ▼
-[dnsmasq]              gives an IP (yiaddr) only
-[metalkit ProxyDHCP]   minimal advertisement on UDP 67:
-                       msg=Offer/ACK, Server-ID, option 60=PXEClient, GUID echo.
-                       NO bootfile/siaddr/option 66 in this packet — strict PXE
-                       ROMs (Dell PowerEdge) reject any port-67 reply that
-                       includes them. This advert just tells the client
-                       "a PXE boot server lives at this IP".
-   │
-   ▼
-[metalkit BSDP on UDP 4011]   client unicasts a DHCPRequest to <serverIP>:4011
-                              after getting its IP; metalkit answers with
-                              msg=ACK, siaddr=serverIP, sname=serverIP,
-                              file = bootfile for arch.
-                              (iPXE in QEMU does not need this — it accepts
-                              Layer 1 on port 67; only strict ROMs do BSDP.)
-   │
-   ▼
-TFTP fetch from siaddr:69
-   • undionly.kpxe   (BIOS,         arch 0x0000)
-   • snponly.efi     (UEFI x86_64,  arch 0x0007 or 0x0009)
-   • ipxe.efi        (UEFI fallback for older firmware)
-   │
-   ▼
-iPXE runs, re-does DHCP on port 67 (Layer 1, no BSDP)
-   │ option 60 = PXEClient (unchanged!)
-   │ option 77 = iPXE        ← metalkit uses THIS to detect 2nd stage
-   ▼
-[metalkit ProxyDHCP]   answers on port 67 with filename = "http://10.99.0.1:8080/boot/ipxe"
-   │
-   ▼
-iPXE chainloads HTTP script:
-   kernel  http://10.99.0.1:8080/boot/vmlinuz initrd=initrd.img boot=live fetch=http://10.99.0.1:8080/boot/filesystem.squashfs ip=dhcp
-   initrd  http://10.99.0.1:8080/boot/initrd.img
-   boot
-   │
-   ▼
-Linux boot, live-boot initramfs:
-   • ip=dhcp gets an address
-   • fetch=URL downloads squashfs into RAM
-   • pivots root to the live filesystem
-   ▼
-Debian login prompt (M2 will replace this with installer-agent)
+# 解压并安装
+cd /root
+tar -xzf metalkit-*.tar.gz
+cd metalkit
+sudo ./scripts/install.sh
 ```
 
-## Configuration reference
+安装脚本会提示输入：
+- **Network interface**：网卡名（如 `ens32`）
+- **Server IP**：服务器 IP（如 `192.168.10.10`）
+- **HTTP listen addr**：HTTP 端口（如 `:9090`）
+- **Admin username**：管理员用户名（默认 `admin`）
+- **Admin password**：管理员密码
 
-| Field | Required | Description |
-|---|---|---|
-| `serverIP` | yes | IPv4 literal. Embedded into iPXE script (`fetch=http://IP/...`) — must be numeric, live-boot's initramfs does not resolve DNS. |
-| `interface` | yes | Network interface to bind DHCP/TFTP (e.g. `br-pxe`, `eth0`). Used with `SO_BINDTODEVICE`. |
-| `httpAddr` | yes | TCP listen for HTTP, e.g. `:8080` or `10.99.0.1:8080`. |
-| `dhcpAddr` | yes | UDP listen for ProxyDHCP, typically `:67`. |
-| `bsdpAddr` | no | UDP listen for PXE Boot Server Discovery (Layer 3), default `:4011`. Required for strict PXE ROMs (Dell PowerEdge, some HP). |
-| `tftpAddr` | yes | UDP listen for TFTP, typically `:69`. |
-| `bootDir` | yes | Filesystem directory with `vmlinuz`, `initrd.img`, `filesystem.squashfs` produced by `make live`. |
-| `logLevel` | no | `debug` / `info` (default) / `warn` / `error`. |
+---
 
-## Repository layout
+### 3. 访问 Web UI
+
+打开浏览器访问：
 
 ```
-cmd/controller/        # main entry point, wires the four servers
-internal/config/       # YAML loader + validation
-internal/dhcp/         # ProxyDHCP (UDP 67) + BSDP Layer 3 (UDP 4011), insomniacslk/dhcp/dhcpv4
-internal/tftp/         # TFTP read-only, pin/tftp/v3
-internal/httpd/        # HTTP + iPXE script template, stdlib only
-internal/ipxebin/      # iPXE binaries embedded via //go:embed assets
-live-image/            # Debian live-build project (auto/, config/)
-scripts/
-  fetch-ipxe.sh        # downloads undionly.kpxe / snponly.efi / ipxe.efi
-  build-live.sh        # runs lb build inside a privileged debian:bookworm container
+http://<server-ip>:9090/ui/
 ```
 
-## Known limitations / gotchas
+用设置的管理员账号登录。
 
-- **Secure Boot must be disabled on target hosts.** The iPXE binaries from `boot.ipxe.org` are not signed with Microsoft's UEFI CA. Disable Secure Boot in BMC before PXE install.
-- **The `fetch=` URL must use an IPv4 literal.** The constructor enforces this; if you set a hostname in `serverIP`, the controller refuses to start.
-- **ProxyDHCP coexistence**: assumes a separate DHCP server is handing out IPs. If you run metalkit on a segment with no DHCP at all, clients won't get an IP and PXE never starts. (Full DHCP support is a future feature.)
-- **First DHCP must not set option 60=PXEClient.** dnsmasq does not, by default. ISC dhcpd and some enterprise DHCPs do — if you see clients trying to chainload from your IT DHCP, configure that DHCP to skip option 60 or run metalkit on a dedicated VLAN.
-- **arm64 (option 93 = 0x000b)** is recognized but the iPXE binary isn't included in `make ipxe`. Add `arm64-snponly.efi` to `scripts/fetch-ipxe.sh` from `https://boot.ipxe.org/arm64-efi/` if you need it.
-- **No SHA-256 pinning on iPXE binaries yet.** `scripts/fetch-ipxe.sh` prints the hashes; pin them in the script for reproducibility.
+---
 
-## Tests
+### 4. 上传 OS 镜像
+
+在 Web UI 的 **Images** 页面上传操作系统镜像（支持 `.qcow2`、`.raw`、`.img`）。
+
+---
+
+### 5. 创建 Profile
+
+在 **Profiles** 页面创建装机配置：
+- 选择网络模式（DHCP 或静态 IP）
+- 设置 root 密码
+- 选择目标磁盘策略
+
+---
+
+### 6. 纳管机器并装机
+
+1. 在 **Machines** 页面等待机器 PXE 启动后自动注册
+2. 点击机器进入详情页
+3. 点击 **Install** 按钮，选择镜像和 Profile
+4. 系统自动：
+   - IPMI 设置启动设备为 PXE
+   - 重启机器
+   - PXE 启动进入 live 系统
+   - 自动分区、写入镜像、配置网络
+   - 重启进入安装好的系统
+
+---
+
+## 📚 文档
+
+- **[DEPLOY.md](./DEPLOY.md)** — 详细部署指南（更新、故障排查）
+- **[DEVELOP.md](./DEVELOP.md)** — 开发指南（构建、测试、打包）
+- **[docs/api.md](./docs/api.md)** — HTTP API 文档
+- **[docs/features.md](./docs/features.md)** — 功能详解
+
+---
+
+## 🏗️ 架构
 
 ```
-go test ./...            # 22 tests across dhcp/tftp/httpd
-go test -race ./...      # race detector (passes)
-go vet ./...
+┌─────────────────────────────────────────────────────────────┐
+│                    metalkit-controller                       │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
+│  │   DHCP   │  │   TFTP   │  │   HTTP   │  │  Web UI  │   │
+│  │  :67     │  │   :69    │  │  :9090   │  │          │   │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
+│       │             │              │              │          │
+└───────┼─────────────┼──────────────┼──────────────┼─────────┘
+        │             │              │              │
+        ▼             ▼              ▼              ▼
+   PXE 启动      TFTP 下载      HTTP 下载       浏览器管理
+   (iPXE)       (iPXE 二进制)   (内核/镜像)
+        │             │              │
+        └─────────────┴──────────────┘
+                      │
+                      ▼
+            ┌──────────────────┐
+            │  Debian Live 系统 │
+            │  (metalkit-agent) │
+            └──────────────────┘
+                      │
+                      ▼
+            自动分区、写入镜像、配置网络
+                      │
+                      ▼
+            重启进入安装好的操作系统
 ```
 
-## End-to-end build & deploy guide (Chinese)
+---
 
-For the full M1 build → deploy → real-hardware-verify procedure, including all the
-hook customizations baked into the live image, the dnsmasq sidecar setup, and the
-field-tested troubleshooting playbook, see [`docs/build-and-deploy.md`](docs/build-and-deploy.md).
+## 🔧 开发
 
-## Plan
+### 构建
 
-Full design and milestone breakdown: `~/.claude/plans/buzzing-leaping-scroll.md` (M1 only). Subsequent milestones (installer agent, multi-distro OS install, network config, IPMI/Redfish) are scoped but not yet planned in detail.
+```bash
+cd /opt/claude/metalkit
+
+# 构建二进制
+go build -buildvcs=false -o bin/controller ./cmd/controller
+go build -buildvcs=false -o bin/agent      ./cmd/agent
+
+# 构建 live 镜像（首次或修改 agent 后，耗时 10-30 分钟）
+./scripts/build-live.sh --docker
+
+# 打包发布版本
+./scripts/package.sh
+```
+
+---
+
+### 测试
+
+```bash
+# 运行所有测试
+go test ./...
+
+# 运行特定包测试
+go test ./internal/dhcp/...
+go test ./internal/bindings/...
+
+# 带覆盖率
+go test -cover ./...
+```
+
+详见 [DEVELOP.md](./DEVELOP.md)。
+
+---
+
+## 🐛 故障排查
+
+### iPXE 获取不到 IP（yiaddr=0.0.0.0）
+
+**症状**：PXE 机器显示 `No configuration methods succeeded`
+
+**解决**：确保部署的是最新版本（2026-05-29 之后），包含 DHCP 修复。
+
+---
+
+### 端口被占用
+
+**症状**：`doctor` 报错 `bind: address already in use`
+
+**解决**：
+
+```bash
+# 查看占用者
+sudo ss -ulnp | grep :69
+
+# 停掉冲突服务
+sudo systemctl stop dnsmasq
+sudo systemctl disable dnsmasq
+sudo systemctl restart metalkit-controller
+```
+
+---
+
+### DHCP 模式下需要手动 dhclient
+
+**症状**：装机后系统没有自动获取 IP
+
+**原因**：旧版本 bug（已在 2026-05-29 修复）
+
+**解决**：更新到最新版本。
+
+详见 [DEPLOY.md](./DEPLOY.md) 的故障排查章节。
+
+---
+
+## 📂 项目结构
+
+```
+/opt/claude/metalkit/              # 开发源码
+├── cmd/                           # 主程序入口
+│   ├── controller/                # metalkit-controller（服务端）
+│   └── agent/                     # metalkit-agent（live 镜像内）
+├── internal/                      # 内部包
+│   ├── dhcp/                      # DHCP 服务器
+│   ├── httpd/                     # HTTP API + Web UI
+│   ├── jobs/                      # 装机任务编排
+│   ├── bindings/                  # 机器绑定
+│   ├── installer/                 # cloud-init seed 生成
+│   └── ...
+├── scripts/
+│   ├── build-live.sh              # 构建 Debian live 镜像
+│   ├── install.sh                 # 目标服务器安装脚本
+│   └── package.sh                 # 打包发布脚本
+├── live-image/                    # live 镜像构建配置
+├── bin/                           # 本地构建产物（不进 git）
+├── boot/                          # 本地构建产物（不进 git）
+├── dist/                          # 发布包输出（不进 git）
+├── DEPLOY.md                      # 部署文档
+├── DEVELOP.md                     # 开发文档
+└── README.md                      # 本文件
+```
+
+---
+
+## 🔐 安全建议
+
+1. **修改默认密码**：首次登录后立即修改管理员密码
+2. **限制访问**：使用防火墙规则只允许内网访问 Web UI
+3. **定期备份**：备份 `/var/lib/metalkit/inventory.db`
+4. **保护密钥**：`/var/lib/metalkit/master.key` 权限设为 0600
+
+---
+
+## 📝 已知限制
+
+- **Secure Boot**：目标机器必须禁用 Secure Boot（iPXE 二进制未签名）
+- **同子网 DHCP**：部署服务器所在子网不能有其他 DHCP 服务器（或使用 ProxyDHCP 模式）
+- **IPv4 only**：当前仅支持 IPv4（IPv6 支持计划中）
+
+---
+
+## 🤝 贡献
+
+欢迎提交 Issue 和 Pull Request！
+
+1. Fork 仓库
+2. 创建特性分支：`git checkout -b feat/my-feature`
+3. 提交修改：`git commit -m "feat: add my feature"`
+4. 推送分支：`git push origin feat/my-feature`
+5. 创建 Pull Request
+
+---
+
+## 📄 许可证
+
+[MIT License](./LICENSE)
+
+---
+
+## 📞 获取帮助
+
+- **查看日志**：`journalctl -u metalkit-controller -f`
+- **运行自检**：`/opt/metalkit/bin/metalkit-controller doctor -config /etc/metalkit/config.yaml`
+- **文档**：[DEPLOY.md](./DEPLOY.md) | [DEVELOP.md](./DEVELOP.md)

@@ -26,8 +26,10 @@ import (
 	"metalkit/internal/ipmi"
 	"metalkit/internal/ipxebin"
 	"metalkit/internal/jobs"
+	"metalkit/internal/leases"
 	"metalkit/internal/profiles"
 	"metalkit/internal/sessions"
+	"metalkit/internal/settings"
 	"metalkit/internal/sqlitedb"
 	"metalkit/internal/subnets"
 	"metalkit/internal/tftp"
@@ -104,6 +106,89 @@ func (a *bindingsDeleteAdapter) DeleteBindingForMachine(ctx context.Context, mac
 	return err
 }
 
+// leasesAdapter bridges *leases.Store to the dhcp package's LeaseStore
+// interface. The DHCP layer wants minimal, protocol-flavored types so it
+// stays free of SQL/store imports; we do the struct translation here.
+type leasesAdapter struct{ store *leases.Store }
+
+func (a *leasesAdapter) Allocate(ctx context.Context, in dhcp.AllocateInput) (string, error) {
+	l, err := a.store.Allocate(ctx, leases.AllocateInput{
+		MAC:      in.MAC,
+		Hostname: in.Hostname,
+		Start:    in.Start,
+		End:      in.End,
+		Exclude:  in.Exclude,
+		LeaseDur: in.LeaseDur,
+	})
+	if err != nil {
+		return "", err
+	}
+	return l.IP, nil
+}
+
+func (a *leasesAdapter) Confirm(ctx context.Context, mac, requestedIP string, leaseDur time.Duration) error {
+	_, err := a.store.Confirm(ctx, mac, requestedIP, leaseDur)
+	return err
+}
+
+func (a *leasesAdapter) Release(ctx context.Context, mac string) error {
+	return a.store.Release(ctx, mac)
+}
+
+// dhcpReloader implements settings.DHCPReloader. The settings API hands us
+// the validated new DHCPSettings; we rebuild a dhcp.Pool and call Reload on
+// the live server. The UDP/67 socket stays bound throughout — there's no
+// window where DHCP is "down" between save and effective.
+type dhcpReloader struct {
+	server *dhcp.Server
+	leases dhcp.LeaseStore
+	logger *slog.Logger
+}
+
+func (r *dhcpReloader) ReloadDHCP(_ context.Context, s settings.DHCPSettings) error {
+	if s.Mode == config.DHCPModeProxy {
+		// Proxy mode: no pool, no leases needed by the protocol layer. The
+		// leases store is still alive in the background for the next flip
+		// back to full.
+		return r.server.Reload(dhcp.ModeProxy, nil, nil)
+	}
+	pool, err := dhcp.NewPool(
+		s.Start, s.End, s.Netmask, s.Gateway,
+		s.DNS, uint32(s.LeaseHours)*3600, s.Exclude,
+	)
+	if err != nil {
+		return fmt.Errorf("rebuild pool: %w", err)
+	}
+	r.logger.Info("dhcp: hot-reloading",
+		"mode", s.Mode, "start", s.Start, "end", s.End,
+		"gateway", s.Gateway, "netmask", s.Netmask, "lease_hours", s.LeaseHours,
+	)
+	return r.server.Reload(dhcp.ModeFull, pool, r.leases)
+}
+
+// runLeaseGC periodically drops fully-expired lease rows. Loop interval is
+// 1 minute (cheap — a DELETE on a small indexed table); grace period is 1h
+// so a freshly-released MAC can reconnect and pull back the same IP.
+func runLeaseGC(ctx context.Context, store *leases.Store, logger *slog.Logger) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			n, err := store.GC(ctx, time.Hour)
+			if err != nil {
+				logger.Warn("leases gc", "err", err)
+				continue
+			}
+			if n > 0 {
+				logger.Debug("leases gc", "dropped", n)
+			}
+		}
+	}
+}
+
 func main() {
 	os.Exit(run())
 }
@@ -140,13 +225,104 @@ func run() int {
 
 	httpURL := fmt.Sprintf("http://%s%s/boot/ipxe", cfg.ServerIP, cfg.HTTPAddr)
 
-	dhcpSrv, err := dhcp.New(dhcp.Config{
+	// Open the shared SQLite handle. The parent directory is created if needed
+	// so fresh installs work without a manual mkdir; the same handle is then
+	// passed to every store layer (inventory, images, …) so all tables live in
+	// one file and cross-table foreign keys are possible.
+	//
+	// NOTE: SQLite is opened BEFORE the DHCP server because full-mode DHCP
+	// needs the leases store, which lives in the same DB. Proxy-mode deploys
+	// don't touch the leases table.
+	if dir := filepath.Dir(cfg.DBPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			logger.Error("inventory db dir", "path", dir, "err", err)
+			return 1
+		}
+	}
+	db, err := sqlitedb.Open(ctx, sqlitedb.Options{
+		Path:   cfg.DBPath,
+		Logger: logger.With("component", "sqlitedb"),
+	})
+	if err != nil {
+		logger.Error("sqlitedb open", "err", err)
+		return 1
+	}
+	defer db.Close()
+
+	// Settings store: a tiny key/value table the operator UI writes into.
+	// Opened early so any UI-saved DHCP overrides overlay cfg BEFORE the
+	// DHCP pool / leases store are constructed below — changes saved in
+	// the UI then take effect on the next restart without anyone touching
+	// config.yaml.
+	settingsStore, err := settings.NewStore(ctx, db, logger.With("component", "settings"))
+	if err != nil {
+		logger.Error("settings open", "err", err)
+		return 1
+	}
+	if err := settings.ApplyOverridesToConfig(ctx, settingsStore, cfg, logger.With("component", "settings")); err != nil {
+		logger.Error("settings overlay", "err", err)
+		return 1
+	}
+	// resolveDHCPPool only ran inside config.Load when cfg.DHCPMode was
+	// already full at YAML-load time. If the UI just flipped the mode to
+	// full via the settings table, re-run the pool resolver now so we get
+	// the same auto-derivation that a fresh `dhcpMode: full` install gets.
+	if cfg.DHCPMode == config.DHCPModeFull && cfg.DHCPPool == nil {
+		if err := cfg.ResolveDHCPPool(); err != nil {
+			logger.Error("dhcp pool resolve (post-settings)", "err", err)
+			return 1
+		}
+	}
+
+	// Leases store: always opened, even in proxy mode. The schema apply is
+	// cheap (one CREATE TABLE IF NOT EXISTS) and having the store ready
+	// from the start means a UI-triggered proxy→full hot-reload doesn't
+	// need to lazily wire anything — Reload just hands us the existing
+	// store.
+	leaseStore, err := leases.NewStore(ctx, db, logger.With("component", "leases"))
+	if err != nil {
+		logger.Error("leases open", "err", err)
+		return 1
+	}
+
+	// DHCP pool is only built when full mode is the initial state; if the
+	// UI flips mode later, the reloader builds a fresh pool from the new
+	// settings without going through this path.
+	var dhcpPool *dhcp.Pool
+	if cfg.DHCPMode == config.DHCPModeFull {
+		dhcpPool, err = dhcp.NewPool(
+			cfg.DHCPPool.Start, cfg.DHCPPool.End,
+			cfg.DHCPPool.Netmask, cfg.DHCPPool.Gateway,
+			cfg.DHCPPool.DNS, uint32(cfg.DHCPPool.LeaseHours)*3600,
+			cfg.DHCPPool.Exclude,
+		)
+		if err != nil {
+			logger.Error("dhcp pool", "err", err)
+			return 1
+		}
+		logger.Info("dhcp: full mode enabled",
+			"pool_start", cfg.DHCPPool.Start,
+			"pool_end", cfg.DHCPPool.End,
+			"gateway", cfg.DHCPPool.Gateway,
+			"netmask", cfg.DHCPPool.Netmask,
+			"lease_hours", cfg.DHCPPool.LeaseHours,
+		)
+	}
+
+	leasesForDHCP := &leasesAdapter{store: leaseStore}
+	dhcpCfg := dhcp.Config{
 		Interface:  cfg.Interface,
 		ListenAddr: cfg.DHCPAddr,
 		ServerIP:   cfg.ServerIP,
 		HTTPURL:    httpURL,
 		Logger:     logger.With("component", "dhcp"),
-	})
+		Mode:       dhcp.Mode(cfg.DHCPMode),
+		Pool:       dhcpPool,
+	}
+	if cfg.DHCPMode == config.DHCPModeFull {
+		dhcpCfg.Leases = leasesForDHCP
+	}
+	dhcpSrv, err := dhcp.New(dhcpCfg)
 	if err != nil {
 		logger.Error("dhcp init", "err", err)
 		return 1
@@ -178,26 +354,6 @@ func run() int {
 		return 1
 	}
 
-	// Open the shared SQLite handle. The parent directory is created if needed
-	// so fresh installs work without a manual mkdir; the same handle is then
-	// passed to every store layer (inventory, images, …) so all tables live in
-	// one file and cross-table foreign keys are possible.
-	if dir := filepath.Dir(cfg.DBPath); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			logger.Error("inventory db dir", "path", dir, "err", err)
-			return 1
-		}
-	}
-	db, err := sqlitedb.Open(ctx, sqlitedb.Options{
-		Path:   cfg.DBPath,
-		Logger: logger.With("component", "sqlitedb"),
-	})
-	if err != nil {
-		logger.Error("sqlitedb open", "err", err)
-		return 1
-	}
-	defer db.Close()
-
 	store, err := inventory.NewStore(ctx, db, logger.With("component", "inventory"))
 	if err != nil {
 		logger.Error("inventory open", "err", err)
@@ -206,6 +362,12 @@ func run() int {
 
 	// Offline marker: runs until ctx is cancelled.
 	go store.RunOfflineMarker(runCtx)
+
+	// Leases GC: drop rows whose expires_at is more than 1h in the past so
+	// the leases table doesn't grow unbounded. The 1h grace keeps recently
+	// released rows around long enough that a quick MAC reconnect gets the
+	// same IP back. Always runs — proxy mode just sees an empty table.
+	go runLeaseGC(runCtx, leaseStore, logger.With("component", "leases"))
 
 	// Image catalog + chunked-upload store. Shares the same DB handle so future
 	// FKs to images (bindings, jobs) are possible.
@@ -363,6 +525,14 @@ func run() int {
 
 	uiHandler := webui.Handler(webui.Config{Mount: "/ui"})
 
+	reloader := &dhcpReloader{
+		server: dhcpSrv,
+		leases: leasesForDHCP,
+		logger: logger.With("component", "dhcp-reload"),
+	}
+	settingsAPI := settings.NewAPI(settingsStore, cfg, logger.With("component", "settings-api")).
+		WithReloader(reloader)
+
 	httpSrv, err := httpd.New(httpd.Config{
 		ListenAddr:       cfg.HTTPAddr,
 		ServerIP:         cfg.ServerIP,
@@ -379,6 +549,7 @@ func run() int {
 		Jobs:             jobsAPI,
 		AgentJobs:        agentJobsAPI,
 		Util:             utilAPI,
+		Settings:         settingsAPI,
 		Sessions:         sessStore,
 		Auth:             authAPI,
 		UI:               uiHandler,

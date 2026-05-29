@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="metalkit-api-base" content="/api/v1">
+  <title>metalkit - 设置</title>
+  <link rel="stylesheet" href="/ui/assets/style.css">
+</head>
+<body data-page="settings">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1 class="brand"><a href="/ui/">metalkit</a></h1>
+      <nav class="topnav">
+        <a href="/ui/">机器</a>
+        <a href="/ui/images">镜像</a>
+        <a href="/ui/subnets">子网</a>
+        <a href="/ui/profiles">配置</a>
+        <a href="/ui/bmc">BMC</a>
+        <a href="/ui/jobs">作业</a>
+        <a href="/ui/settings" class="active">设置</a>
+      </nav>
+      <div class="topbar-actions">
+        <span id="current-user" class="muted" title="当前登录用户"></span>
+        <button id="logout-btn" type="button" class="btn btn-ghost" title="退出登录">退出</button>
+      </div>
+    </div>
+  </header>
+  <main class="page">
+    <div id="error-banner" class="error-banner" hidden></div>
+    <section>
+      <div class="section-head">
+        <h2>DHCP 服务</h2>
+      </div>
+      <p class="muted">
+        metalkit 内置 DHCP，可独立向 LAN 分发 IP 与 PXE 引导信息。
+        <strong>proxy</strong> 模式只发 PXE 引导信息，依赖外部 DHCP 分配地址；
+        <strong>full</strong> 模式自行分发 IP，无需外部 DHCP。
+        修改保存后需要 <strong>重启控制器</strong> 才会生效。
+      </p>
+
+      <div id="applied-banner" class="success-banner" hidden>
+        配置已生效（DHCP 服务已热重载，无需重启）。
+      </div>
+      <div id="restart-banner" class="success-banner" hidden>
+        配置已保存，但热重载失败。<strong>请重启控制器进程</strong>使变更生效：
+        <code>systemctl restart metalkit-controller</code>
+      </div>
+
+      <div id="settings-loading" class="muted">加载中&hellip;</div>
+
+      <form id="dhcp-form" class="form-card" hidden>
+        <div class="form-row">
+          <label for="f-mode">模式 <span class="required">*</span></label>
+          <select id="f-mode" required>
+            <option value="proxy">proxy — 仅 PXE，外部 DHCP 分发 IP</option>
+            <option value="full">full — 内置 DHCP 分发 IP + PXE</option>
+          </select>
+        </div>
+
+        <fieldset id="pool-fields" class="form-fieldset">
+          <legend>地址池（full 模式生效）</legend>
+
+          <div class="form-row">
+            <label for="f-start">起始 IP <span class="required">*</span></label>
+            <input type="text" id="f-start" placeholder="192.168.10.100">
+            <div class="muted">租约下发的第一个 IP。</div>
+          </div>
+
+          <div class="form-row">
+            <label for="f-end">结束 IP <span class="required">*</span></label>
+            <input type="text" id="f-end" placeholder="192.168.10.200">
+            <div class="muted">租约下发的最后一个 IP。</div>
+          </div>
+
+          <div class="form-row">
+            <label for="f-mask">子网掩码 <span class="required">*</span></label>
+            <input type="text" id="f-mask" placeholder="255.255.255.0">
+          </div>
+
+          <div class="form-row">
+            <label for="f-gw">网关 <span class="required">*</span></label>
+            <input type="text" id="f-gw" placeholder="192.168.10.1">
+            <div class="muted">option 3，下发给客户端的默认路由。</div>
+          </div>
+
+          <div class="form-row">
+            <label for="f-dns">DNS（逗号分隔）</label>
+            <input type="text" id="f-dns" placeholder="8.8.8.8, 1.1.1.1">
+            <div class="muted">option 6。留空使用默认 <code>8.8.8.8, 1.1.1.1</code>。</div>
+          </div>
+
+          <div class="form-row">
+            <label for="f-lease">租约时长（小时）</label>
+            <input type="number" id="f-lease" min="1" max="720" value="24">
+          </div>
+
+          <div class="form-row">
+            <label for="f-exclude">排除 IP（逗号分隔）</label>
+            <input type="text" id="f-exclude" placeholder="例：192.168.10.50, 192.168.10.51">
+            <div class="muted">永不下发的 IP。控制器自身 IP 与网关会自动加入。</div>
+          </div>
+        </fieldset>
+
+        <div class="form-error" id="form-error" hidden></div>
+
+        <div class="form-actions">
+          <button type="button" id="save-btn" class="btn btn-primary">保存</button>
+          <button type="button" id="reload-btn" class="btn">重置</button>
+        </div>
+      </form>
+    </section>
+  </main>
+  <footer class="footer"><span class="muted">metalkit 运维控制台</span></footer>
+  <script src="/ui/assets/common.js" defer></script>
+  <script src="/ui/assets/settings.js" defer></script>
+</body>
+</html>
