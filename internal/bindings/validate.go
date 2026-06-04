@@ -56,14 +56,20 @@ func validateDesiredState(s string) (string, error) {
 	return s, nil
 }
 
-// validateStaticAddress enforces IPv4 literal *iff* the profile network method
-// is "static". When dhcp, the field must be empty.
+// validateStaticAddress canonicalises the user-supplied static_address.
+//   - method=static + non-empty : must be a valid IPv4 literal.
+//   - method=static + empty     : allowed — the caller is expected to either
+//     auto-allocate from a bound subnet's CIDR or, if no subnet is bound,
+//     reject the binding with a clearer message than this validator can give
+//     (it doesn't see the subnet field).
+//   - method=dhcp               : must be empty (a static_address on a DHCP
+//     binding is always a config error).
 func validateStaticAddress(addr, networkMethod string) (string, error) {
 	addr = strings.TrimSpace(addr)
 	switch networkMethod {
 	case "static":
 		if addr == "" {
-			return "", errors.New("static_address: required when profile.network.method=static")
+			return "", nil
 		}
 		ip := net.ParseIP(addr)
 		if ip == nil || ip.To4() == nil {

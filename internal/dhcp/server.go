@@ -41,7 +41,12 @@ type Config struct {
 // dependency-free at the protocol layer and to ease testing with fakes.
 type LeaseStore interface {
 	Allocate(ctx context.Context, in AllocateInput) (allocated string, err error)
-	Confirm(ctx context.Context, mac, requestedIP string, leaseDur time.Duration) error
+	// Confirm returns the IP the store actually confirmed for this MAC. The
+	// DHCP layer fills the ACK's yiaddr with that value — required for iPXE's
+	// second-stage REQUEST, which on some NICs sends neither option 50 nor
+	// ciaddr. Without a server-side lookup the ACK would carry yiaddr=0 and
+	// iPXE would report "No configuration methods succeeded".
+	Confirm(ctx context.Context, mac, requestedIP string, leaseDur time.Duration) (confirmedIP string, err error)
 	Release(ctx context.Context, mac string) error
 }
 
@@ -348,7 +353,8 @@ func (s *Server) buildAck(ctx context.Context, req *dhcpv4.DHCPv4, pool *Pool, l
 	}
 
 	leaseDur := time.Duration(pool.LeaseSec) * time.Second
-	if err := leases.Confirm(ctx, mac, requested, leaseDur); err != nil {
+	confirmed, err := leases.Confirm(ctx, mac, requested, leaseDur)
+	if err != nil {
 		return buildNak(req, s.srvIP, err.Error())
 	}
 
@@ -359,8 +365,14 @@ func (s *Server) buildAck(ctx context.Context, req *dhcpv4.DHCPv4, pool *Pool, l
 	if err != nil {
 		return nil, err
 	}
+	// Prefer the requested IP when present so first-stage PXE clients see
+	// exactly what they asked for. Fall back to the store's confirmed IP for
+	// iPXE's second-stage REQUEST, which may carry neither option 50 nor a
+	// ciaddr — that's the path that left yiaddr=0 in the wild and broke PXE.
 	if requested != "" {
 		reply.YourIPAddr = net.ParseIP(requested).To4()
+	} else if confirmed != "" {
+		reply.YourIPAddr = net.ParseIP(confirmed).To4()
 	}
 	reply.ServerIPAddr = s.srvIP
 	reply.Flags = req.Flags

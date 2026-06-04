@@ -126,9 +126,12 @@ func (a *leasesAdapter) Allocate(ctx context.Context, in dhcp.AllocateInput) (st
 	return l.IP, nil
 }
 
-func (a *leasesAdapter) Confirm(ctx context.Context, mac, requestedIP string, leaseDur time.Duration) error {
-	_, err := a.store.Confirm(ctx, mac, requestedIP, leaseDur)
-	return err
+func (a *leasesAdapter) Confirm(ctx context.Context, mac, requestedIP string, leaseDur time.Duration) (string, error) {
+	l, err := a.store.Confirm(ctx, mac, requestedIP, leaseDur)
+	if err != nil {
+		return "", err
+	}
+	return l.IP, nil
 }
 
 func (a *leasesAdapter) Release(ctx context.Context, mac string) error {

@@ -281,6 +281,14 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 		}
 	}
 
+	// Final guard: a static binding with no IP and no subnet is unconfigurable —
+	// the profile won't know what address to write, and there's no pool to draw
+	// from. validateStaticAddress used to error here; we deferred the check so
+	// the auto-allocate path above could run when a subnet IS bound.
+	if networkMethod == "static" && addr == "" {
+		return nil, errors.New("static_address: required when profile.network.method=static and no subnet is bound (bind a subnet to auto-allocate)")
+	}
+
 	var vlanSQL any
 	if keepExistingVLAN {
 		if existingVLAN.Valid && existingVLAN.Int64 != 0 {

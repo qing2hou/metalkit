@@ -795,6 +795,63 @@ func TestUpsertWithSubnetHappy(t *testing.T) {
 	}
 }
 
+// TestUpsertStaticEmptyAddressWithSubnet_AutoAllocates: when the profile is
+// static and a subnet is bound, an empty StaticAddress is filled in by the
+// store from the subnet's CIDR. This is the path the UI relies on so operators
+// don't have to hand-pick free IPs when scheduling installs.
+func TestUpsertStaticEmptyAddressWithSubnet_AutoAllocates(t *testing.T) {
+	f := newFixture(t)
+	mu := f.seedMachine(t, '4')
+	im := f.seedImage(t, "9")
+	pr := f.seedProfile(t, "p-sn-auto", "static")
+	sn := f.seedSubnet(t, "lab-auto", "10.0.0.0/24", "10.0.0.1")
+
+	sid := sn
+	b, err := f.bindings.Upsert(context.Background(), UpsertInput{
+		MachineUUID:  mu,
+		ImageID:      im,
+		ProfileID:    pr,
+		DesiredState: "install",
+		// StaticAddress intentionally empty — store must allocate from subnet.
+		SubnetID:  &sid,
+		UpdatedBy: "admin",
+	})
+	if err != nil {
+		t.Fatalf("Upsert with subnet + empty static_address: %v", err)
+	}
+	if b.StaticAddress == "" {
+		t.Fatal("StaticAddress empty after auto-allocate — store didn't fill it in")
+	}
+	if err := hostInSubnet(b.StaticAddress, "10.0.0.0/24", "10.0.0.1"); err != nil {
+		t.Errorf("allocated IP %q not valid in subnet: %v", b.StaticAddress, err)
+	}
+}
+
+// TestUpsertStaticEmptyAddressNoSubnet_Rejects: empty StaticAddress on a static
+// profile with NO subnet bound has no IP pool to draw from and must be rejected
+// at the API layer with a clear "bind a subnet to auto-allocate" hint, not
+// silently stored.
+func TestUpsertStaticEmptyAddressNoSubnet_Rejects(t *testing.T) {
+	f := newFixture(t)
+	mu := f.seedMachine(t, '5')
+	im := f.seedImage(t, "a")
+	pr := f.seedProfile(t, "p-sn-none", "static")
+
+	_, err := f.bindings.Upsert(context.Background(), UpsertInput{
+		MachineUUID:  mu,
+		ImageID:      im,
+		ProfileID:    pr,
+		DesiredState: "install",
+		UpdatedBy:    "admin",
+	})
+	if err == nil || !strings.Contains(err.Error(), "static_address") {
+		t.Fatalf("want static_address error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "subnet") {
+		t.Errorf("error should mention subnet hint, got %q", err.Error())
+	}
+}
+
 func TestUpsertSubnetUnknown(t *testing.T) {
 	f := newFixture(t)
 	mu := f.seedMachine(t, '1')

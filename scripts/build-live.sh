@@ -78,12 +78,27 @@ case "$BACKEND" in
             exit 1
         fi
         echo "=== building live image via docker (may take 10-25 min) ==="
+        # Forward host HTTP(S) proxy into the container so apt-get update,
+        # live-build's lb config, and debootstrap can reach Debian mirrors.
+        # On hosts without a proxy these vars are empty and have no effect.
         docker run --rm --privileged \
+            -e "http_proxy=${HTTP_PROXY:-${http_proxy:-}}" \
+            -e "https_proxy=${HTTPS_PROXY:-${https_proxy:-}}" \
+            -e "HTTP_PROXY=${HTTP_PROXY:-${http_proxy:-}}" \
+            -e "HTTPS_PROXY=${HTTPS_PROXY:-${https_proxy:-}}" \
+            -e "no_proxy=${NO_PROXY:-${no_proxy:-}}" \
             -v "$LIVE_DIR:/build" \
             -w /build \
             debian:bookworm \
             bash -c '
                 set -euo pipefail
+                # Pin the proxy for apt explicitly — env vars work for most tools
+                # but a config file is the canonical hook live-build/debootstrap
+                # both honor.
+                if [[ -n "${http_proxy:-}" ]]; then
+                    echo "Acquire::http::Proxy \"$http_proxy\";"   >  /etc/apt/apt.conf.d/00proxy
+                    echo "Acquire::https::Proxy \"${https_proxy:-$http_proxy}\";" >> /etc/apt/apt.conf.d/00proxy
+                fi
                 apt-get update
                 apt-get install -y --no-install-recommends live-build
                 lb clean --purge || true

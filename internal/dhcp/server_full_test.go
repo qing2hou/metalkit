@@ -17,6 +17,7 @@ import (
 type fakeLeaseStore struct {
 	allocIP      string
 	allocErr     error
+	confirmIP    string
 	confirmErr   error
 	releaseCalls []string
 	confirmCalls []confirmCall
@@ -38,9 +39,15 @@ func (f *fakeLeaseStore) Allocate(_ context.Context, _ AllocateInput) (string, e
 	return f.allocIP, nil
 }
 
-func (f *fakeLeaseStore) Confirm(_ context.Context, mac, ip string, d time.Duration) error {
+func (f *fakeLeaseStore) Confirm(_ context.Context, mac, ip string, d time.Duration) (string, error) {
 	f.confirmCalls = append(f.confirmCalls, confirmCall{mac, ip, d})
-	return f.confirmErr
+	if f.confirmErr != nil {
+		return "", f.confirmErr
+	}
+	if f.confirmIP != "" {
+		return f.confirmIP, nil
+	}
+	return ip, nil
 }
 
 func (f *fakeLeaseStore) Release(_ context.Context, mac string) error {
@@ -193,6 +200,30 @@ func TestFullMode_RequestConfirmFails_GetsNak(t *testing.T) {
 	}
 	if reply == nil || reply.MessageType() != dhcpv4.MessageTypeNak {
 		t.Fatalf("want NAK, got %v", reply)
+	}
+}
+
+func TestFullMode_RequestNoOption50_UsesStoreIPForYiaddr(t *testing.T) {
+	// iPXE's second-stage REQUEST sometimes omits option 50 AND ciaddr — the
+	// server must look up the lease for this MAC and fill yiaddr from it,
+	// or iPXE bails with "No configuration methods succeeded" and the whole
+	// PXE chain dies before the live image ever boots. Regression guard for
+	// the "无法纳管" symptom reported against 192.168.10.120.
+	fake := &fakeLeaseStore{confirmIP: "192.168.10.90"}
+	srv := newServerFull(t, fake)
+	req := mustReq(t, dhcpv4.MessageTypeRequest,
+		dhcpv4.WithOption(dhcpv4.OptClassIdentifier("PXEClient:Arch:00007:UNDI:003016")),
+		dhcpv4.WithOption(dhcpv4.OptUserClass("iPXE")),
+	)
+	reply, err := srv.buildFullReply(context.Background(), req)
+	if err != nil {
+		t.Fatalf("buildFullReply: %v", err)
+	}
+	if reply == nil || reply.MessageType() != dhcpv4.MessageTypeAck {
+		t.Fatalf("want ACK, got %v", reply)
+	}
+	if got := reply.YourIPAddr.String(); got != "192.168.10.90" {
+		t.Errorf("yiaddr = %q, want 192.168.10.90 (from store)", got)
 	}
 }
 
