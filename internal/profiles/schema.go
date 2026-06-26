@@ -37,4 +37,7 @@ CREATE INDEX IF NOT EXISTS idx_profiles_created_at ON profiles(created_at DESC);
 const migrationSQL = `
 ALTER TABLE profiles ADD COLUMN os_family TEXT NOT NULL DEFAULT 'any';
 ALTER TABLE profiles ADD COLUMN subnet_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE profiles ADD COLUMN network_renderer TEXT NOT NULL DEFAULT '';
+ALTER TABLE profiles ADD COLUMN bootloader TEXT NOT NULL DEFAULT '';
+ALTER TABLE profiles ADD COLUMN chroot_dns TEXT NOT NULL DEFAULT '';
 `

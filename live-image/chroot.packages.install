@@ -235,7 +235,7 @@ libsmartcols1:amd64	2.38.1-5+deb12u3
 libsqlite3-0:amd64	3.40.1-2+deb12u2
 libss2:amd64	1.47.0-2+b2
 libssh2-1:amd64	1.10.0-3+b1
-libssl3:amd64	3.0.20-1~deb12u1
+libssl3:amd64	3.0.20-1~deb12u2
 libstdc++6:amd64	12.2.0-14+deb12u1
 libsystemd-shared:amd64	252.39-1~deb12u2
 libsystemd0:amd64	252.39-1~deb12u2
@@ -267,7 +267,7 @@ libxrender1:amd64	1:0.9.10-1.1
 libxtables12:amd64	1.8.9-2
 libxxhash0:amd64	0.8.1-1
 libzstd1:amd64	1.5.4+dfsg2-5
-linux-base	4.9
+linux-base	4.12.1~deb12u1
 linux-image-6.1.0-49-amd64	6.1.174-1
 linux-image-amd64	6.1.174-1
 live-boot	1:20230131+deb12u1
@@ -295,7 +295,7 @@ nvme-cli	2.4+really2.3-3
 openssh-client	1:9.2p1-2+deb12u10
 openssh-server	1:9.2p1-2+deb12u10
 openssh-sftp-server	1:9.2p1-2+deb12u10
-openssl	3.0.20-1~deb12u1
+openssl	3.0.20-1~deb12u2
 parted	3.5-3
 passwd	1:4.13+dfsg1-1+deb12u2
 pci.ids	0.0~2023.04.11-1

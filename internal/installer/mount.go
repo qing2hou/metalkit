@@ -277,9 +277,13 @@ func mountFromFstab(ctx context.Context, deps Deps, mntRoot string) ([]string, s
 				e.source, dev, target, err)
 		}
 		mounted = append(mounted, target)
-		if e.target == "/boot/efi" {
-			espMount = target
-		}
+		if e.target == "/boot/efi" || e.target == "/boot" {
+				// openEuler mounts the ESP at /boot (not /boot/efi).
+				// In that case the vfat partition declared in fstab IS the
+				// ESP — we must detect this so the caller (InstallGRUB) knows
+				// the ESP location and the fallback findESP() is skipped.
+				espMount = target
+			}
 	}
 	return mounted, espMount, nil
 }

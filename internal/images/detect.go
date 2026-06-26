@@ -14,7 +14,7 @@ import (
 // (UEFI/BIOS partition tables, cloud-init service detection) can be layered
 // on later if operators ask for it; the data model is already in place.
 type DetectionResult struct {
-	Family  string // "ubuntu" / "debian" / "rhel" / "rhel7" / "" (unknown)
+	Family  string // "ubuntu" / "debian" / "rhel" / "rhel7" / "kylin" / "openeuler" / "opensuse" / "" (unknown)
 	Version string // distro version, e.g. "22.04", "12", "9", "7"
 }
 
@@ -104,6 +104,33 @@ var detectionRules = []struct {
 		pattern:   regexp.MustCompile(`(?i)fedora`),
 		family:    "rhel",
 		versionRE: regexp.MustCompile(`(?i)fedora[^0-9]+(\d{2,3})\b`),
+	},
+	// 银河麒麟 Kylin — V10 基于 Ubuntu，V4 基于 CentOS
+	{
+		name:      "kylin",
+		pattern:   regexp.MustCompile(`(?i)kylin[-_.]?v?(\d+)`),
+		family:    "kylin",
+		versionRE: regexp.MustCompile(`(?i)kylin[-_.]?v?(\d+(?:\.\d+)?)`),
+	},
+	// openEuler — 基于 CentOS/RHEL 架构
+	{
+		name:      "openeuler",
+		pattern:   regexp.MustCompile(`(?i)openeuler[-_.]?(\d+)`),
+		family:    "openeuler",
+		versionRE: regexp.MustCompile(`(?i)openeuler[-_.]?(\d+(?:\.\d+)?)`),
+	},
+	// openSUSE Leap — uses Wicked or NetworkManager
+	{
+		name:      "opensuse-leap",
+		pattern:   regexp.MustCompile(`(?i)opensuse[-_.]?leap[-_.]?(\d+)`),
+		family:    "opensuse",
+		versionRE: regexp.MustCompile(`(?i)opensuse[-_.]?leap[-_.]?(\d+(?:\.\d+)?)`),
+	},
+	// openSUSE Tumbleweed (rolling, no version number)
+	{
+		name:    "opensuse-tumbleweed",
+		pattern: regexp.MustCompile(`(?i)opensuse[-_.]tumbleweed`),
+		family:  "opensuse",
 	},
 }
 

@@ -35,6 +35,12 @@ import (
 // agentVersion is overridden at link time via -ldflags="-X main.agentVersion=...".
 var agentVersion = "dev"
 
+// reporterLogTimeout caps how long a single Reporter.Log call may block
+// the slog handler. The controller is normally on the LAN so this is
+// generous; if it's down we drop the log line rather than stall the
+// install pipeline.
+var reporterLogTimeout = 5 * time.Second
+
 func main() {
 	os.Exit(run())
 }
@@ -336,6 +342,15 @@ func handleJob(ctx context.Context, logger *slog.Logger, cli *agentclient.Client
 		return true
 	}
 
+	// Wrap the stderr logger so every installer log line also lands in
+	// the controller's job_logs table (visible on the web platform).
+	// Without this, deps.Logger.* calls only reach the agent's stderr in
+	// the live ISO tmpfs — lost on reboot, invisible to the operator.
+	reporter := &agentReporter{cli: cli, jobID: job.ID}
+	inner := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
+	rh := newReporterHandler(inner, reporter, job.ID)
+	jobLogger := slog.New(rh).With("component", "installer", "job_id", job.ID)
+
 	deps := installer.Deps{
 		Exec: installer.OSExec{},
 		FS:   installer.OSFS{},
@@ -344,10 +359,10 @@ func handleJob(ctx context.Context, logger *slog.Logger, cli *agentclient.Client
 		// blob streaming via installer.HTTPDownloader.
 		Downloader: installer.HTTPDownloader{Client: &http.Client{Timeout: 0}},
 		Disks:      installer.LsblkDiskLister{},
-		Reporter:   &agentReporter{cli: cli, jobID: job.ID},
+		Reporter:   reporter,
 		BaseURL:    baseURL,
 		WorkDir:    "/tmp/metalkit-install",
-		Logger:     logger.With("component", "installer", "job_id", job.ID),
+		Logger:     jobLogger,
 		NICs:       nics,
 	}
 	logger.Info("agent: starting install",
@@ -357,8 +372,10 @@ func handleJob(ctx context.Context, logger *slog.Logger, cli *agentclient.Client
 		"machine_uuid", spec.MachineUUID)
 	if err := installer.Run(ctx, deps, *spec); err != nil {
 		logger.Error("agent: install failed", "job_id", job.ID, "err", err)
+		rh.Flush()
 		return true
 	}
 	logger.Info("agent: install succeeded; awaiting BMC reboot to disk", "job_id", job.ID)
+	rh.Flush()
 	return true
 }

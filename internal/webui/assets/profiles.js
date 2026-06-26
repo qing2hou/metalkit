@@ -19,6 +19,10 @@
   // can show subnet names rather than opaque IDs.
   let subnetCache = [];
 
+  // Module-level component cache, keyed by os_family. Populated lazily on
+  // first OS-family change in the form. Avoids repeated API calls.
+  let componentsCache = {};
+
   document.addEventListener("DOMContentLoaded", function () {
     document.getElementById("refresh-btn").addEventListener("click", function () {
       loadSubnets();
@@ -41,6 +45,73 @@
     } catch (err) {
       // Non-fatal: profile form will just show an empty subnet dropdown.
       subnetCache = [];
+    }
+  }
+
+  // loadComponents fetches the available renderers/bootloaders for a given
+  // OS family from the API. Results are cached client-side.
+  async function loadComponents(osFamily) {
+    var key = osFamily || "any";
+    if (componentsCache[key]) return componentsCache[key];
+    try {
+      var cs = await MK.apiGet("/profiles/components?os_family=" + encodeURIComponent(key));
+      componentsCache[key] = cs;
+      return cs;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // populateComponentDropdowns fills the network-renderer and bootloader
+  // selects with options from the component set, preserving the current
+  // selection if still valid.
+  function populateComponentDropdowns(cs, currentRenderer, currentBootloader) {
+    var nr = document.getElementById("f-net-renderer");
+    var bl = document.getElementById("f-bootloader");
+    if (!nr || !bl) return;
+
+    // Network renderer dropdown.
+    var nrVal = currentRenderer || "";
+    var nrHTML = '<option value=""' + (nrVal===""?" selected":"") + '>自动（按 OS 家族默认）</option>';
+    if (cs && cs.renderers) {
+      for (var i = 0; i < cs.renderers.length; i++) {
+        var r = cs.renderers[i];
+        var sel = (nrVal === r.id) ? " selected" : "";
+        nrHTML += '<option value="' + MK.escapeHTML(r.id) + '"' + sel + '>' +
+          MK.escapeHTML(r.label) + '</option>';
+      }
+    }
+    nr.innerHTML = nrHTML;
+
+    // Bootloader dropdown.
+    var blVal = currentBootloader || "";
+    var blHTML = '<option value=""' + (blVal===""?" selected":"") + '>自动（按 OS 家族默认）</option>';
+    if (cs && cs.bootloaders) {
+      for (var j = 0; j < cs.bootloaders.length; j++) {
+        var b = cs.bootloaders[j];
+        var bsel = (blVal === b.id) ? " selected" : "";
+        blHTML += '<option value="' + MK.escapeHTML(b.id) + '"' + bsel + '>' +
+          MK.escapeHTML(b.label) + '</option>';
+      }
+    }
+    bl.innerHTML = blHTML;
+
+    // Update hints.
+    var nrHint = document.getElementById("f-net-renderer-hint");
+    var blHint = document.getElementById("f-bootloader-hint");
+    if (nrHint) {
+      if (cs && cs.renderers && cs.renderers.length > 0) {
+        nrHint.textContent = "默认：" + cs.renderers[0].label;
+      } else {
+        nrHint.textContent = "留空则根据 OS 家族自动选择。";
+      }
+    }
+    if (blHint) {
+      if (cs && cs.bootloaders && cs.bootloaders.length > 0) {
+        blHint.textContent = "默认：" + cs.bootloaders[0].label;
+      } else {
+        blHint.textContent = "留空则根据 OS 家族自动选择。";
+      }
     }
   }
 
@@ -99,7 +170,10 @@
         '<td><strong>' + MK.escapeHTML(p.name) + '</strong>' +
         '<div class="muted mono">' + MK.escapeHTML(p.id) + '</div></td>' +
         '<td>' + MK.escapeHTML(p.description || "") + '</td>' +
-        '<td><span class="badge">' + MK.escapeHTML(p.os_family || "any") + '</span></td>' +
+        '<td><span class="badge">' + MK.escapeHTML(p.os_family || "any") + '</span>' +
+          (p.network_renderer ? ' <span class="badge muted">' + MK.escapeHTML(p.network_renderer) + '</span>' : '') +
+          (p.bootloader ? ' <span class="badge muted">' + MK.escapeHTML(p.bootloader) + '</span>' : '') +
+          '</td>' +
         '<td class="mono">' + MK.escapeHTML(p.hostname_template) + '</td>' +
         '<td>' + describeNetwork(p.network) + '</td>' +
         '<td>' + describeSubnet(p.subnet_id) + '</td>' +
@@ -221,9 +295,32 @@
           '<option value="debian"' + (f==="debian"?" selected":"") + '>debian</option>',
           '<option value="rhel"'   + (f==="rhel"  ?" selected":"") + '>rhel（Rocky 8/9、AlmaLinux、RHEL 8+）</option>',
           '<option value="rhel7"'  + (f==="rhel7" ?" selected":"") + '>rhel7（CentOS 7 / RHEL 7）</option>',
+          '<option value="kylin"'     + (f==="kylin"    ?" selected":"") + '>kylin（银河麒麟）</option>',
+          '<option value="openeuler"' + (f==="openeuler"?" selected":"") + '>openeuler（openEuler）</option>',
+          '<option value="opensuse"'  + (f==="opensuse" ?" selected":"") + '>opensuse（openSUSE）</option>',
         ].join(""); })() +
       '</select>' +
       '<div class="muted">绑定时镜像的 family 必须与此匹配（any 不做限制）。</div></div>' +
+
+      '<div class="form-row"><label for="f-net-renderer">网络渲染器</label>' +
+      '<select id="f-net-renderer">' +
+        (function(){ var r = (existing && existing.network_renderer) || ""; return [
+          '<option value=""' + (r===""?" selected":"") + '>自动（按 OS 家族默认）</option>',
+        ].join(""); })() +
+      '</select>' +
+      '<div class="muted" id="f-net-renderer-hint">留空则根据 OS 家族自动选择。</div></div>' +
+
+      '<div class="form-row"><label for="f-bootloader">引导加载程序</label>' +
+      '<select id="f-bootloader">' +
+        (function(){ var b = (existing && existing.bootloader) || ""; return [
+          '<option value=""' + (b===""?" selected":"") + '>自动（按 OS 家族默认）</option>',
+        ].join(""); })() +
+      '</select>' +
+      '<div class="muted" id="f-bootloader-hint">留空则根据 OS 家族自动选择。</div></div>' +
+
+      '<div class="form-row"><label for="f-chroot-dns">Chroot DNS</label>' +
+      '<input type="text" id="f-chroot-dns" value="' + ((existing && existing.chroot_dns && existing.chroot_dns.join) ? MK.escapeHTML(existing.chroot_dns.join(", ")) : (existing && existing.chroot_dns ? MK.escapeHTML(existing.chroot_dns) : "")) + '" placeholder="223.5.5.5, 114.114.114.114">' +
+      '<div class="muted">装机时写入目标 rootfs 的 /etc/resolv.conf，供 chroot 内 dnf 等命令解析镜像源。逗号或空格分隔的 IP。留空则使用默认（223.5.5.5 / 114.114.114.114）。</div></div>' +
 
       '<div class="form-row"><label for="f-subnet">默认子网</label>' +
       '<select id="f-subnet">' +
@@ -372,6 +469,26 @@
   }
 
   function wireFormBehaviour(dlg, existing) {
+    // --- OS family change → reload components ---
+    var osFamilySel = dlg.querySelector("#f-osfamily");
+    var curRenderer = (existing && existing.network_renderer) || "";
+    var curBootloader = (existing && existing.bootloader) || "";
+    async function onOSFamilyChange() {
+      var fam = osFamilySel ? osFamilySel.value : "any";
+      var cs = await loadComponents(fam);
+      // Read current selection before repopulating.
+      var nrSel = dlg.querySelector("#f-net-renderer");
+      var blSel = dlg.querySelector("#f-bootloader");
+      var nrVal = nrSel ? nrSel.value : curRenderer;
+      var blVal = blSel ? blSel.value : curBootloader;
+      populateComponentDropdowns(cs, nrVal, blVal);
+    }
+    if (osFamilySel) {
+      osFamilySel.addEventListener("change", onOSFamilyChange);
+    }
+    // Initial load of components for the current OS family.
+    onOSFamilyChange();
+
     const tdMode = dlg.querySelector("#f-td-mode");
     const tdValueRow = dlg.querySelector("#f-td-value-row");
     const tdValue = dlg.querySelector("#f-td-value");
@@ -604,6 +721,16 @@
     const passInput = dlg.querySelector("#f-pass").value;
     const osFamily = (dlg.querySelector("#f-osfamily") && dlg.querySelector("#f-osfamily").value) || "any";
     const subnetID = (dlg.querySelector("#f-subnet") && dlg.querySelector("#f-subnet").value) || "";
+    const networkRenderer = (dlg.querySelector("#f-net-renderer") && dlg.querySelector("#f-net-renderer").value) || "";
+    const bootloader = (dlg.querySelector("#f-bootloader") && dlg.querySelector("#f-bootloader").value) || "";
+    const chrootDNSRaw = (dlg.querySelector("#f-chroot-dns") && dlg.querySelector("#f-chroot-dns").value) || "";
+    const chrootDNS = chrootDNSRaw.trim();
+    // chroot_dns is sent as a single comma/space-separated string; the
+    // server validates and stores it. Empty string = use installer
+    // defaults. Always send the field on create (so it's stored as ""),
+    // and on edit only when the user touched it (non-empty string OR
+    // explicitly cleared). We use null on edit to mean "unchanged".
+    const chrootDNSPayload = isEdit ? chrootDNS : chrootDNS;
 
     // Client-side validation.
     if (!isEdit && !PROFILE_NAME_RE.test(name)) {
@@ -705,6 +832,9 @@
           network: network,
           os_family: osFamily,
           subnet_id: subnetID,
+          network_renderer: networkRenderer,
+          bootloader: bootloader,
+          chroot_dns: chrootDNSPayload,
         };
         if (passHash) body.root_password_hash = passHash;
         await MK.apiSend("PUT", "/profiles/" + encodeURIComponent(existing.id), body);
@@ -717,6 +847,9 @@
           network: network,
           os_family: osFamily,
           subnet_id: subnetID,
+          network_renderer: networkRenderer,
+          bootloader: bootloader,
+          chroot_dns: chrootDNSPayload,
         };
         // 留空 → 不带字段，后端补集群默认密码 hash。
         if (passHash) body.root_password_hash = passHash;

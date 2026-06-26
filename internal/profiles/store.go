@@ -18,6 +18,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"metalkit/internal/components"
 )
 
 // ErrNotFound is returned when a profile lookup misses.
@@ -89,10 +91,21 @@ type Profile struct {
 	// SubnetID optionally references a subnets row that supplies CIDR /
 	// gateway / DNS / VLAN defaults for any binding that uses this profile.
 	// Empty string = no default subnet. Bindings can still override.
-	SubnetID         string        `json:"subnet_id,omitempty"`
-	CreatedAt        time.Time     `json:"created_at"`
-	UpdatedAt        time.Time     `json:"updated_at"`
-	CreatedBy        string        `json:"created_by"`
+	SubnetID string `json:"subnet_id,omitempty"`
+	// NetworkRenderer selects which network config rendering strategy to use.
+	// Empty string = "auto" (determined by OS family at install time).
+	NetworkRenderer string `json:"network_renderer,omitempty"`
+	// Bootloader selects which bootloader installation strategy to use.
+	// Empty string = "auto" (determined by OS family at install time).
+	Bootloader string `json:"bootloader,omitempty"`
+	// ChrootDNS is the list of DNS server IPs written to /etc/resolv.conf
+	// in the target rootfs during install (used by chroot'd dnf to resolve
+	// distro mirrors for kernel-modules installation, etc.). Empty list
+	// means "use installer defaults" (223.5.5.5 + 114.114.114.114).
+	ChrootDNS []string `json:"chroot_dns,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	CreatedBy string    `json:"created_by"`
 }
 
 // CreateInput is what the create handler accepts. JSON sub-objects come in
@@ -106,6 +119,12 @@ type CreateInput struct {
 	Network          json.RawMessage `json:"network"`
 	OSFamily         string          `json:"os_family,omitempty"`
 	SubnetID         string          `json:"subnet_id,omitempty"`
+	NetworkRenderer  string          `json:"network_renderer,omitempty"`
+	Bootloader       string          `json:"bootloader,omitempty"`
+	// ChrootDNS is a comma-or-whitespace-separated list of DNS server IPs
+	// to write into /etc/resolv.conf in the target rootfs during install.
+	// Empty = use installer defaults. Validated as IPv4/IPv6 literals.
+	ChrootDNS        string          `json:"chroot_dns,omitempty"`
 	CreatedBy        string          `json:"-"` // injected by handler
 }
 
@@ -121,7 +140,16 @@ type UpdateInput struct {
 	OSFamily         *string         `json:"os_family,omitempty"`
 	// SubnetID is three-state via *string: nil = unchanged, "" = clear,
 	// non-empty = set.
-	SubnetID         *string         `json:"subnet_id,omitempty"`
+	SubnetID *string `json:"subnet_id,omitempty"`
+	// NetworkRenderer is three-state via *string: nil = unchanged, "" = auto,
+	// non-empty = set.
+	NetworkRenderer *string `json:"network_renderer,omitempty"`
+	// Bootloader is three-state via *string: nil = unchanged, "" = auto,
+	// non-empty = set.
+	Bootloader *string `json:"bootloader,omitempty"`
+	// ChrootDNS is three-state via *string: nil = unchanged, "" = use
+	// installer defaults, non-empty = comma-separated DNS IPs.
+	ChrootDNS *string `json:"chroot_dns,omitempty"`
 }
 
 // Create validates input and inserts a new profile row.
@@ -158,9 +186,19 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Profile, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := components.ValidateNetworkRenderer(in.NetworkRenderer); err != nil {
+		return nil, err
+	}
+	if err := components.ValidateBootloader(in.Bootloader); err != nil {
+		return nil, err
+	}
 	// validateNetwork needs to know whether a subnet is in play so it can
 	// skip strict checks on CIDR/gateway/DNS/VLAN (subnet supplies them).
 	nc, err := validateNetwork(in.Network, subnetID != "")
+	if err != nil {
+		return nil, err
+	}
+	chrootDNS, err := validateChrootDNS(in.ChrootDNS)
 	if err != nil {
 		return nil, err
 	}
@@ -181,10 +219,13 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Profile, error) {
         INSERT INTO profiles
             (id, name, description, hostname_template, root_password_hash,
              target_disk_json, network_json, os_family, subnet_id,
+             network_renderer, bootloader, chroot_dns,
              created_at, updated_at, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, in.Name, in.Description, in.HostnameTemplate, in.RootPasswordHash,
-		string(tdBlob), string(ncBlob), osFamily, subnetID, now, now, in.CreatedBy,
+		string(tdBlob), string(ncBlob), osFamily, subnetID,
+		in.NetworkRenderer, in.Bootloader, chrootDNS,
+		now, now, in.CreatedBy,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -203,6 +244,9 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Profile, error) {
 		Network:          nc,
 		OSFamily:         osFamily,
 		SubnetID:         subnetID,
+		NetworkRenderer:  in.NetworkRenderer,
+		Bootloader:       in.Bootloader,
+		ChrootDNS:        parseChrootDNS(chrootDNS),
 		CreatedAt:        time.Unix(now, 0).UTC(),
 		UpdatedAt:        time.Unix(now, 0).UTC(),
 		CreatedBy:        in.CreatedBy,
@@ -217,16 +261,23 @@ func (s *Store) Get(ctx context.Context, id string) (*Profile, error) {
 		tdBlob, ncBlob string
 		osFamily    sql.NullString
 		subnetID    sql.NullString
+		networkRenderer sql.NullString
+		bootloader  sql.NullString
+		chrootDNS   sql.NullString
 		createdAt, updatedAt int64
 	)
 	err := s.db.QueryRowContext(ctx, `
         SELECT id, name, COALESCE(description,''), hostname_template,
                root_password_hash, target_disk_json, network_json,
                COALESCE(os_family,'any'), COALESCE(subnet_id,''),
+               COALESCE(network_renderer,''), COALESCE(bootloader,''),
+               COALESCE(chroot_dns,''),
                created_at, updated_at, created_by
         FROM profiles WHERE id = ?`, id).Scan(
 		&p.ID, &p.Name, &description, &p.HostnameTemplate, &p.RootPasswordHash,
-		&tdBlob, &ncBlob, &osFamily, &subnetID, &createdAt, &updatedAt, &p.CreatedBy,
+		&tdBlob, &ncBlob, &osFamily, &subnetID, &networkRenderer, &bootloader,
+		&chrootDNS,
+		&createdAt, &updatedAt, &p.CreatedBy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -243,6 +294,9 @@ func (s *Store) Get(ctx context.Context, id string) (*Profile, error) {
 	}
 	p.OSFamily = CanonicalOSFamily(osFamily.String)
 	p.SubnetID = subnetID.String
+	p.NetworkRenderer = networkRenderer.String
+	p.Bootloader = bootloader.String
+	p.ChrootDNS = parseChrootDNS(chrootDNS.String)
 	p.CreatedAt = time.Unix(createdAt, 0).UTC()
 	p.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 	return &p, nil
@@ -254,6 +308,8 @@ func (s *Store) List(ctx context.Context) ([]Profile, error) {
         SELECT id, name, COALESCE(description,''), hostname_template,
                root_password_hash, target_disk_json, network_json,
                COALESCE(os_family,'any'), COALESCE(subnet_id,''),
+               COALESCE(network_renderer,''), COALESCE(bootloader,''),
+               COALESCE(chroot_dns,''),
                created_at, updated_at, created_by
         FROM profiles
         ORDER BY created_at DESC, id DESC`)
@@ -270,10 +326,15 @@ func (s *Store) List(ctx context.Context) ([]Profile, error) {
 			tdBlob, ncBlob string
 			osFamily       sql.NullString
 			subnetID       sql.NullString
+			networkRenderer sql.NullString
+			bootloader     sql.NullString
+			chrootDNS      sql.NullString
 			createdAt, updatedAt int64
 		)
 		if err := rows.Scan(&p.ID, &p.Name, &description, &p.HostnameTemplate, &p.RootPasswordHash,
-			&tdBlob, &ncBlob, &osFamily, &subnetID, &createdAt, &updatedAt, &p.CreatedBy); err != nil {
+			&tdBlob, &ncBlob, &osFamily, &subnetID, &networkRenderer, &bootloader,
+			&chrootDNS,
+			&createdAt, &updatedAt, &p.CreatedBy); err != nil {
 			return nil, fmt.Errorf("scan profile: %w", err)
 		}
 		p.Description = description.String
@@ -285,6 +346,9 @@ func (s *Store) List(ctx context.Context) ([]Profile, error) {
 		}
 		p.OSFamily = CanonicalOSFamily(osFamily.String)
 		p.SubnetID = subnetID.String
+		p.NetworkRenderer = networkRenderer.String
+		p.Bootloader = bootloader.String
+		p.ChrootDNS = parseChrootDNS(chrootDNS.String)
 		p.CreatedAt = time.Unix(createdAt, 0).UTC()
 		p.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 		out = append(out, p)
@@ -359,19 +423,44 @@ func (s *Store) Update(ctx context.Context, id string, in UpdateInput) (*Profile
 		}
 		cur.OSFamily = CanonicalOSFamily(*in.OSFamily)
 	}
+	if in.NetworkRenderer != nil {
+		v := strings.TrimSpace(*in.NetworkRenderer)
+		if err := components.ValidateNetworkRenderer(v); err != nil {
+			return nil, err
+		}
+		cur.NetworkRenderer = v
+	}
+	if in.Bootloader != nil {
+		v := strings.TrimSpace(*in.Bootloader)
+		if err := components.ValidateBootloader(v); err != nil {
+			return nil, err
+		}
+		cur.Bootloader = v
+	}
+	if in.ChrootDNS != nil {
+		v, err := validateChrootDNS(*in.ChrootDNS)
+		if err != nil {
+			return nil, err
+		}
+		cur.ChrootDNS = parseChrootDNS(v)
+	}
 
 	tdBlob, _ := json.Marshal(cur.TargetDisk)
 	ncBlob, _ := json.Marshal(cur.Network)
+	chrootDNSStr := joinChrootDNS(cur.ChrootDNS)
 	now := time.Now().Unix()
 
 	_, err = s.db.ExecContext(ctx, `
         UPDATE profiles
         SET description = ?, hostname_template = ?, root_password_hash = ?,
             target_disk_json = ?, network_json = ?, os_family = ?,
-            subnet_id = ?, updated_at = ?
+            subnet_id = ?, network_renderer = ?, bootloader = ?,
+            chroot_dns = ?, updated_at = ?
         WHERE id = ?`,
 		cur.Description, cur.HostnameTemplate, cur.RootPasswordHash,
-		string(tdBlob), string(ncBlob), cur.OSFamily, cur.SubnetID, now, id,
+		string(tdBlob), string(ncBlob), cur.OSFamily, cur.SubnetID,
+		cur.NetworkRenderer, cur.Bootloader,
+		chrootDNSStr, now, id,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update profile: %w", err)

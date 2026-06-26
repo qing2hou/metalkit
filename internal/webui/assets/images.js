@@ -322,6 +322,18 @@
     if (/fedora/.test(n) && (m = n.match(/fedora[^0-9]+(\d{2,3})\b/))) {
       return { family: "rhel", version: m[1] };
     }
+    if ((m = n.match(/kylin[-_.]?v?(\d+(?:\.\d+)?)/))) {
+      return { family: "kylin", version: m[1] };
+    }
+    if ((m = n.match(/openeuler[-_.]?(\d+(?:\.\d+)?)/))) {
+      return { family: "openeuler", version: m[1] };
+    }
+    if (/opensuse[-_.]?tumbleweed/.test(n)) {
+      return { family: "opensuse", version: "" };
+    }
+    if ((m = n.match(/opensuse[-_.]?leap[-_.]?(\d+(?:\.\d+)?)/))) {
+      return { family: "opensuse", version: m[1] };
+    }
     return { family: "", version: "" };
   }
 

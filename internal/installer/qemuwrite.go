@@ -89,5 +89,19 @@ func WriteImage(ctx context.Context, deps Deps, src io.Reader, devPath string) e
 			deps.Logger.Warn("partprobe failed", "dev", devPath, "err", err)
 		}
 	}
+
+	// Force the kernel to re-read the partition table a second time via
+	// blockdev. partprobe on its own sometimes leaves the kernel serving a
+	// stale partition list — particularly right after qemu-img convert
+	// wrote a fresh GPT image onto a disk that previously held a different
+	// table. The symptom is lsblk / sfdisk returning "no partitions" even
+	// though the on-disk table is valid, which then makes GrowLastPartition
+	// fail with "no partitions on /dev/sdX". blockdev --rereadpt issues the
+	// BLKRRPART ioctl directly. Best-effort, like partprobe.
+	if _, err := deps.Exec.Run(ctx, "blockdev", "--rereadpt", devPath); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("blockdev --rereadpt failed (continuing)", "dev", devPath, "err", err)
+		}
+	}
 	return nil
 }

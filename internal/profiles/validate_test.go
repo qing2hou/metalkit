@@ -234,3 +234,70 @@ func TestValidateNetwork_BondErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateChrootDNS(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+		err  bool
+	}{
+		{name: "empty", in: "", want: ""},
+		{name: "single ipv4", in: "223.5.5.5", want: "223.5.5.5"},
+		{name: "comma separated", in: "223.5.5.5,114.114.114.114", want: "223.5.5.5,114.114.114.114"},
+		{name: "space separated", in: "223.5.5.5 114.114.114.114", want: "223.5.5.5,114.114.114.114"},
+		{name: "mixed separators + whitespace", in: " 223.5.5.5 , 1.1.1.1\n8.8.8.8 ", want: "223.5.5.5,1.1.1.1,8.8.8.8"},
+		{name: "ipv6", in: "2001:4860:4860::8888", want: "2001:4860:4860::8888"},
+		{name: "invalid ip", in: "not-an-ip", err: true},
+		{name: "one invalid", in: "223.5.5.5,bad", err: true},
+		{name: "too many", in: "1.1.1.1,2.2.2.2,3.3.3.3,4.4.4.4,5.5.5.5,6.6.6.6,7.7.7.7,8.8.8.8,9.9.9.9", err: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := validateChrootDNS(tc.in)
+			if tc.err {
+				if err == nil {
+					t.Fatalf("expected error for %q, got %q", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Fatalf("for %q: want %q got %q", tc.in, tc.want, got)
+			}
+		})
+	}
+}
+
+func TestParseAndJoinChrootDNS(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{in: "", want: nil},
+		{in: "223.5.5.5", want: []string{"223.5.5.5"}},
+		{in: "223.5.5.5,114.114.114.114", want: []string{"223.5.5.5", "114.114.114.114"}},
+	}
+	for _, tc := range cases {
+		got := parseChrootDNS(tc.in)
+		if len(got) != len(tc.want) {
+			t.Fatalf("parse(%q): want %v got %v", tc.in, tc.want, got)
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Fatalf("parse(%q)[%d]: want %q got %q", tc.in, i, tc.want[i], got[i])
+			}
+		}
+		// join should round-trip.
+		joined := joinChrootDNS(got)
+		if tc.in == "" {
+			if joined != "" {
+				t.Fatalf("join(nil): want empty, got %q", joined)
+			}
+		} else if joined != tc.in {
+			t.Fatalf("join(parse(%q)) = %q, want %q", tc.in, joined, tc.in)
+		}
+	}
+}

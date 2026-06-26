@@ -37,8 +37,8 @@ func TestOpenAppliesPragmas(t *testing.T) {
 	if err := db.QueryRow(`PRAGMA busy_timeout`).Scan(&bt); err != nil {
 		t.Fatalf("busy_timeout: %v", err)
 	}
-	if bt != 5000 {
-		t.Fatalf("busy_timeout: got %d want 5000", bt)
+	if bt != 30000 {
+		t.Fatalf("busy_timeout: got %d want 30000", bt)
 	}
 }
 

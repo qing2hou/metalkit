@@ -75,8 +75,24 @@ func GrowLastPartition(ctx context.Context, deps Deps, devPath string) (GrowResu
 
 	switch res.FSType {
 	case "ext2", "ext3", "ext4":
-		if _, err := deps.Exec.Run(ctx, "e2fsck", "-fy", partDev); err != nil {
-			return res, fmt.Errorf("install: e2fsck %s: %w", partDev, err)
+		// e2fsck exit codes: 0 = clean, 1 = errors corrected (OK),
+		// 2 = corrected + reboot needed, 4+ = real errors. openEuler
+		// cloud images ship without /lost+found, so e2fsck -fy creates
+		// it and returns exit 1 — this is benign, not a failure.
+		if out, err := deps.Exec.Run(ctx, "e2fsck", "-fy", partDev); err != nil {
+			// Allow exit code 1 (FS modified / errors corrected).
+			// The Exec interface doesn't expose the raw exit code,
+			// but e2fsck prints "FILE SYSTEM WAS MODIFIED" on exit 1
+			// while real errors include "UNEXPECTED INCONSISTENCY".
+			combined := strings.ToUpper(string(out) + " " + err.Error())
+			if !strings.Contains(combined, "FILE SYSTEM WAS MODIFIED") &&
+				!strings.Contains(combined, "CLEAN") {
+				return res, fmt.Errorf("install: e2fsck %s: %w", partDev, err)
+			}
+			if deps.Logger != nil {
+				deps.Logger.Info("e2fsck: filesystem modified (exit 1), proceeding",
+					"dev", partDev, "output", string(out))
+			}
 		}
 		if _, err := deps.Exec.Run(ctx, "resize2fs", partDev); err != nil {
 			return res, fmt.Errorf("install: resize2fs %s: %w", partDev, err)
@@ -99,17 +115,38 @@ func GrowLastPartition(ctx context.Context, deps Deps, devPath string) (GrowResu
 // otherwise outrank the real root partition (LABEL=cloudimg-rootfs)
 // purely because BOOT is numbered higher (e.g. sdc16 vs sdc1).
 func rootPartitionOf(ctx context.Context, deps Deps, devPath string) (string, string, error) {
-	out, err := deps.Exec.Run(ctx, "lsblk", "-lnpo", "NAME,TYPE", devPath)
-	if err != nil {
-		return "", "", fmt.Errorf("install: lsblk %s: %w", devPath, err)
-	}
-	var parts []string
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) >= 2 && fields[1] == "part" {
-			parts = append(parts, fields[0])
+	enumerate := func() []string {
+		out, err := deps.Exec.Run(ctx, "lsblk", "-lnpo", "NAME,TYPE", devPath)
+		if err != nil {
+			return nil
 		}
+		var ps []string
+		scanner := bufio.NewScanner(strings.NewReader(string(out)))
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) >= 2 && fields[1] == "part" {
+				ps = append(ps, fields[0])
+			}
+		}
+		return ps
+	}
+
+	parts := enumerate()
+	if len(parts) == 0 {
+		// The kernel may still be serving a stale partition table even
+		// after partprobe/blockdev in WriteImage — particularly right
+		// after qemu-img convert wrote a fresh image. Force a re-read
+		// and retry once before giving up. Without this, Debian 12
+		// cloud image installs fail at "no partitions on /dev/sdX".
+		if deps.Reporter != nil {
+			_ = deps.Reporter.Log(ctx, "warn",
+				fmt.Sprintf("no partitions visible on %s, forcing partprobe + blockdev --rereadpt and retrying", devPath))
+		}
+		_, _ = deps.Exec.Run(ctx, "partprobe", devPath)
+		_, _ = deps.Exec.Run(ctx, "blockdev", "--rereadpt", devPath)
+		// Give udev a moment to settle and re-create device nodes.
+		_, _ = deps.Exec.Run(ctx, "udevadm", "settle", "--timeout=5")
+		parts = enumerate()
 	}
 	if len(parts) == 0 {
 		return "", "", fmt.Errorf("install: no partitions on %s", devPath)

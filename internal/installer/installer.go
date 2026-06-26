@@ -78,6 +78,14 @@ func Run(ctx context.Context, deps Deps, spec jobs.InstallSpec) (retErr error) {
 	_ = deps.Reporter.Log(ctx, "info", fmt.Sprintf("selected disk %s (%d bytes, %s)",
 		target.DevPath, target.SizeBytes, target.Transport))
 
+	// Zap stale partition table signatures (GPT primary+backup, MBR boot
+	// sector) so the fresh image writes onto a clean slate. Without this,
+	// a disk that previously held a larger GPT install keeps a backup
+	// GPT header at the end of the disk that confuses sgdisk -p and can
+	// mislead the firmware's boot-order scan. Best-effort: a missing
+	// sgdisk on the live image is logged but doesn't abort.
+	wipeDisk(ctx, deps, target.DevPath)
+
 	// --- download --------------------------------------------------------
 	if err := deps.Reporter.Stage(ctx, StageDownload); err != nil {
 		return fmt.Errorf("install: stage %s: %w", StageDownload, err)
@@ -157,8 +165,23 @@ func Run(ctx context.Context, deps Deps, spec jobs.InstallSpec) (retErr error) {
 	if err := deps.Reporter.Stage(ctx, StageGrubInstall); err != nil {
 		return fmt.Errorf("install: stage %s: %w", StageGrubInstall, err)
 	}
-	if err := InstallGRUB(ctx, deps, mntRoot, target.DevPath, espMount); err != nil {
+	if err := InstallGRUB(ctx, deps, spec, mntRoot, target.DevPath, espMount); err != nil {
 		return err
+	}
+
+	// Prune stale NVRAM boot entries that referenced pre-write partitions
+	// on this disk. Without this, the firmware wastes BootOrder slots
+	// retrying entries whose PARTUUID no longer exists, and on confused
+	// firmware (Dell R630 BIOS 2.3.4 observed) can produce "Boot Failed"
+	// noise that masks the real boot attempt. UEFI-only — efibootmgr
+	// doesn't exist on BIOS boots and bootMode gates that.
+	//
+	// Runs AFTER grub-install so the fresh BootXXXX entry for the
+	// just-installed OS (whose GUID is in the current partition table) is
+	// preserved; everything else pointing at this disk's old partitions
+	// (MBR sigs or vanished GPT GUIDs) gets deleted.
+	if bootMode == "uefi" {
+		pruneStaleNVRAM(ctx, deps, target.DevPath)
 	}
 
 	// --- umount ----------------------------------------------------------

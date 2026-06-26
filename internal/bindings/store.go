@@ -778,6 +778,7 @@ func (s *Store) fetchImageFamily(ctx context.Context, id string) (string, error)
 //   - image with empty family also passes (legacy uploads without metadata).
 //   - "rhel" covers Rocky/Alma/RHEL 8+/CentOS Stream; "rhel7" is reserved for
 //     the legacy CentOS 7 / RHEL 7 path that needs writeIfcfg fallback.
+//   - Cross-family compatibility: kylin ↔ ubuntu/rhel, openeuler ↔ rhel.
 //   - exact match otherwise.
 func familyCompatible(profileFam, imageFam string) error {
 	p := strings.ToLower(strings.TrimSpace(profileFam))
@@ -790,6 +791,20 @@ func familyCompatible(profileFam, imageFam string) error {
 	}
 	if p == i {
 		return nil
+	}
+	// Cross-family compatibility map. kylin V10 is Ubuntu-based; V4/Server
+	// is CentOS-based. openEuler is RHEL-based. Allow these pairings so
+	// operators can use existing ubuntu/rhel profiles with compatible images.
+	type compatEntry struct{ a, b string }
+	crossFamily := []compatEntry{
+		{"kylin", "ubuntu"},
+		{"kylin", "rhel"},
+		{"openeuler", "rhel"},
+	}
+	for _, e := range crossFamily {
+		if (p == e.a && i == e.b) || (p == e.b && i == e.a) {
+			return nil
+		}
 	}
 	return fmt.Errorf("%w: profile expects %q, image is %q", ErrFamilyMismatch, p, i)
 }

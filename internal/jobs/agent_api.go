@@ -268,14 +268,16 @@ func (a *AgentAPI) getSpec(w http.ResponseWriter, r *http.Request) {
 	}
 
 	spec := InstallSpec{
-		JobID:        job.ID,
-		MachineUUID:  job.MachineUUID,
-		ImageID:      image.ID,
-		ImageBlobURL: "/api/v1/agent/images/" + image.ID + "/blob",
-		ImageSHA256:  image.SHA256,
-		ImageFormat:  image.Format,
-		Profile:      *profile,
-		Binding:      *binding,
+		JobID:           job.ID,
+		MachineUUID:     job.MachineUUID,
+		ImageID:         image.ID,
+		ImageBlobURL:    "/api/v1/agent/images/" + image.ID + "/blob",
+		ImageSHA256:     image.SHA256,
+		ImageFormat:     image.Format,
+		Profile:         *profile,
+		Binding:         *binding,
+		NetworkRenderer: profile.NetworkRenderer,
+		Bootloader:      profile.Bootloader,
 	}
 	writeJSON(w, http.StatusOK, spec)
 }

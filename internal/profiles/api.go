@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"metalkit/internal/components"
 )
 
 // API surface (all under /api/v1/profiles, full subtree behind Basic Auth):
@@ -34,6 +36,7 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/profiles/{id}", a.get)
 	mux.HandleFunc("PUT /api/v1/profiles/{id}", a.update)
 	mux.HandleFunc("DELETE /api/v1/profiles/{id}", a.delete)
+	mux.HandleFunc("GET /api/v1/profiles/components", a.components)
 }
 
 func (a *API) list(w http.ResponseWriter, r *http.Request) {
@@ -127,6 +130,18 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// components returns the available network renderers and bootloaders for the
+// given OS family (query param ?os_family=rhel). Used by the UI to populate
+// the component selection dropdowns dynamically. When os_family is empty or
+// "any", all known components are returned.
+func (a *API) components(w http.ResponseWriter, r *http.Request) {
+	osFamily := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("os_family")))
+	if osFamily == "" {
+		osFamily = "any"
+	}
+	writeJSON(w, http.StatusOK, components.ComponentsForOS(osFamily))
 }
 
 func validProfileID(w http.ResponseWriter, raw string) (string, bool) {

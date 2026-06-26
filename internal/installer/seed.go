@@ -44,6 +44,7 @@ import (
 	"strings"
 
 	"metalkit/internal/bindings"
+	"metalkit/internal/components"
 	"metalkit/internal/jobs"
 	"metalkit/internal/profiles"
 )
@@ -78,28 +79,52 @@ func BuildSeed(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot st
 	// run before writeIfcfg so we don't delete our own ifcfg-eth0.
 	cleanStaleNetworkConfig(ctx, deps, mntRoot)
 
-	// Always write the network-config so cloud-init has a v2 config to
-	// process and does not fall back to DHCP. For RHEL7 rootfs, cloud-init's
-	// sysconfig renderer turns the netplan YAML key into the ifcfg DEVICE=
-	// field — and CentOS 7 boots with net.ifnames=0, so the kernel will
-	// never produce an "eno2" device. Pass rhel7=true so the renderer falls
-	// back to "ethN" matching the picked NIC's PCI position.
+	// Resolve the effective network renderer: explicit selection > OS-family
+	// auto-detection. Then dispatch to the appropriate rendering path.
+	renderer := resolveRenderer(spec.NetworkRenderer, deps, mntRoot)
+
+	// Cloud-init's NetworkManager renderer has a known bug with bond
+	// configurations on RockyLinux 8+ / RHEL 8+: it generates duplicate NM
+	// connection files — one bond-slave (using the YAML key name) and one
+	// plain ethernet (using the MAC-matched interface name). NM picks the
+	// plain one, so slaves never join the bond. Bypass cloud-init's network
+	// rendering entirely for NM + bond and write NM keyfiles directly.
+	bypassCloudInitNetwork := renderer == components.NetworkManagerRenderer && spec.Profile.Network.Bond != nil
+
 	rhel7 := isRHEL7Root(deps, mntRoot)
-	netCfg := renderNetworkConfig(spec.Profile.Network, spec.Binding, deps.NICs, rhel7)
-	netPath := filepath.Join(seedDir, "network-config")
-	if err := deps.FS.WriteFile(netPath, []byte(netCfg), 0o644); err != nil {
-		return fmt.Errorf("install: write network-config: %w", err)
+
+	if !bypassCloudInitNetwork {
+		// Write the network-config v2 so cloud-init has something to
+		// process. Individual renderers may also write direct config files as
+		// fallbacks or override cloud-init's renderer preference.
+		netCfg := renderNetworkConfig(spec.Profile.Network, spec.Binding, deps.NICs, rhel7)
+		netPath := filepath.Join(seedDir, "network-config")
+		if err := deps.FS.WriteFile(netPath, []byte(netCfg), 0o644); err != nil {
+			return fmt.Errorf("install: write network-config: %w", err)
+		}
 	}
 
-	// CentOS 7 / RHEL 7 cloud-init 19.4 may not fully support v2. Write
-	// the ifcfg files directly as a safety net — they will be overwritten
-	// by cloud-init if the v2 render succeeds, but remain if it fails.
-	if rhel7 {
+	// Renderer-specific post-processing.
+	switch renderer {
+	case components.NetPlanRenderer:
+		// Netplan is the default cloud-init path — no extra work needed.
+	case components.NetworkManagerRenderer:
+		if bypassCloudInitNetwork {
+			writeNMKeyfileBond(deps, mntRoot, spec.Profile.Network, spec.Binding, deps.NICs)
+			disableCloudInitNetwork(deps, mntRoot)
+		} else {
+			writeNMRendererConfig(deps, mntRoot)
+		}
+	case components.SysconfigRenderer:
 		if spec.Profile.Network.Bond == nil {
 			writeIfcfg(deps, mntRoot, spec.Profile.Network, spec.Binding, deps.NICs)
 		} else {
 			writeIfcfgBond(deps, mntRoot, spec.Profile.Network, spec.Binding, deps.NICs)
 		}
+	case components.ENIRenderer:
+		writeENIRendererConfig(deps, spec, mntRoot)
+	case components.WickedRenderer:
+		writeWickedConfig(deps, spec, mntRoot)
 	}
 
 	// Some cloud images (CentOS 7.9, RHEL) ship with cloud-init but
@@ -119,48 +144,88 @@ func BuildSeed(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot st
 		return fmt.Errorf("install: write datasource config: %w", err)
 	}
 
-	// Pin cloud-init's network renderer to NetworkManager on modern
-	// RHEL family (Rocky 9 / AlmaLinux / RHEL 8+ / Fedora). cloud-init's
-	// default renderer priority for "rhel" distro is
-	//   [sysconfig, eni, netplan, freebsd, networkd]
-	// so without this override cloud-init writes legacy ifcfg files into
-	// /etc/sysconfig/network-scripts/, but the installed OS uses
-	// NetworkManager for live management — the ifcfg files only work via
-	// NM's deprecated ifcfg-rh compatibility plugin and don't show up in
-	// `nmcli con show`. Switching to the `network-manager` renderer makes
-	// cloud-init emit native `.nmconnection` keyfiles, which is what
-	// operators expect on a Rocky/RHEL system.
+	// RHEL family (CentOS / RHEL / Rocky / AlmaLinux / Fedora / openEuler)
+	// ships with SELinux in enforcing mode. Files we wrote into the rootfs
+	// from the live system inherit the mount-time context, which is wrong.
 	//
-	// CentOS 7 stays on sysconfig (its cloud-init 19.4 has no NM renderer);
-	// Ubuntu/Debian don't have RHEL renderer ordering issues.
-	if prefersNetworkManagerRenderer(deps, mntRoot) {
-		rendererPath := filepath.Join(dsDir, "98-metalkit-renderer.cfg")
-		rendererContent := "# Managed by metalkit installer — prefer NetworkManager keyfiles over legacy ifcfg.\n" +
-			"system_info:\n" +
-			"  network:\n" +
-			"    renderers: [ network-manager, sysconfig ]\n"
-		if err := deps.FS.WriteFile(rendererPath, []byte(rendererContent), 0o644); err != nil {
-			return fmt.Errorf("install: write renderer config: %w", err)
+	// Previously we touched /.autorelabel to trigger a full SELinux relabel
+	// on first boot, but on large disks (500G+) this takes a very long time
+	// with no visible progress under Plymouth, making it look like the
+	// system is hung.
+	//
+	// Instead, run restorecon on only the directories we actually modified.
+	// This is fast (seconds, not hours) because it skips the bulk of the
+	// filesystem that already has correct contexts from the cloud image.
+	// The /.autorelabel fallback remains for cases where restorecon fails.
+	//
+	// Skip entirely if we plan to disable SELinux in installGRUBChrootRHEL
+	// (see grub.go disableSELinuxIfEnforcing). When SELinux is disabled
+	// at boot, contexts don't matter, and the /.autorelabel fallback
+	// here would trigger a full-disk relabel on first boot — which on
+	// large XFS partitions takes 30+ minutes with no Plymouth progress
+	// display, looking like a hang (qa.md #4).
+	if isRHELFamilyRoot(deps, mntRoot) && !selinuxWillBeDisabled(deps, mntRoot) {
+		// Paths we wrote into the rootfs that need SELinux relabeling.
+		relabelPaths := []string{
+			"/etc/cloud",
+			"/etc/NetworkManager",
+			"/etc/sysconfig/network-scripts",
+			"/etc/network",
+			"/etc/ssh",
+			"/etc/hostname",
+			"/etc/shadow",
+			"/etc/fstab",
+			"/etc/sysconfig/network",
+			"/var/lib/cloud",
+		}
+		args := append([]string{mntRoot, "restorecon", "-RF"}, relabelPaths...)
+		if out, err := deps.Exec.Run(ctx, "chroot", args...); err != nil {
+			if deps.Logger != nil {
+				deps.Logger.Warn("restorecon failed, falling back to /.autorelabel", "err", err, "output", string(out))
+			}
+			// Fallback: touch /.autorelabel so SELinux relabels on next boot.
+			relabelPath := filepath.Join(mntRoot, ".autorelabel")
+			_ = deps.FS.WriteFile(relabelPath, nil, 0o644)
+		} else if deps.Logger != nil {
+			deps.Logger.Info("restorecon: relabeled metalkit-modified paths")
 		}
 	}
 
-	// RHEL family (CentOS / RHEL / Rocky / AlmaLinux / Fedora) ships with
-	// SELinux in enforcing mode. Files we wrote into the rootfs from the
-	// live system (ifcfg-*, /var/lib/cloud/seed/*, /etc/cloud/cloud.cfg.d/*)
-	// inherit the mount-time context (typically default_t / unlabeled_t),
-	// which is wrong for net_conf_t / cloud_init_t. Without relabel, first
-	// boot drops to emergency mode (sshd fails to load policy). Touching
-	// /.autorelabel triggers a full SELinux relabel on first boot, after
-	// which the system reboots automatically. Harmless on systems without
-	// SELinux.
-	if isRHELFamilyRoot(deps, mntRoot) {
-		relabelPath := filepath.Join(mntRoot, ".autorelabel")
-		if err := deps.FS.WriteFile(relabelPath, nil, 0o644); err != nil {
-			return fmt.Errorf("install: touch /.autorelabel: %w", err)
+	// When cloud-init is absent from the target rootfs, the NoCloud seed
+	// files we wrote above will never be consumed. In that case we must
+	// write the configuration directly into the rootfs so the machine
+	// boots with the correct hostname, root password, network config and
+	// SSH settings. When cloud-init IS present, these direct writes are
+	// still safe — cloud-init will overwrite them on first boot if its
+	// seed data differs, and identical content causes no harm.
+	if !hasCloudInit(deps, mntRoot) {
+		if deps.Logger != nil {
+			deps.Logger.Info("cloud-init not found in target rootfs, writing config directly")
 		}
+		writeDirectHostname(deps, mntRoot, host)
+		writeDirectPassword(deps, mntRoot, spec.Profile.RootPasswordHash)
+		writeDirectSSHDConfig(deps, mntRoot)
+		writeDirectNetworkConfig(deps, spec, mntRoot)
 	}
 
 	return nil
+}
+
+// resolveRenderer determines the effective network renderer. If the profile
+// has an explicit selection (non-empty), it wins. Otherwise we fall back to
+// OS-detection heuristics that replicate the pre-component-selection behavior.
+func resolveRenderer(explicit string, deps Deps, mntRoot string) components.NetworkRenderer {
+	if explicit != "" {
+		return components.NetworkRenderer(explicit)
+	}
+	// Auto-detect: replicate the old hard-coded logic as defaults.
+	if isRHEL7Root(deps, mntRoot) {
+		return components.SysconfigRenderer
+	}
+	if prefersNetworkManagerRenderer(deps, mntRoot) {
+		return components.NetworkManagerRenderer
+	}
+	return components.NetPlanRenderer
 }
 
 // renderUserData emits the #cloud-config YAML body. Stable ordering of
@@ -224,7 +289,7 @@ func renderUserData(spec jobs.InstallSpec, hostname string) string {
 // that case bond slaves fall back to match.name.
 func renderNetworkConfig(nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo, rhel7 bool) string {
 	if nc.Bond != nil {
-		return renderNetworkConfigBond(nc, b, nics)
+		return renderNetworkConfigBond(nc, b, nics, rhel7)
 	}
 	return renderNetworkConfigSingle(nc, b, nics, rhel7)
 }
@@ -311,24 +376,54 @@ func renderNetworkConfigSingle(nc profiles.NetworkConfig, b bindings.Binding, ni
 	return sb.String()
 }
 
-func renderNetworkConfigBond(nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo) string {
+func renderNetworkConfigBond(nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo, rhel7 bool) string {
 	bond := nc.Bond
 	var sb strings.Builder
 	sb.WriteString("version: 2\n")
 
-	// Use logical names (slave-0, slave-1, ...) instead of live NIC names
-	// as YAML keys. Live NIC names (eno1/eno2) may differ from installed OS
-	// names (eth0/eth1 on CentOS 7 with net.ifnames=0). Logical names + MAC
-	// matching (match.macaddress) let NetworkManager/netplan bind the config
-	// to the correct physical NIC regardless of kernel naming.
+	// Resolve each slave to its real kernel-visible NIC name for the YAML key.
+	// cloud-init's NetworkManager renderer uses the YAML key as the NM
+	// connection ID and interface-name, so it must match the real device name
+	// in the installed OS. MAC matching (match.macaddress) still pins the
+	// config to the correct physical NIC.
+	//
+	// For RHEL7 (net.ifnames=0), the installed OS rewrites all NICs to ethN,
+	// so we use eth<index> based on the NIC's position in the live list —
+	// matching the kernel's ifindex ordering that CentOS 7 will follow.
 	sb.WriteString("ethernets:\n")
-	logicalNames := make([]string, len(bond.Slaves))
+	slaveKeys := make([]string, len(bond.Slaves))
 	for i, slave := range bond.Slaves {
-		ln := fmt.Sprintf("slave-%d", i)
-		logicalNames[i] = ln
-		fmt.Fprintf(&sb, "  %s:\n", ln)
+		mac := lookupSlaveMAC(slave, nics)
+		var key string
+		if isValidMAC(mac) {
+			if rhel7 {
+				// Find the NIC index for RHEL7 ethN naming.
+				for j, n := range nics {
+					if strings.EqualFold(n.MAC, mac) {
+						key = fmt.Sprintf("eth%d", j)
+						break
+					}
+				}
+			} else {
+				// Use the live kernel name (eth0, eno1, ens3, ...).
+				for _, n := range nics {
+					if strings.EqualFold(n.MAC, mac) && n.Name != "" {
+						key = n.Name
+						break
+					}
+				}
+			}
+		} else {
+			// Slave is an interface name, not a MAC.
+			key = slave
+		}
+		if key == "" {
+			key = fmt.Sprintf("eth%d", i)
+		}
+		slaveKeys[i] = key
+		fmt.Fprintf(&sb, "  %s:\n", key)
 		sb.WriteString("    match:\n")
-		if mac := lookupSlaveMAC(slave, nics); isValidMAC(mac) {
+		if isValidMAC(mac) {
 			fmt.Fprintf(&sb, "      macaddress: %q\n", strings.ToLower(mac))
 		} else {
 			fmt.Fprintf(&sb, "      name: %q\n", slave)
@@ -337,7 +432,7 @@ func renderNetworkConfigBond(nc profiles.NetworkConfig, b bindings.Binding, nics
 	sb.WriteString("bonds:\n")
 	sb.WriteString("  bond0:\n")
 	sb.WriteString("    interfaces: [")
-	for i, n := range logicalNames {
+	for i, n := range slaveKeys {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
@@ -356,7 +451,7 @@ func renderNetworkConfigBond(nc profiles.NetworkConfig, b bindings.Binding, nics
 		if bond.Primary != "" {
 			for i, s := range bond.Slaves {
 				if s == bond.Primary {
-					fmt.Fprintf(&sb, "      primary: %s\n", logicalNames[i])
+					fmt.Fprintf(&sb, "      primary: %s\n", slaveKeys[i])
 					break
 				}
 			}
@@ -483,42 +578,97 @@ func cleanStaleNetworkConfig(_ context.Context, deps Deps, mntRoot string) {
 			_ = deps.FS.Remove(p)
 		}
 	}
+
+	// NetworkManager connection keyfiles. Cloud images (Rocky 8+, RHEL 8+,
+	// Fedora) ship with pre-configured NM connections that race with our
+	// cloud-init-rendered config. For example, a default DHCP connection on
+	// eth0 would prevent NM from enslaving eth0 to bond0.
+	nmDir := filepath.Join(mntRoot, "etc", "NetworkManager", "system-connections")
+	if deps.FS.Exists(nmDir) {
+		matches, err := filepath.Glob(filepath.Join(nmDir, "*.nmconnection"))
+		if err == nil {
+			for _, p := range matches {
+				_ = deps.FS.Remove(p)
+			}
+		}
+	}
 }
 
 // isRHELFamilyRoot detects any RHEL-family distribution (CentOS, RHEL,
-// Rocky, AlmaLinux, Fedora) from /etc/os-release inside the mounted rootfs.
-// Used to decide whether SELinux autorelabel is needed on first boot — all
-// RHEL-family distros ship with SELinux in enforcing mode.
+// Rocky, AlmaLinux, Fedora, openEuler) from /etc/os-release inside the mounted
+// rootfs. Used to decide whether SELinux autorelabel is needed on first boot —
+// all RHEL-family distros ship with SELinux in enforcing mode.
 func isRHELFamilyRoot(deps Deps, mntRoot string) bool {
 	data, err := deps.FS.ReadFile(filepath.Join(mntRoot, "etc", "os-release"))
 	if err != nil {
 		return false
 	}
 	c := string(data)
+	cLower := strings.ToLower(c)
 	for _, marker := range []string{
-		`ID="centos"`,
-		`ID="rhel"`,
-		`ID="rocky"`,
-		`ID="almalinux"`,
-		`ID="fedora"`,
-		`ID_LIKE="rhel`,
-		`ID_LIKE="fedora`,
-		`ID_LIKE=rhel`,
-		`ID_LIKE=fedora`,
+		`id="centos"`,
+		`id="rhel"`,
+		`id="rocky"`,
+		`id="almalinux"`,
+		`id="fedora"`,
+		`id="openeuler"`,
+		`id_like="rhel`,
+		`id_like="fedora`,
+		`id_like=rhel`,
+		`id_like=fedora`,
 	} {
-		if strings.Contains(c, marker) {
+		if strings.Contains(cLower, marker) {
 			return true
 		}
 	}
 	return false
 }
 
+// selinuxWillBeDisabled returns true if /etc/selinux/config in the target
+// rootfs has SELINUX=disabled (or no SELinux config at all). Used to skip
+// restorecon/autorelabel logic in BuildSeed — see comment there. Note this
+// reports the *current* state of the config file, which is what we want:
+// installGRUBChrootRHEL disables SELinux *after* BuildSeed runs (so during
+// BuildSeed SELinux may still be "enforcing" in config), but a MetalKit-
+// prepared image (see IMAGE-PREP.md) already has SELinux=disabled before
+// install, and in that case we want to skip relabel here.
+func selinuxWillBeDisabled(deps Deps, mntRoot string) bool {
+	data, err := deps.FS.ReadFile(filepath.Join(mntRoot, "etc", "selinux", "config"))
+	if err != nil {
+		return true // no selinux config → effectively disabled
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "SELINUX=") {
+			val := strings.TrimSpace(strings.TrimPrefix(t, "SELINUX="))
+			return val == "disabled"
+		}
+	}
+	return false
+}
+
+// disableCloudInitNetwork writes a cloud.cfg.d drop-in that tells cloud-init
+// to skip network rendering entirely. Used when we write NM keyfiles directly
+// (e.g. for bond configs where cloud-init's NM renderer is buggy).
+func disableCloudInitNetwork(deps Deps, mntRoot string) {
+	dsDir := filepath.Join(mntRoot, "etc", "cloud", "cloud.cfg.d")
+	if !deps.FS.Exists(dsDir) {
+		_ = deps.FS.MkdirAll(dsDir, 0o755)
+	}
+	path := filepath.Join(dsDir, "97-metalkit-no-network.cfg")
+	content := "# Managed by metalkit installer — NM keyfiles written directly.\n# Disable cloud-init network rendering to avoid conflicts.\nnetwork: {config: disabled}\n"
+	_ = deps.FS.WriteFile(path, []byte(content), 0o644)
+}
+
 // prefersNetworkManagerRenderer reports whether the target rootfs should
 // have cloud-init emit NetworkManager keyfiles instead of legacy ifcfg.
-// True for modern RHEL family (Rocky / AlmaLinux / RHEL 8+ / Fedora);
+// True for modern RHEL family (Rocky / AlmaLinux / RHEL 8+ / Fedora / openEuler);
 // false for CentOS 7 / RHEL 7 (no NM renderer in their cloud-init) and
 // for non-RHEL distros (Ubuntu uses netplan natively).
 func prefersNetworkManagerRenderer(deps Deps, mntRoot string) bool {
+	if isOpenEulerRoot(deps, mntRoot) {
+		return true
+	}
 	if !isRHELFamilyRoot(deps, mntRoot) {
 		return false
 	}
@@ -526,6 +676,418 @@ func prefersNetworkManagerRenderer(deps Deps, mntRoot string) bool {
 		return false
 	}
 	return true
+}
+
+// isOpenEulerRoot detects openEuler from /etc/os-release inside the mounted rootfs.
+func isOpenEulerRoot(deps Deps, mntRoot string) bool {
+	data, err := deps.FS.ReadFile(filepath.Join(mntRoot, "etc", "os-release"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(data)), `id="openeuler"`)
+}
+
+// isKylinRoot detects 银河麒麟 (Kylin) from /etc/os-release inside the mounted rootfs.
+func isKylinRoot(deps Deps, mntRoot string) bool {
+	data, err := deps.FS.ReadFile(filepath.Join(mntRoot, "etc", "os-release"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), `ID="kylin"`)
+}
+
+// isOpenSUSERoot detects openSUSE from /etc/os-release inside the mounted rootfs.
+func isOpenSUSERoot(deps Deps, mntRoot string) bool {
+	data, err := deps.FS.ReadFile(filepath.Join(mntRoot, "etc", "os-release"))
+	if err != nil {
+		return false
+	}
+	c := string(data)
+	return strings.Contains(c, `ID="opensuse-leap"`) ||
+		strings.Contains(c, `ID="opensuse-tumbleweed"`) ||
+		strings.Contains(c, `ID="opensuse"`)
+}
+
+// writeNMRendererConfig pins cloud-init's network renderer to NetworkManager
+// by writing /etc/cloud/cloud.cfg.d/98-metalkit-renderer.cfg.
+func writeNMRendererConfig(deps Deps, mntRoot string) {
+	dsDir := filepath.Join(mntRoot, "etc", "cloud", "cloud.cfg.d")
+	if !deps.FS.Exists(dsDir) {
+		_ = deps.FS.MkdirAll(dsDir, 0o755)
+	}
+	rendererPath := filepath.Join(dsDir, "98-metalkit-renderer.cfg")
+	rendererContent := "# Managed by metalkit installer — prefer NetworkManager keyfiles over legacy ifcfg.\n" +
+		"system_info:\n" +
+		"  network:\n" +
+		"    renderers: [ network-manager, sysconfig ]\n"
+	_ = deps.FS.WriteFile(rendererPath, []byte(rendererContent), 0o644)
+}
+
+// writeENIRendererConfig configures cloud-init to prefer the ENI renderer
+// (writes /etc/network/interfaces) and also writes the interfaces file
+// directly as a fallback for systems without cloud-init.
+func writeENIRendererConfig(deps Deps, spec jobs.InstallSpec, mntRoot string) {
+	nc := spec.Profile.Network
+	b := spec.Binding
+	nics := deps.NICs
+
+	// Pin cloud-init renderer to ENI.
+	dsDir := filepath.Join(mntRoot, "etc", "cloud", "cloud.cfg.d")
+	if !deps.FS.Exists(dsDir) {
+		_ = deps.FS.MkdirAll(dsDir, 0o755)
+	}
+	rendererPath := filepath.Join(dsDir, "98-metalkit-renderer.cfg")
+	rendererContent := "# Managed by metalkit installer — prefer ENI /etc/network/interfaces.\n" +
+		"system_info:\n" +
+		"  network:\n" +
+		"    renderers: [ eni, netplan ]\n"
+	_ = deps.FS.WriteFile(rendererPath, []byte(rendererContent), 0o644)
+
+	// Write /etc/network/interfaces directly as fallback.
+	if nc.Bond != nil {
+		writeENIInterfacesBond(deps, mntRoot, nc, b, nics)
+	} else {
+		writeENIInterfaces(deps, mntRoot, nc, b, nics)
+	}
+}
+
+// writeENIInterfaces writes a single-NIC /etc/network/interfaces file.
+func writeENIInterfaces(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo) {
+	ifDir := filepath.Join(mntRoot, "etc", "network")
+	if !deps.FS.Exists(ifDir) {
+		_ = deps.FS.MkdirAll(ifDir, 0o755)
+	}
+
+	// Resolve the interface name.
+	dev := "eth0"
+	switch {
+	case strings.HasPrefix(nc.NICSelector, "by-mac:"):
+		mac := strings.ToLower(strings.TrimPrefix(nc.NICSelector, "by-mac:"))
+		for _, n := range nics {
+			if strings.ToLower(n.MAC) == mac && n.Name != "" {
+				dev = n.Name
+				break
+			}
+		}
+	case strings.HasPrefix(nc.NICSelector, "by-name:"):
+		name := strings.TrimPrefix(nc.NICSelector, "by-name:")
+		if isValidMAC(name) {
+			for _, n := range nics {
+				if strings.EqualFold(n.MAC, name) && n.Name != "" {
+					dev = n.Name
+					break
+				}
+			}
+		} else if name != "" {
+			dev = name
+		}
+	}
+
+	var lines []string
+	lines = append(lines, "# Managed by metalkit installer")
+	lines = append(lines, "source /etc/network/interfaces.d/*")
+	lines = append(lines, "")
+	lines = append(lines, "auto lo")
+	lines = append(lines, "iface lo inet loopback")
+	lines = append(lines, "")
+	lines = append(lines, "auto "+dev)
+
+	if nc.Method == "dhcp" {
+		lines = append(lines, "iface "+dev+" inet dhcp")
+	} else {
+		lines = append(lines, "iface "+dev+" inet static")
+		if b.StaticAddress != "" {
+			lines = append(lines, "    address "+b.StaticAddress)
+			if nc.PrefixLen > 0 {
+				lines = append(lines, fmt.Sprintf("    netmask %s", prefixToNetmask(nc.PrefixLen)))
+			}
+		}
+		if nc.Gateway != "" {
+			lines = append(lines, "    gateway "+nc.Gateway)
+		}
+		if len(nc.DNS) > 0 {
+			lines = append(lines, "    dns-nameservers "+strings.Join(nc.DNS, " "))
+		}
+	}
+
+	content := strings.Join(lines, "\n") + "\n"
+	_ = deps.FS.WriteFile(filepath.Join(ifDir, "interfaces"), []byte(content), 0o644)
+}
+
+// writeENIInterfacesBond writes /etc/network/interfaces with bond configuration.
+func writeENIInterfacesBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo) {
+	ifDir := filepath.Join(mntRoot, "etc", "network")
+	if !deps.FS.Exists(ifDir) {
+		_ = deps.FS.MkdirAll(ifDir, 0o755)
+	}
+
+	bond := nc.Bond
+	miimon := bond.Miimon
+	if miimon == 0 {
+		miimon = 100
+	}
+
+	var lines []string
+	lines = append(lines, "# Managed by metalkit installer")
+	lines = append(lines, "source /etc/network/interfaces.d/*")
+	lines = append(lines, "")
+	lines = append(lines, "auto lo")
+	lines = append(lines, "iface lo inet loopback")
+	lines = append(lines, "")
+
+	// Slave interfaces.
+	for i, slave := range bond.Slaves {
+		dev := slave
+		if isValidMAC(slave) {
+			for _, n := range nics {
+				if strings.EqualFold(n.MAC, slave) && n.Name != "" {
+					dev = n.Name
+					break
+				}
+			}
+		}
+		lines = append(lines, "auto "+dev)
+		lines = append(lines, "iface "+dev+" inet manual")
+		if i == 0 {
+			lines = append(lines, fmt.Sprintf("    bond-master bond0"))
+		} else {
+			lines = append(lines, fmt.Sprintf("    bond-master bond0"))
+		}
+		lines = append(lines, "")
+	}
+
+	// Bond master.
+	lines = append(lines, "auto bond0")
+	if nc.Method == "dhcp" {
+		lines = append(lines, "iface bond0 inet dhcp")
+	} else {
+		lines = append(lines, "iface bond0 inet static")
+		if b.StaticAddress != "" {
+			lines = append(lines, "    address "+b.StaticAddress)
+			if nc.PrefixLen > 0 {
+				lines = append(lines, fmt.Sprintf("    netmask %s", prefixToNetmask(nc.PrefixLen)))
+			}
+		}
+		if nc.Gateway != "" {
+			lines = append(lines, "    gateway "+nc.Gateway)
+		}
+		if len(nc.DNS) > 0 {
+			lines = append(lines, "    dns-nameservers "+strings.Join(nc.DNS, " "))
+		}
+	}
+	lines = append(lines, fmt.Sprintf("    bond-mode %s", bond.Mode))
+	lines = append(lines, fmt.Sprintf("    bond-miimon %d", miimon))
+	switch bond.Mode {
+	case "active-backup":
+		if bond.Primary != "" {
+			lines = append(lines, "    bond-primary "+bond.Primary)
+		}
+	case "802.3ad":
+		rate := bond.LACPRate
+		if rate == "" {
+			rate = "fast"
+		}
+		lines = append(lines, "    bond-lacp-rate "+rate)
+		policy := bond.XmitHashPolicy
+		if policy == "" {
+			policy = "layer3+4"
+		}
+		lines = append(lines, "    bond-xmit-hash-policy "+policy)
+	}
+
+	content := strings.Join(lines, "\n") + "\n"
+	_ = deps.FS.WriteFile(filepath.Join(ifDir, "interfaces"), []byte(content), 0o644)
+}
+
+// writeWickedConfig writes openSUSE Wicked network configuration files
+// directly into /etc/sysconfig/network/ifcfg-* and configures cloud-init
+// to use the sysconfig renderer (which Wicked consumes on openSUSE).
+func writeWickedConfig(deps Deps, spec jobs.InstallSpec, mntRoot string) {
+	nc := spec.Profile.Network
+	b := spec.Binding
+	nics := deps.NICs
+
+	// Pin cloud-init to sysconfig renderer (Wicked consumes ifcfg files).
+	dsDir := filepath.Join(mntRoot, "etc", "cloud", "cloud.cfg.d")
+	if !deps.FS.Exists(dsDir) {
+		_ = deps.FS.MkdirAll(dsDir, 0o755)
+	}
+	rendererPath := filepath.Join(dsDir, "98-metalkit-renderer.cfg")
+	rendererContent := "# Managed by metalkit installer — prefer sysconfig renderer for Wicked.\n" +
+		"system_info:\n" +
+		"  network:\n" +
+		"    renderers: [ sysconfig, netplan ]\n"
+	_ = deps.FS.WriteFile(rendererPath, []byte(rendererContent), 0o644)
+
+	// Write Wicked-style ifcfg files directly as fallback.
+	sysDir := filepath.Join(mntRoot, "etc", "sysconfig", "network")
+	if !deps.FS.Exists(sysDir) {
+		_ = deps.FS.MkdirAll(sysDir, 0o755)
+	}
+
+	if nc.Bond != nil {
+		writeWickedBond(deps, mntRoot, nc, b, nics, sysDir)
+	} else {
+		writeWickedIfcfg(deps, mntRoot, nc, b, nics, sysDir)
+	}
+}
+
+// writeWickedIfcfg writes a single-NIC openSUSE Wicked ifcfg file.
+func writeWickedIfcfg(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo, sysDir string) {
+	// Resolve the interface name.
+	dev := "eth0"
+	var hwaddr string
+	switch {
+	case strings.HasPrefix(nc.NICSelector, "by-mac:"):
+		mac := strings.ToLower(strings.TrimPrefix(nc.NICSelector, "by-mac:"))
+		hwaddr = mac
+		for _, n := range nics {
+			if strings.ToLower(n.MAC) == mac && n.Name != "" {
+				dev = n.Name
+				break
+			}
+		}
+	case strings.HasPrefix(nc.NICSelector, "by-name:"):
+		name := strings.TrimPrefix(nc.NICSelector, "by-name:")
+		if isValidMAC(name) {
+			hwaddr = strings.ToLower(name)
+			for _, n := range nics {
+				if strings.EqualFold(n.MAC, name) && n.Name != "" {
+					dev = n.Name
+					break
+				}
+			}
+		} else if name != "" {
+			dev = name
+		}
+	}
+
+	var lines []string
+	lines = append(lines, "# Managed by metalkit installer")
+	lines = append(lines, "BOOTPROTO='"+ternary(nc.Method == "dhcp", "dhcp", "static")+"'")
+	if nc.Method != "dhcp" {
+		if b.StaticAddress != "" {
+			lines = append(lines, "IPADDR='"+b.StaticAddress+"'")
+		}
+		if nc.PrefixLen > 0 {
+			lines = append(lines, fmt.Sprintf("PREFIXLEN='%d'", nc.PrefixLen))
+		}
+		if nc.Gateway != "" {
+			lines = append(lines, "GATEWAY='"+nc.Gateway+"'")
+		}
+		if len(nc.DNS) > 0 {
+			lines = append(lines, fmt.Sprintf("DNS='%s'", strings.Join(nc.DNS, " ")))
+		}
+	}
+	if hwaddr != "" {
+		lines = append(lines, "LLADDR='"+strings.ToUpper(hwaddr)+"'")
+	}
+	lines = append(lines, "STARTMODE='auto'")
+
+	content := strings.Join(lines, "\n") + "\n"
+	_ = deps.FS.WriteFile(filepath.Join(sysDir, "ifcfg-"+dev), []byte(content), 0o644)
+}
+
+// writeWickedBond writes Wicked ifcfg files for a bond master and its slaves.
+func writeWickedBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo, sysDir string) {
+	bond := nc.Bond
+	miimon := bond.Miimon
+	if miimon == 0 {
+		miimon = 100
+	}
+
+	// Slave ifcfg files.
+	for i, slave := range bond.Slaves {
+		dev := slave
+		var hwaddr string
+		if isValidMAC(slave) {
+			hwaddr = strings.ToLower(slave)
+			for _, n := range nics {
+				if strings.EqualFold(n.MAC, slave) && n.Name != "" {
+					dev = n.Name
+					break
+				}
+			}
+		}
+		var lines []string
+		lines = append(lines, "# Managed by metalkit installer")
+		lines = append(lines, "BOOTPROTO='none'")
+		if hwaddr != "" {
+			lines = append(lines, "LLADDR='"+strings.ToUpper(hwaddr)+"'")
+		}
+		lines = append(lines, "STARTMODE='auto'")
+		lines = append(lines, fmt.Sprintf("BONDING_MASTER='%d'", 1))
+		if i == 0 {
+			lines = append(lines, fmt.Sprintf("BONDING_SLAVE_0='%s'", dev))
+		}
+		_ = deps.FS.WriteFile(
+			filepath.Join(sysDir, "ifcfg-"+dev),
+			[]byte(strings.Join(lines, "\n")+"\n"),
+			0o644,
+		)
+	}
+
+	// Bond master ifcfg-bond0.
+	var master []string
+	master = append(master, "# Managed by metalkit installer")
+	master = append(master, "BOOTPROTO='"+ternary(nc.Method == "dhcp", "dhcp", "static")+"'")
+	if nc.Method != "dhcp" {
+		if b.StaticAddress != "" {
+			master = append(master, "IPADDR='"+b.StaticAddress+"'")
+		}
+		if nc.PrefixLen > 0 {
+			master = append(master, fmt.Sprintf("PREFIXLEN='%d'", nc.PrefixLen))
+		}
+		if nc.Gateway != "" {
+			master = append(master, "GATEWAY='"+nc.Gateway+"'")
+		}
+	}
+	master = append(master, "STARTMODE='auto'")
+	master = append(master, fmt.Sprintf("BONDING_MODULE_OPTS='mode=%s miimon=%d'", bond.Mode, miimon))
+	switch bond.Mode {
+	case "active-backup":
+		if bond.Primary != "" {
+			master = append(master, fmt.Sprintf("BONDING_PRIMARY='%s'", bond.Primary))
+		}
+	case "802.3ad":
+		rate := bond.LACPRate
+		if rate == "" {
+			rate = "fast"
+		}
+		policy := bond.XmitHashPolicy
+		if policy == "" {
+			policy = "layer3+4"
+		}
+		master = append(master, fmt.Sprintf("BONDING_MODULE_OPTS='mode=%s miimon=%d lacp_rate=%s xmit_hash_policy=%s'",
+			bond.Mode, miimon, rate, policy))
+	}
+	for i, slave := range bond.Slaves {
+		master = append(master, fmt.Sprintf("BONDING_SLAVE_%d='%s'", i, slave))
+	}
+
+	_ = deps.FS.WriteFile(
+		filepath.Join(sysDir, "ifcfg-bond0"),
+		[]byte(strings.Join(master, "\n")+"\n"),
+		0o644,
+	)
+}
+
+// prefixToNetmask converts a CIDR prefix length (1-32) to a dotted-decimal
+// netmask string (e.g. 24 → "255.255.255.0").
+func prefixToNetmask(prefix int) string {
+	if prefix < 0 || prefix > 32 {
+		return "255.255.255.0"
+	}
+	mask := net.CIDRMask(prefix, 32)
+	return mask.String()
+}
+
+// ternary returns a if cond is true, otherwise b.
+func ternary(cond bool, a, b string) string {
+	if cond {
+		return a
+	}
+	return b
 }
 
 // isRHEL7Root detects CentOS / RHEL 7 from /etc/os-release inside the mounted
@@ -757,4 +1319,449 @@ func expandHostname(template string, b bindings.Binding, _ profiles.Profile) str
 	out = strings.ReplaceAll(out, "{uuid8}", short)
 	// {mac} intentionally not substituted; see doc above.
 	return out
+}
+
+// hasCloudInit reports whether the target rootfs has cloud-init installed.
+// Checked by looking for /usr/bin/cloud-init or /usr/sbin/cloud-init.
+func hasCloudInit(deps Deps, mntRoot string) bool {
+	for _, p := range []string{
+		filepath.Join(mntRoot, "usr", "bin", "cloud-init"),
+		filepath.Join(mntRoot, "usr", "sbin", "cloud-init"),
+		filepath.Join(mntRoot, "usr", "local", "bin", "cloud-init"),
+	} {
+		if deps.FS.Exists(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// writeDirectHostname writes /etc/hostname directly into the rootfs.
+// This is a fallback for images without cloud-init.
+func writeDirectHostname(deps Deps, mntRoot, hostname string) {
+	if hostname == "" {
+		return
+	}
+	path := filepath.Join(mntRoot, "etc", "hostname")
+	content := hostname + "\n"
+	if err := deps.FS.WriteFile(path, []byte(content), 0o644); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("direct-write: failed to write /etc/hostname", "err", err)
+		}
+	} else if deps.Logger != nil {
+		deps.Logger.Info("direct-write: set hostname", "hostname", hostname)
+	}
+}
+
+// writeDirectPassword sets the root password hash directly in /etc/shadow.
+// This is a fallback for images without cloud-init.
+func writeDirectPassword(deps Deps, mntRoot, passwordHash string) {
+	if passwordHash == "" {
+		return
+	}
+	shadowPath := filepath.Join(mntRoot, "etc", "shadow")
+	data, err := deps.FS.ReadFile(shadowPath)
+	if err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("direct-write: cannot read /etc/shadow", "err", err)
+		}
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, line := range lines {
+		fields := strings.SplitN(line, ":", 9)
+		if len(fields) >= 2 && fields[0] == "root" {
+			fields[1] = passwordHash
+			lines[i] = strings.Join(fields, ":")
+			found = true
+			break
+		}
+	}
+	if !found {
+		if deps.Logger != nil {
+			deps.Logger.Warn("direct-write: no root entry in /etc/shadow")
+		}
+		return
+	}
+	if err := deps.FS.WriteFile(shadowPath, []byte(strings.Join(lines, "\n")), 0o640); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("direct-write: failed to write /etc/shadow", "err", err)
+		}
+	} else if deps.Logger != nil {
+		deps.Logger.Info("direct-write: set root password in /etc/shadow")
+	}
+}
+
+// writeDirectSSHDConfig writes the sshd drop-in config directly.
+// This is a fallback for images without cloud-init.
+func writeDirectSSHDConfig(deps Deps, mntRoot string) {
+	sshdDir := filepath.Join(mntRoot, "etc", "ssh", "sshd_config.d")
+	if !deps.FS.Exists(sshdDir) {
+		_ = deps.FS.MkdirAll(sshdDir, 0o755)
+	}
+	path := filepath.Join(sshdDir, "99-metalkit.conf")
+	content := "# Managed by metalkit installer\nPermitRootLogin yes\nPasswordAuthentication yes\n"
+	if err := deps.FS.WriteFile(path, []byte(content), 0o644); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("direct-write: failed to write sshd config", "err", err)
+		}
+	} else if deps.Logger != nil {
+		deps.Logger.Info("direct-write: wrote sshd drop-in config")
+	}
+}
+
+// writeDirectNetworkConfig writes network configuration files directly
+// into the rootfs based on the resolved renderer. This is a fallback
+// for images without cloud-init.
+func writeDirectNetworkConfig(deps Deps, spec jobs.InstallSpec, mntRoot string) {
+	nc := spec.Profile.Network
+	b := spec.Binding
+	nics := deps.NICs
+	renderer := resolveRenderer(spec.NetworkRenderer, deps, mntRoot)
+
+	switch renderer {
+	case components.NetworkManagerRenderer:
+		// Write NM keyfiles directly.
+		if nc.Bond != nil {
+			writeNMKeyfileBond(deps, mntRoot, nc, b, nics)
+		} else {
+			writeNMKeyfile(deps, mntRoot, nc, b, nics)
+		}
+	case components.SysconfigRenderer:
+		// Already handled by writeIfcfg/writeIfcfgBond — those write
+		// directly regardless of cloud-init presence. But double-check
+		// in case the renderer was resolved differently.
+		if nc.Bond != nil {
+			writeIfcfgBond(deps, mntRoot, nc, b, nics)
+		} else {
+			writeIfcfg(deps, mntRoot, nc, b, nics)
+		}
+	case components.WickedRenderer:
+		writeWickedConfig(deps, spec, mntRoot)
+	case components.ENIRenderer:
+		writeENIRendererConfig(deps, spec, mntRoot)
+	case components.NetPlanRenderer:
+		// Write netplan YAML directly as fallback.
+		writeDirectNetplan(deps, mntRoot, nc, b, nics)
+	}
+}
+
+// writeNMKeyfile writes a NetworkManager keyfile for a single NIC directly
+// into /etc/NetworkManager/system-connections/.
+func writeNMKeyfile(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo) {
+	nmDir := filepath.Join(mntRoot, "etc", "NetworkManager", "system-connections")
+	if !deps.FS.Exists(nmDir) {
+		_ = deps.FS.MkdirAll(nmDir, 0o755)
+	}
+
+	// Resolve the interface name.
+	dev, mac := resolveNICForNM(nc.NICSelector, nics)
+
+	var lines []string
+	lines = append(lines, "# Managed by metalkit installer")
+	lines = append(lines, "[connection]")
+	lines = append(lines, "id=metalkit-"+dev)
+	lines = append(lines, "type=ethernet")
+	// Do not set interface-name: the live NIC name may differ from the
+	// installed OS name. Rely on mac-address matching instead.
+	lines = append(lines, "autoconnect=true")
+	lines = append(lines, "")
+	lines = append(lines, "[ethernet]")
+	if mac != "" {
+		lines = append(lines, "mac-address="+strings.ToLower(mac))
+	}
+	lines = append(lines, "")
+	lines = append(lines, "[ipv4]")
+	if nc.Method == "dhcp" {
+		lines = append(lines, "method=auto")
+	} else {
+		lines = append(lines, "method=manual")
+		if b.StaticAddress != "" {
+			lines = append(lines, fmt.Sprintf("address1=%s/%d", b.StaticAddress, nc.PrefixLen))
+		}
+		if nc.Gateway != "" {
+			lines = append(lines, "gateway="+nc.Gateway)
+		}
+		if len(nc.DNS) > 0 {
+			lines = append(lines, "dns="+strings.Join(nc.DNS, ";"))
+		}
+	}
+
+	content := strings.Join(lines, "\n") + "\n"
+	filename := "metalkit-" + dev + ".nmconnection"
+	if err := deps.FS.WriteFile(filepath.Join(nmDir, filename), []byte(content), 0o600); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("direct-write: failed to write NM keyfile", "err", err)
+		}
+	} else if deps.Logger != nil {
+		deps.Logger.Info("direct-write: wrote NM keyfile", "file", filename)
+	}
+}
+
+// writeNMKeyfileBond writes NetworkManager keyfiles for a bond and its
+// slave interfaces directly into /etc/NetworkManager/system-connections/.
+func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo) {
+	bond := nc.Bond
+	if bond == nil {
+		return
+	}
+	nmDir := filepath.Join(mntRoot, "etc", "NetworkManager", "system-connections")
+	if !deps.FS.Exists(nmDir) {
+		_ = deps.FS.MkdirAll(nmDir, 0o755)
+	}
+
+	miimon := bond.Miimon
+	if miimon == 0 {
+		miimon = 100
+	}
+
+	// Write one keyfile per slave.
+	// Do NOT set interface-name: the live system's NIC names (eno1, enp1s0f0,
+	// etc.) may differ from the installed OS names (eth0, eth1, etc.) due to
+	// net.ifnames / biosdevname kernel parameters. Rely solely on mac-address
+	// matching so NM finds the right device regardless of its name.
+	for i, slave := range bond.Slaves {
+		_, mac := resolveSlaveDevAndMAC(slave, nics)
+
+		var lines []string
+		lines = append(lines, "# Managed by metalkit installer")
+		lines = append(lines, "[connection]")
+		lines = append(lines, fmt.Sprintf("id=bond0-slave-%d", i))
+		lines = append(lines, "type=ethernet")
+		lines = append(lines, "master=bond0")
+		lines = append(lines, "slave-type=bond")
+		lines = append(lines, "")
+		lines = append(lines, "[ethernet]")
+		if mac != "" {
+			lines = append(lines, "mac-address="+strings.ToLower(mac))
+		}
+
+		content := strings.Join(lines, "\n") + "\n"
+		filename := fmt.Sprintf("bond0-slave-%d.nmconnection", i)
+		_ = deps.FS.WriteFile(filepath.Join(nmDir, filename), []byte(content), 0o600)
+	}
+
+	// Write bond master keyfile.
+	var master []string
+	master = append(master, "# Managed by metalkit installer")
+	master = append(master, "[connection]")
+	master = append(master, "id=bond0")
+	master = append(master, "type=bond")
+	master = append(master, "interface-name=bond0")
+	master = append(master, "autoconnect=true")
+	master = append(master, "")
+	master = append(master, "[bond]")
+	master = append(master, fmt.Sprintf("miimon=%d", miimon))
+	master = append(master, "mode="+bond.Mode)
+	switch bond.Mode {
+	case "active-backup":
+		if bond.Primary != "" {
+			primaryDev, _ := resolveSlaveDevAndMAC(bond.Primary, nics)
+			master = append(master, "primary="+primaryDev)
+		}
+	case "802.3ad":
+		rate := bond.LACPRate
+		if rate == "" {
+			rate = "fast"
+		}
+		master = append(master, "lacp-rate="+rate)
+		policy := bond.XmitHashPolicy
+		if policy == "" {
+			policy = "layer3+4"
+		}
+		master = append(master, "transmit-hash-policy="+policy)
+	}
+	master = append(master, "")
+	master = append(master, "[ipv4]")
+	if nc.Method == "dhcp" {
+		master = append(master, "method=auto")
+	} else {
+		master = append(master, "method=manual")
+		if b.StaticAddress != "" {
+			master = append(master, fmt.Sprintf("address1=%s/%d", b.StaticAddress, nc.PrefixLen))
+		}
+		if nc.Gateway != "" {
+			master = append(master, "gateway="+nc.Gateway)
+		}
+		if len(nc.DNS) > 0 {
+			master = append(master, "dns="+strings.Join(nc.DNS, ";"))
+		}
+	}
+
+	content := strings.Join(master, "\n") + "\n"
+	if err := deps.FS.WriteFile(filepath.Join(nmDir, "bond0.nmconnection"), []byte(content), 0o600); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("direct-write: failed to write bond NM keyfile", "err", err)
+		}
+	} else if deps.Logger != nil {
+		deps.Logger.Info("direct-write: wrote bond0 NM keyfile")
+	}
+
+	// VLAN on top of bond.
+	if nc.VLAN > 0 {
+		writeNMKeyfileVLAN(deps, mntRoot, nc, b, nmDir)
+	}
+}
+
+// writeNMKeyfileVLAN writes a NetworkManager keyfile for a VLAN interface.
+func writeNMKeyfileVLAN(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nmDir string) {
+	parent := "bond0"
+	if nc.Bond == nil {
+		parent = "metalkit0"
+	}
+
+	var lines []string
+	lines = append(lines, "# Managed by metalkit installer")
+	lines = append(lines, "[connection]")
+	lines = append(lines, fmt.Sprintf("id=%s.%d", parent, nc.VLAN))
+	lines = append(lines, "type=vlan")
+	lines = append(lines, fmt.Sprintf("interface-name=%s.%d", parent, nc.VLAN))
+	lines = append(lines, "autoconnect=true")
+	lines = append(lines, "")
+	lines = append(lines, "[vlan]")
+	lines = append(lines, fmt.Sprintf("parent=%s", parent))
+	lines = append(lines, fmt.Sprintf("id=%d", nc.VLAN))
+	lines = append(lines, "")
+	lines = append(lines, "[ipv4]")
+	if nc.Method == "dhcp" {
+		lines = append(lines, "method=auto")
+	} else {
+		lines = append(lines, "method=manual")
+		if b.StaticAddress != "" {
+			lines = append(lines, fmt.Sprintf("address1=%s/%d", b.StaticAddress, nc.PrefixLen))
+		}
+		if nc.Gateway != "" {
+			lines = append(lines, "gateway="+nc.Gateway)
+		}
+		if len(nc.DNS) > 0 {
+			lines = append(lines, "dns="+strings.Join(nc.DNS, ";"))
+		}
+	}
+
+	filename := fmt.Sprintf("%s.%d.nmconnection", parent, nc.VLAN)
+	_ = deps.FS.WriteFile(filepath.Join(nmDir, filename), []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+}
+
+// writeDirectNetplan writes a netplan YAML file directly as a fallback
+// when cloud-init is absent on netplan-based distros.
+func writeDirectNetplan(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo) {
+	netplanDir := filepath.Join(mntRoot, "etc", "netplan")
+	if !deps.FS.Exists(netplanDir) {
+		_ = deps.FS.MkdirAll(netplanDir, 0o755)
+	}
+
+	rhel7 := isRHEL7Root(deps, mntRoot)
+	netCfg := renderNetworkConfig(nc, b, nics, rhel7)
+	content := "network:\n" + indentYAML(netCfg)
+
+	path := filepath.Join(netplanDir, "50-metalkit.yaml")
+	if err := deps.FS.WriteFile(path, []byte(content), 0o600); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("direct-write: failed to write netplan config", "err", err)
+		}
+	} else if deps.Logger != nil {
+		deps.Logger.Info("direct-write: wrote netplan config", "path", path)
+	}
+}
+
+// indentYAML adds a 2-space indent to every line of the input for nesting
+// under a `network:` key.
+func indentYAML(s string) string {
+	var out strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		if line != "" {
+			out.WriteString("  ")
+		}
+		out.WriteString(line)
+		out.WriteByte('\n')
+	}
+	return out.String()
+}
+
+// resolveNICForNM returns the interface name and MAC address for a given
+// NIC selector, suitable for writing into a NetworkManager keyfile.
+func resolveNICForNM(selector string, nics []NICInfo) (name, mac string) {
+	switch {
+	case strings.HasPrefix(selector, "by-mac:"):
+		mac = strings.ToLower(strings.TrimPrefix(selector, "by-mac:"))
+		for _, n := range nics {
+			if strings.ToLower(n.MAC) == mac && n.Name != "" {
+				name = n.Name
+				return
+			}
+		}
+		name = "eth0"
+	case strings.HasPrefix(selector, "by-name:"):
+		nm := strings.TrimPrefix(selector, "by-name:")
+		if isValidMAC(nm) {
+			mac = strings.ToLower(nm)
+			for _, n := range nics {
+				if strings.EqualFold(n.MAC, nm) && n.Name != "" {
+					name = n.Name
+					return
+				}
+			}
+			name = "eth0"
+		} else if nm != "" {
+			name = nm
+			for _, n := range nics {
+				if n.Name == nm {
+					mac = strings.ToLower(n.MAC)
+					break
+				}
+			}
+		} else {
+			name = "eth0"
+		}
+	default:
+		// auto: use first NIC with a name.
+		name = "eth0"
+		for _, n := range nics {
+			if n.Name != "" {
+				name = n.Name
+				mac = strings.ToLower(n.MAC)
+				break
+			}
+		}
+	}
+	return
+}
+
+// resolveSlaveDevAndMAC resolves a bond slave specifier (which may be a MAC
+// address, a by-name:IFNAME selector, or a plain interface name) into the
+// kernel-visible device name and its MAC address. Falls back to the input
+// value if resolution fails.
+func resolveSlaveDevAndMAC(slave string, nics []NICInfo) (dev, mac string) {
+	if isValidMAC(slave) {
+		mac = strings.ToLower(slave)
+		for _, n := range nics {
+			if strings.EqualFold(n.MAC, slave) && n.Name != "" {
+				dev = n.Name
+				return
+			}
+		}
+		dev = slave
+		return
+	}
+	// Handle by-name: prefix.
+	name := slave
+	if strings.HasPrefix(slave, "by-name:") {
+		name = strings.TrimPrefix(slave, "by-name:")
+	}
+	mac = resolveNICMAC(nics, name)
+	if mac == "" {
+		// Try resolving name as a MAC.
+		if isValidMAC(name) {
+			mac = strings.ToLower(name)
+			for _, n := range nics {
+				if strings.EqualFold(n.MAC, name) && n.Name != "" {
+					dev = n.Name
+					return
+				}
+			}
+		}
+	}
+	dev = name
+	return
 }

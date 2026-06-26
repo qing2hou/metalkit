@@ -42,7 +42,9 @@ var (
 	// "any" = profile is OS-agnostic (compat check skipped).
 	// Specific values must match Image.Family on the chosen image.
 	validOSFamilies = map[string]bool{
-		"any": true, "ubuntu": true, "debian": true, "rhel": true, "rhel7": true,
+		"any": true, "ubuntu": true, "debian": true,
+		"rhel": true, "rhel7": true,
+		"kylin": true, "openeuler": true, "opensuse": true,
 	}
 )
 
@@ -54,7 +56,7 @@ func ValidateOSFamily(s string) error {
 		return nil
 	}
 	if !validOSFamilies[s] {
-		return fmt.Errorf("os_family %q: must be one of any/ubuntu/debian/rhel/rhel7", s)
+		return fmt.Errorf("os_family %q: must be one of any/ubuntu/debian/rhel/rhel7/kylin/openeuler/opensuse", s)
 	}
 	return nil
 }
@@ -451,4 +453,62 @@ func validateHostnameTemplate(t string) error {
 		}
 	}
 	return nil
+}
+
+// MaxChrootDNSServers bounds how many DNS entries we'll accept. Three
+// is the conventional resolv.conf limit; we allow up to 8 for headroom.
+const MaxChrootDNSServers = 8
+
+// validateChrootDNS normalises the user-supplied string (comma and/or
+// whitespace separated DNS IPs) and returns the canonical
+// comma-separated form. Empty input returns "" (meaning "use installer
+// defaults"). Each entry must parse as an IPv4 or IPv6 literal.
+func validateChrootDNS(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	parts := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	if len(parts) == 0 {
+		return "", nil
+	}
+	if len(parts) > MaxChrootDNSServers {
+		return "", fmt.Errorf("chroot_dns: at most %d servers, got %d", MaxChrootDNSServers, len(parts))
+	}
+	for _, p := range parts {
+		ip := net.ParseIP(strings.TrimSpace(p))
+		if ip == nil {
+			return "", fmt.Errorf("chroot_dns: %q is not a valid IP", p)
+		}
+	}
+	return strings.Join(parts, ","), nil
+}
+
+// parseChrootDNS splits a stored comma-separated chroot_dns string into
+// a slice. Empty string → nil (so it omits from JSON).
+func parseChrootDNS(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// joinChrootDNS is the inverse of parseChrootDNS: renders the slice as
+// a comma-separated string for DB storage.
+func joinChrootDNS(dns []string) string {
+	return strings.Join(dns, ",")
 }

@@ -37,4 +37,10 @@ type InstallSpec struct {
 	ImageFormat  string           `json:"image_format"` // "qcow2" or "raw"
 	Profile      profiles.Profile `json:"profile"`
 	Binding      bindings.Binding `json:"binding"`
+	// NetworkRenderer selects which network config rendering strategy to use.
+	// Empty string = "auto" (determined by OS detection at install time).
+	NetworkRenderer string `json:"network_renderer,omitempty"`
+	// Bootloader selects which bootloader installation strategy to use.
+	// Empty string = "auto" (determined by OS detection at install time).
+	Bootloader string `json:"bootloader,omitempty"`
 }

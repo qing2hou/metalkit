@@ -91,6 +91,128 @@ func TestCreateESPIfMissing_UEFI_CreatesESP(t *testing.T) {
 	}
 }
 
+func TestFixESPTypeIfWrong_MBR_Fixes0EtoEF(t *testing.T) {
+	exec := newMockExec()
+	// sfdisk -d shows MBR (dos) label.
+	exec.OnFull["sfdisk -d /dev/sda"] = mockExecResult{Out: []byte(
+		"label: dos\nlabel-id: 0x0c6569e1\nunit: sectors\n\n" +
+			"/dev/sda1 : start=2048, size=4192256, type=e\n" +
+			"/dev/sda2 : start=4194304, size=1166802911, type=83\n",
+	)}
+	// Current partition type is 0x0E (wrong).
+	exec.OnFull["sfdisk --part-type /dev/sda 1"] = mockExecResult{Out: []byte("e\n")}
+	// sfdisk --part-type ... ef succeeds (returns empty).
+	exec.On["sfdisk"] = mockExecResult{}
+	rep := &mockReporter{}
+	deps := Deps{Exec: exec, FS: newMockFS(), Reporter: rep}
+
+	if err := fixESPTypeIfWrong(context.Background(), deps, "/dev/sda", "/dev/sda1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Verify sfdisk --part-type /dev/sda 1 ef was called.
+	var sawFix bool
+	for _, c := range exec.Calls() {
+		if c.Name == "sfdisk" && len(c.Args) >= 4 &&
+			c.Args[0] == "--part-type" && c.Args[1] == "/dev/sda" &&
+			c.Args[2] == "1" && c.Args[3] == "ef" {
+			sawFix = true
+		}
+	}
+	if !sawFix {
+		t.Fatalf("sfdisk --part-type /dev/sda 1 ef was not called; calls=%v", exec.Calls())
+	}
+	// Verify partprobe was called best-effort.
+	var sawPartprobe bool
+	for _, c := range exec.Calls() {
+		if c.Name == "partprobe" {
+			sawPartprobe = true
+		}
+	}
+	if !sawPartprobe {
+		t.Fatal("partprobe not called after type fix")
+	}
+}
+
+func TestFixESPTypeIfWrong_GPT_AlreadyEF00_NoOp(t *testing.T) {
+	exec := newMockExec()
+	exec.OnFull["sfdisk -d /dev/sda"] = mockExecResult{Out: []byte(
+		"label: gpt\nunit: sectors\n\n" +
+			"/dev/sda1 : start=2048, size=4192256, type=EF00\n" +
+			"/dev/sda2 : start=4194304, size=1166802911, type=8300\n",
+	)}
+	// Current type is already EF00.
+	exec.OnFull["sfdisk --part-type /dev/sda 1"] = mockExecResult{Out: []byte("EF00\n")}
+	deps := Deps{Exec: exec, FS: newMockFS()}
+
+	if err := fixESPTypeIfWrong(context.Background(), deps, "/dev/sda", "/dev/sda1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// sfdisk --part-type ... EF00 (the set call) must NOT be invoked.
+	for _, c := range exec.Calls() {
+		if c.Name == "sfdisk" && len(c.Args) == 4 && c.Args[0] == "--part-type" {
+			t.Fatalf("sfdisk set part-type should not be called when type is already correct; call=%v", c)
+		}
+	}
+}
+
+func TestFixESPTypeIfWrong_MBR_AlreadyEF_NoOp(t *testing.T) {
+	exec := newMockExec()
+	exec.OnFull["sfdisk -d /dev/sda"] = mockExecResult{Out: []byte("label: dos\n\n/dev/sda1 : start=2048, size=4192256, type=ef\n")}
+	exec.OnFull["sfdisk --part-type /dev/sda 1"] = mockExecResult{Out: []byte("ef\n")}
+	deps := Deps{Exec: exec, FS: newMockFS()}
+
+	if err := fixESPTypeIfWrong(context.Background(), deps, "/dev/sda", "/dev/sda1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, c := range exec.Calls() {
+		if c.Name == "sfdisk" && len(c.Args) == 4 && c.Args[0] == "--part-type" {
+			t.Fatalf("sfdisk set part-type should not be called when type is already ef; call=%v", c)
+		}
+	}
+}
+
+func TestFixESPTypeIfWrong_NVMePartitionNumber(t *testing.T) {
+	exec := newMockExec()
+	exec.OnFull["sfdisk -d /dev/nvme0n1"] = mockExecResult{Out: []byte("label: dos\n\n/dev/nvme0n1p1 : start=2048, size=4192256, type=e\n")}
+	exec.OnFull["sfdisk --part-type /dev/nvme0n1 1"] = mockExecResult{Out: []byte("e\n")}
+	exec.On["sfdisk"] = mockExecResult{}
+	deps := Deps{Exec: exec, FS: newMockFS()}
+
+	if err := fixESPTypeIfWrong(context.Background(), deps, "/dev/nvme0n1", "/dev/nvme0n1p1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Verify partition number "1" was extracted from /dev/nvme0n1p1.
+	var sawFix bool
+	for _, c := range exec.Calls() {
+		if c.Name == "sfdisk" && len(c.Args) >= 4 &&
+			c.Args[0] == "--part-type" && c.Args[1] == "/dev/nvme0n1" &&
+			c.Args[2] == "1" && c.Args[3] == "ef" {
+			sawFix = true
+		}
+	}
+	if !sawFix {
+		t.Fatalf("sfdisk --part-type /dev/nvme0n1 1 ef was not called; calls=%v", exec.Calls())
+	}
+}
+
+func TestDetectPartitionTableType(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"label: dos\n", "dos"},
+		{"label: gpt\n", "gpt"},
+		{"label: dos\nlabel-id: 0x123\n", "dos"},
+		{"no label here\n", ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := detectPartitionTableType(c.in); got != c.want {
+			t.Errorf("detectPartitionTableType(%q)=%q want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestNextPartNum(t *testing.T) {
 	cases := []struct {
 		in   string

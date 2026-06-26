@@ -338,23 +338,24 @@ func TestRenderNetworkConfig_BondActiveBackup(t *testing.T) {
 		},
 	}
 	b := bindings.Binding{StaticAddress: "10.0.0.50"}
-	// No NICs passed — bond slaves fall back to match.name.
+	// No NICs passed — bond slaves use the interface name as YAML key
+	// and fall back to match.name for binding.
 	got := renderNetworkConfig(nc, b, nil, false)
 
 	mustContain := []string{
 		"version: 2",
 		"ethernets:",
-		"  slave-0:",
+		"  eno1:",
 		`      name: "eno1"`,
-		"  slave-1:",
+		"  eno2:",
 		`      name: "eno2"`,
 		"bonds:",
 		"  bond0:",
-		"    interfaces: [slave-0, slave-1]",
+		"    interfaces: [eno1, eno2]",
 		"    parameters:",
 		"      mode: active-backup",
 		"      mii-monitor-interval: 100",
-		"      primary: slave-0",
+		"      primary: eno1",
 		"    dhcp4: false",
 		`    addresses: ["10.0.0.50/24"]`,
 		`    gateway4: "10.0.0.1"`,
@@ -388,7 +389,7 @@ func TestRenderNetworkConfig_BondActiveBackup_WithNICs(t *testing.T) {
 		},
 	}
 	b := bindings.Binding{StaticAddress: "10.0.0.50"}
-	// Live NICs available — bond slaves resolve to match.macaddress.
+	// Live NICs available — bond slaves resolve to real names with match.macaddress.
 	nics := []NICInfo{
 		{Name: "eno1", MAC: "aa:bb:cc:dd:ee:01"},
 		{Name: "eno2", MAC: "aa:bb:cc:dd:ee:02"},
@@ -396,9 +397,11 @@ func TestRenderNetworkConfig_BondActiveBackup_WithNICs(t *testing.T) {
 	got := renderNetworkConfig(nc, b, nics, false)
 
 	mustContain := []string{
+		"  eno1:",
 		`      macaddress: "aa:bb:cc:dd:ee:01"`,
+		"  eno2:",
 		`      macaddress: "aa:bb:cc:dd:ee:02"`,
-		"      primary: slave-0",
+		"      primary: eno1",
 	}
 	for _, sub := range mustContain {
 		if !strings.Contains(got, sub) {
@@ -423,11 +426,11 @@ func TestRenderNetworkConfig_BondWithMACSlaves(t *testing.T) {
 	got := renderNetworkConfig(nc, b, nil, false)
 
 	mustContain := []string{
-		"  slave-0:",
+		"  eth0:",
 		`      macaddress: "aa:bb:cc:dd:ee:01"`,
-		"  slave-1:",
+		"  eth1:",
 		`      macaddress: "aa:bb:cc:dd:ee:02"`,
-		"    interfaces: [slave-0, slave-1]",
+		"    interfaces: [eth0, eth1]",
 	}
 	for _, sub := range mustContain {
 		if !strings.Contains(got, sub) {
@@ -437,6 +440,72 @@ func TestRenderNetworkConfig_BondWithMACSlaves(t *testing.T) {
 	// No match.name fallback when MAC slaves are used.
 	if strings.Contains(got, `name:`) {
 		t.Fatalf("MAC-based bond slaves should not produce match.name\nGOT:\n%s", got)
+	}
+}
+
+func TestRenderNetworkConfig_BondWithMACSlaves_WithNICs(t *testing.T) {
+	nc := profiles.NetworkConfig{
+		Method:      "static",
+		PrefixLen:   24,
+		Gateway:     "10.0.0.1",
+		NICSelector: "auto",
+		Bond: &profiles.BondConfig{
+			Mode:   "active-backup",
+			Slaves: []string{"24:6e:96:4f:f8:f0", "24:6e:96:4f:f8:f1"},
+		},
+	}
+	b := bindings.Binding{StaticAddress: "10.0.0.50"}
+	nics := []NICInfo{
+		{Name: "eth0", MAC: "24:6e:96:4f:f8:f0"},
+		{Name: "eth1", MAC: "24:6e:96:4f:f8:f1"},
+		{Name: "eth2", MAC: "24:6e:96:4f:f8:f2"},
+		{Name: "eth3", MAC: "24:6e:96:4f:f8:f3"},
+	}
+	got := renderNetworkConfig(nc, b, nics, false)
+
+	mustContain := []string{
+		"  eth0:",
+		`      macaddress: "24:6e:96:4f:f8:f0"`,
+		"  eth1:",
+		`      macaddress: "24:6e:96:4f:f8:f1"`,
+		"    interfaces: [eth0, eth1]",
+	}
+	for _, sub := range mustContain {
+		if !strings.Contains(got, sub) {
+			t.Fatalf("bond MAC slaves with NICs missing %q\nGOT:\n%s", sub, got)
+		}
+	}
+}
+
+func TestRenderNetworkConfig_BondWithMACSlaves_RHEL7(t *testing.T) {
+	nc := profiles.NetworkConfig{
+		Method:      "static",
+		PrefixLen:   24,
+		Gateway:     "10.0.0.1",
+		NICSelector: "auto",
+		Bond: &profiles.BondConfig{
+			Mode:   "active-backup",
+			Slaves: []string{"24:6e:96:4f:f8:f0", "24:6e:96:4f:f8:f1"},
+		},
+	}
+	b := bindings.Binding{StaticAddress: "10.0.0.50"}
+	nics := []NICInfo{
+		{Name: "eno1", MAC: "24:6e:96:4f:f8:f0"},
+		{Name: "eno2", MAC: "24:6e:96:4f:f8:f1"},
+	}
+	got := renderNetworkConfig(nc, b, nics, true)
+
+	mustContain := []string{
+		"  eth0:",
+		`      macaddress: "24:6e:96:4f:f8:f0"`,
+		"  eth1:",
+		`      macaddress: "24:6e:96:4f:f8:f1"`,
+		"    interfaces: [eth0, eth1]",
+	}
+	for _, sub := range mustContain {
+		if !strings.Contains(got, sub) {
+			t.Fatalf("RHEL7 bond MAC slaves missing %q\nGOT:\n%s", sub, got)
+		}
 	}
 }
 
@@ -744,26 +813,41 @@ ID_LIKE=debian`, want: false},
 
 // ---- /.autorelabel on RHEL family ------------------------------------------
 
-func TestBuildSeed_RHELFamily_TouchesAutorelabel(t *testing.T) {
+func TestBuildSeed_RHELFamily_SELinuxRelabel(t *testing.T) {
 	cases := []struct {
 		name      string
 		osRelease string
-		want      bool
+		wantRelabel bool
+		selinuxDisabled bool
 	}{
 		{name: "centos7", osRelease: `ID="centos"
-VERSION_ID="7"`, want: true},
+VERSION_ID="7"`, wantRelabel: true},
 		{name: "rocky9", osRelease: `ID="rocky"
-VERSION_ID="9.3"`, want: true},
-		{name: "ubuntu22", osRelease: `ID=ubuntu`, want: false},
+VERSION_ID="9.3"`, wantRelabel: true},
+		{name: "ubuntu22", osRelease: `ID=ubuntu`, wantRelabel: false},
+		{name: "rocky10-selinux-disabled", osRelease: `ID="rocky"
+VERSION_ID="10"`, wantRelabel: false, selinuxDisabled: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := newMockFS()
 			_ = fs.MkdirAll("/mnt/root/etc", 0o755)
+			_ = fs.MkdirAll("/mnt/root/etc/selinux", 0o755)
 			_ = fs.WriteFile("/mnt/root/etc/os-release", []byte(tc.osRelease), 0o644)
-			deps := Deps{Exec: newMockExec(), FS: fs, WorkDir: "/tmp/test"}
+			// RHEL-family cloud images ship SELinux=enforcing by default.
+			// Without this file, selinuxWillBeDisabled returns true and
+			// the restorecon path is skipped.
+			if tc.wantRelabel {
+				_ = fs.WriteFile("/mnt/root/etc/selinux/config",
+					[]byte("SELINUX=enforcing\nSELINUXTYPE=targeted\n"), 0o644)
+			} else if tc.selinuxDisabled {
+				_ = fs.WriteFile("/mnt/root/etc/selinux/config",
+					[]byte("SELINUX=disabled\nSELINUXTYPE=targeted\n"), 0o644)
+			}
+			exec := newMockExec()
+			deps := Deps{Exec: exec, FS: fs, WorkDir: "/tmp/test"}
 			spec := jobs.InstallSpec{
-				JobID: "job-autorelabel",
+				JobID: "job-selinux",
 				Profile: profiles.Profile{
 					HostnameTemplate: "host-{uuid8}",
 					RootPasswordHash: "$6$h$" + strings.Repeat("c", 86),
@@ -779,9 +863,22 @@ VERSION_ID="9.3"`, want: true},
 			if err := BuildSeed(context.Background(), deps, spec, "/mnt/root"); err != nil {
 				t.Fatalf("BuildSeed err: %v", err)
 			}
-			_, ok := fs.files["/mnt/root/.autorelabel"]
-			if ok != tc.want {
-				t.Fatalf("/.autorelabel present=%v, want %v", ok, tc.want)
+			// RHEL family should run restorecon in chroot.
+			foundRestorecon := false
+			for _, c := range exec.Calls() {
+				if c.Name == "chroot" && len(c.Args) >= 2 && c.Args[1] == "restorecon" {
+					foundRestorecon = true
+					break
+				}
+			}
+			if foundRestorecon != tc.wantRelabel {
+				t.Fatalf("restorecon called=%v, want %v", foundRestorecon, tc.wantRelabel)
+			}
+			// /.autorelabel should NOT be present when restorecon succeeds (mock returns success).
+			if tc.wantRelabel {
+				if _, ok := fs.files["/mnt/root/.autorelabel"]; ok {
+					t.Fatal("/.autorelabel should not be present when restorecon succeeds")
+				}
 			}
 		})
 	}
@@ -1164,7 +1261,7 @@ VERSION_ID="7"`
 		t.Fatalf("network-config should be written for RHEL 7 bond")
 	}
 	cfgContent := string(cfgData)
-	for _, sub := range []string{"slave-0:", "slave-1:", "interfaces: [slave-0, slave-1]"} {
+	for _, sub := range []string{"eth0:", "eth1:", "interfaces: [eth0, eth1]"} {
 		if !strings.Contains(cfgContent, sub) {
 			t.Errorf("network-config bond missing %q\n%s", sub, cfgContent)
 		}
@@ -1214,6 +1311,241 @@ VERSION_ID="7"`
 			if !strings.Contains(content, sub) {
 				t.Errorf("ifcfg-%s missing %q\n%s", dev, sub, content)
 			}
+		}
+	}
+}
+
+// --- openEuler seed tests ---------------------------------------------------
+
+// isOpenEulerRoot must match both ID="openEuler" (capital E) and
+// ID="openeuler" (all lowercase).
+func TestIsOpenEulerRoot_CaseInsensitive(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		osRel string
+		want  bool
+	}{
+		{"capital_E", `ID="openEuler"` + "\n", true},
+		{"lowercase", `ID="openeuler"` + "\n", true},
+		{"not_openeuler", `ID="rocky"` + "\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newMockFS()
+			fs.files["/mnt/root/etc/os-release"] = []byte(tc.osRel)
+			deps := Deps{FS: fs}
+			got := isOpenEulerRoot(deps, "/mnt/root")
+			if got != tc.want {
+				t.Errorf("isOpenEulerRoot = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// isRHELFamilyRoot must match ID="openEuler" (capital E).
+func TestIsRHELFamilyRoot_OpenEuler(t *testing.T) {
+	fs := newMockFS()
+	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="openEuler"` + "\n" + `VERSION_ID="24.03"` + "\n")
+	deps := Deps{FS: fs}
+	if !isRHELFamilyRoot(deps, "/mnt/root") {
+		t.Fatal("isRHELFamilyRoot should return true for ID=openEuler")
+	}
+}
+
+// When cloud-init is absent from the target rootfs, BuildSeed must write
+// hostname, password, sshd config, and network config directly.
+func TestBuildSeed_NoCloudInit_WritesDirectConfig(t *testing.T) {
+	fs := newMockFS()
+	exec := newMockExec()
+	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="openEuler"` + "\n")
+	fs.files["/mnt/root/etc/shadow"] = []byte("root:$6$oldhash:19000:0:99999:7:::\n")
+	fs.files["/mnt/root/etc/hostname"] = []byte("oldhost\n")
+	deps := Deps{
+		Exec: exec,
+		FS:   fs,
+		NICs: []NICInfo{{Name: "eno1", MAC: "AA:BB:CC:DD:EE:01"}},
+	}
+
+	spec := jobs.InstallSpec{
+		Profile: profiles.Profile{
+			HostnameTemplate: "node-{uuid8}",
+			RootPasswordHash: "$6$newhash",
+			Network: profiles.NetworkConfig{
+				Method:      "static",
+				NICSelector: "by-name:eno1",
+				PrefixLen:   24,
+				Gateway:     "192.168.10.1",
+				DNS:         []string{"223.5.5.5"},
+			},
+		},
+		Binding: bindings.Binding{
+			MachineUUID:   "abcdef01-0000-0000-0000-000000000000",
+			StaticAddress: "192.168.10.100",
+		},
+	}
+
+	if err := BuildSeed(context.Background(), deps, spec, "/mnt/root"); err != nil {
+		t.Fatalf("BuildSeed failed: %v", err)
+	}
+
+	hostData, ok := fs.files["/mnt/root/etc/hostname"]
+	if !ok {
+		t.Fatal("direct-write: /etc/hostname not written")
+	}
+	if strings.TrimSpace(string(hostData)) != "node-abcdef01" {
+		t.Fatalf("hostname = %q, want node-abcdef01", string(hostData))
+	}
+
+	shadowData, ok := fs.files["/mnt/root/etc/shadow"]
+	if !ok {
+		t.Fatal("direct-write: /etc/shadow not written")
+	}
+	if !strings.Contains(string(shadowData), "$6$newhash") {
+		t.Fatalf("shadow missing new password hash:\n%s", string(shadowData))
+	}
+
+	sshdData, ok := fs.files["/mnt/root/etc/ssh/sshd_config.d/99-metalkit.conf"]
+	if !ok {
+		t.Fatal("direct-write: sshd drop-in not written")
+	}
+	sshdStr := string(sshdData)
+	if !strings.Contains(sshdStr, "PermitRootLogin yes") || !strings.Contains(sshdStr, "PasswordAuthentication yes") {
+		t.Fatalf("sshd drop-in missing expected content:\n%s", sshdStr)
+	}
+
+	nmData, ok := fs.files["/mnt/root/etc/NetworkManager/system-connections/metalkit-eno1.nmconnection"]
+	if !ok {
+		t.Fatal("direct-write: NM keyfile not written")
+	}
+	nmStr := string(nmData)
+	for _, sub := range []string{
+		"[connection]",
+		"type=ethernet",
+		"method=manual",
+		"address1=192.168.10.100/24",
+		"gateway=192.168.10.1",
+		"dns=223.5.5.5",
+	} {
+		if !strings.Contains(nmStr, sub) {
+			t.Errorf("NM keyfile missing %q\n%s", sub, nmStr)
+		}
+	}
+}
+
+// When cloud-init IS present, BuildSeed must NOT write hostname/password
+// directly (cloud-init will handle them via the seed).
+func TestBuildSeed_WithCloudInit_NoDirectWrite(t *testing.T) {
+	fs := newMockFS()
+	exec := newMockExec()
+	fs.files["/mnt/root/etc/os-release"] = []byte(`ID=ubuntu` + "\n")
+	fs.files["/mnt/root/usr/bin/cloud-init"] = []byte("#!/bin/sh\n")
+	fs.files["/mnt/root/etc/shadow"] = []byte("root:$6$oldhash:19000:0:99999:7:::\n")
+	fs.files["/mnt/root/etc/hostname"] = []byte("oldhost\n")
+	deps := Deps{Exec: exec, FS: fs}
+
+	spec := jobs.InstallSpec{
+		Profile: profiles.Profile{
+			HostnameTemplate: "node-{uuid8}",
+			RootPasswordHash: "$6$newhash",
+			Network: profiles.NetworkConfig{Method: "dhcp"},
+		},
+		Binding: bindings.Binding{MachineUUID: "abcdef01-0000-0000-0000-000000000000"},
+	}
+
+	if err := BuildSeed(context.Background(), deps, spec, "/mnt/root"); err != nil {
+		t.Fatalf("BuildSeed failed: %v", err)
+	}
+
+	hostData, _ := fs.files["/mnt/root/etc/hostname"]
+	if strings.TrimSpace(string(hostData)) == "node-abcdef01" {
+		t.Fatal("hostname should NOT be directly written when cloud-init is present")
+	}
+
+	shadowData, _ := fs.files["/mnt/root/etc/shadow"]
+	if strings.Contains(string(shadowData), "$6$newhash") {
+		t.Fatal("shadow should NOT be directly modified when cloud-init is present")
+	}
+}
+
+// No cloud-init + bond: NM keyfiles for bond master + slaves must be written.
+func TestBuildSeed_NoCloudInit_Bond_NMKeyfiles(t *testing.T) {
+	fs := newMockFS()
+	exec := newMockExec()
+	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="openEuler"` + "\n")
+	fs.files["/mnt/root/etc/shadow"] = []byte("root:$6$old:19000:0:99999:7:::\n")
+	deps := Deps{
+		Exec: exec,
+		FS:   fs,
+		NICs: []NICInfo{
+			{Name: "eno1", MAC: "AA:BB:CC:DD:EE:01"},
+			{Name: "eno2", MAC: "AA:BB:CC:DD:EE:02"},
+		},
+	}
+
+	spec := jobs.InstallSpec{
+		Profile: profiles.Profile{
+			HostnameTemplate: "node-{uuid8}",
+			RootPasswordHash: "$6$hash",
+			Network: profiles.NetworkConfig{
+				Method:    "static",
+				PrefixLen: 24,
+				Gateway:   "192.168.10.1",
+				DNS:       []string{"223.5.5.5"},
+				Bond: &profiles.BondConfig{
+					Mode:    "active-backup",
+					Miimon:  100,
+					Slaves:  []string{"by-name:eno1", "by-name:eno2"},
+					Primary: "by-name:eno1",
+				},
+			},
+		},
+		Binding: bindings.Binding{
+			MachineUUID:   "abcdef01-0000-0000-0000-000000000000",
+			StaticAddress: "192.168.10.100",
+		},
+	}
+
+	if err := BuildSeed(context.Background(), deps, spec, "/mnt/root"); err != nil {
+		t.Fatalf("BuildSeed failed: %v", err)
+	}
+
+	bondData, ok := fs.files["/mnt/root/etc/NetworkManager/system-connections/bond0.nmconnection"]
+	if !ok {
+		t.Fatal("direct-write: bond0.nmconnection not written")
+	}
+	bondStr := string(bondData)
+	for _, sub := range []string{
+		"[connection]",
+		"type=bond",
+		"interface-name=bond0",
+		"mode=active-backup",
+		"miimon=100",
+		"primary=eno1",
+		"method=manual",
+		"address1=192.168.10.100/24",
+	} {
+		if !strings.Contains(bondStr, sub) {
+			t.Errorf("bond0.nmconnection missing %q\n%s", sub, bondStr)
+		}
+	}
+
+	for i, mac := range []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"} {
+		path := fmt.Sprintf("/mnt/root/etc/NetworkManager/system-connections/bond0-slave-%d.nmconnection", i)
+		data, ok := fs.files[path]
+		if !ok {
+			t.Fatalf("direct-write: %s not written", path)
+		}
+		content := string(data)
+		if !strings.Contains(content, "master=bond0") {
+			t.Errorf("slave %d missing master=bond0:\n%s", i, content)
+		}
+		if !strings.Contains(content, "slave-type=bond") {
+			t.Errorf("slave %d missing slave-type=bond:\n%s", i, content)
+		}
+		if !strings.Contains(content, "mac-address="+mac) {
+			t.Errorf("slave %d missing mac-address=%s:\n%s", i, mac, content)
+		}
+		if strings.Contains(content, "interface-name=") {
+			t.Errorf("slave %d should NOT have interface-name:\n%s", i, content)
 		}
 	}
 }
