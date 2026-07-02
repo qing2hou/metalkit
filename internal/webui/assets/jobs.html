@@ -10,14 +10,14 @@
 <body data-page="jobs">
   <header class="topbar">
     <div class="topbar-inner">
-      <h1 class="brand">metalkit</h1>
+      <h1 class="brand"><a href="/ui/">metalkit</a></h1>
       <nav class="topnav">
         <a href="/ui/">机器</a>
         <a href="/ui/images">镜像</a>
         <a href="/ui/subnets">子网</a>
         <a href="/ui/profiles">配置</a>
         <a href="/ui/bmc">BMC</a>
-        <a href="/ui/jobs">作业</a>
+        <a href="/ui/jobs" class="active">作业</a>
         <a href="/ui/settings">设置</a>
       </nav>
       <div class="topbar-actions">
@@ -33,7 +33,7 @@
 
     <section id="jobs-filters">
       <div class="section-head">
-        <span><h2 style="display:inline">装机作业</h2> <span id="jobs-count" class="muted"></span></span>
+        <span><h2 class="section-title-inline">装机作业</h2> <span id="jobs-count" class="muted"></span></span>
         <button id="purge-btn" type="button" class="btn btn-danger" title="删除所有已完成 / 失败 / 已取消的作业及其日志">清除所有已完成作业</button>
       </div>
 

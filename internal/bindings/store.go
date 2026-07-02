@@ -602,6 +602,19 @@ func (s *Store) Delete(ctx context.Context, machineUUID string) error {
 	return nil
 }
 
+// DeleteByImage removes every binding referencing the given image id.
+// Used by the images delete handler to cascade-delete bindings that would
+// otherwise block image removal via the FOREIGN KEY constraint. Returns the
+// number of bindings removed.
+func (s *Store) DeleteByImage(ctx context.Context, imageID string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM bindings WHERE image_id = ?`, imageID)
+	if err != nil {
+		return 0, fmt.Errorf("delete bindings by image: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // RefCountByImage returns how many bindings reference the given image id.
 // Callers (images delete handler) should refuse the delete if > 0.
 func (s *Store) RefCountByImage(ctx context.Context, imageID string) (int, error) {
@@ -623,6 +636,18 @@ func (s *Store) RefCountByProfile(ctx context.Context, profileID string) (int, e
 		return 0, fmt.Errorf("count bindings for profile: %w", err)
 	}
 	return n, nil
+}
+
+// DeleteByProfile removes every binding referencing the given profile id.
+// Used by the profiles delete handler to cascade-delete bindings that would
+// otherwise block profile removal via the FOREIGN KEY constraint.
+func (s *Store) DeleteByProfile(ctx context.Context, profileID string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM bindings WHERE profile_id = ?`, profileID)
+	if err != nil {
+		return 0, fmt.Errorf("delete bindings by profile: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 // RefCountBySubnet returns how many bindings reference the given subnet id.

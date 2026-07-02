@@ -1,6 +1,7 @@
 package images
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,17 +27,46 @@ import (
 // the /api/v1/images prefix). The Web UI is the primary consumer; agents do
 // not upload images.
 
+// BindingDeleter cascade-deletes bindings referencing an image. Optional
+// dependency: when set, the delete-image handler removes referencing bindings
+// before the image row, so users can delete images that are still bound to
+// machines without manually clearing bindings first.
+type BindingDeleter interface {
+	DeleteByImage(ctx context.Context, imageID string) (int, error)
+}
+
+// JobDeleter cascade-deletes historical jobs referencing an image. job_logs
+// follow via ON DELETE CASCADE. Same optional-wire pattern as BindingDeleter.
+type JobDeleter interface {
+	DeleteByImage(ctx context.Context, imageID string) (int, error)
+}
+
 // API binds the store + metadata extractor to HTTP handlers.
 type API struct {
-	store     *Store
-	extractor metadataExtractor
-	logger    *slog.Logger
+	store          *Store
+	extractor      metadataExtractor
+	logger         *slog.Logger
+	bindingDeleter BindingDeleter
+	jobDeleter     JobDeleter
 }
 
 // NewAPI constructs an API. extractor may be nil; in that case Finalize
 // records images with fallback metadata.
 func NewAPI(store *Store, extractor metadataExtractor, logger *slog.Logger) *API {
 	return &API{store: store, extractor: extractor, logger: logger}
+}
+
+// SetBindingDeleter wires the cascade-delete dependency. Must be called
+// before RegisterRoutes. Pass nil to disable cascade behavior (refuse
+// deletes when bindings reference the image).
+func (a *API) SetBindingDeleter(d BindingDeleter) {
+	a.bindingDeleter = d
+}
+
+// SetJobDeleter wires the job cascade-delete dependency. Must be called
+// before RegisterRoutes. Pass nil to keep jobs blocking image deletes.
+func (a *API) SetJobDeleter(d JobDeleter) {
+	a.jobDeleter = d
 }
 
 // RegisterRoutes mounts the images endpoints under /api/v1/images on mux.
@@ -281,6 +311,28 @@ func (a *API) deleteImage(w http.ResponseWriter, r *http.Request) {
 	id, ok := validImageID(w, r.PathValue("id"))
 	if !ok {
 		return
+	}
+	if a.bindingDeleter != nil {
+		n, err := a.bindingDeleter.DeleteByImage(r.Context(), id)
+		if err != nil {
+			a.logger.Error("cascade-delete bindings for image", "err", err, "id", id)
+			writeError(w, http.StatusInternalServerError, "delete failed")
+			return
+		}
+		if n > 0 {
+			a.logger.Info("cascade-deleted bindings referencing image", "count", n, "id", id)
+		}
+	}
+	if a.jobDeleter != nil {
+		n, err := a.jobDeleter.DeleteByImage(r.Context(), id)
+		if err != nil {
+			a.logger.Error("cascade-delete jobs for image", "err", err, "id", id)
+			writeError(w, http.StatusInternalServerError, "delete failed")
+			return
+		}
+		if n > 0 {
+			a.logger.Info("cascade-deleted jobs referencing image", "count", n, "id", id)
+		}
 	}
 	img, err := a.store.DeleteImageFile(r.Context(), id)
 	if errors.Is(err, ErrNotFound) {

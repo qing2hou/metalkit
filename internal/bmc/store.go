@@ -33,6 +33,18 @@ var (
 	ErrMachineUnknown = errors.New("bmc: machine_uuid not in inventory")
 )
 
+// ErrIPConflict is returned when an upsert tries to register an IP that
+// already belongs to a different machine's bmc_credentials row. The holder
+// is expected to either reassign the existing row or pick a different IP.
+type ErrIPConflict struct {
+	Existing string // machine_uuid of the existing row
+	IP       string
+}
+
+func (e ErrIPConflict) Error() string {
+	return fmt.Sprintf("bmc ip %q already registered to machine %q", e.IP, e.Existing)
+}
+
 // Store reads and writes bmc_credentials rows.
 type Store struct {
 	db     *sql.DB
@@ -160,6 +172,18 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Credential, error)
 
 	if err := s.ensureMachineExists(ctx, muuid); err != nil {
 		return nil, err
+	}
+
+	// Reject if this IP is already registered to a DIFFERENT machine.
+	// Same machine (update) is fine; different machine means the operator
+	// is about to create a duplicate IP row, which the bmc_credentials table
+	// won't catch (ip has no UNIQUE index — only machine_uuid is PK).
+	existingOwner, err := s.FindByIP(ctx, ip)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, fmt.Errorf("check bmc ip conflict: %w", err)
+	}
+	if existingOwner != "" && existingOwner != muuid {
+		return nil, ErrIPConflict{Existing: existingOwner, IP: ip}
 	}
 
 	// "keep the existing password" means: caller omitted the field (nil

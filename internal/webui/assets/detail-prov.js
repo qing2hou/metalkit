@@ -92,7 +92,8 @@
     document.getElementById("prov-binding-edit").addEventListener("click", openBindingModal);
     document.getElementById("prov-binding-clear").addEventListener("click", clearBinding);
     document.getElementById("prov-bmc-test").addEventListener("click", testBMC);
-    document.getElementById("prov-bmc-edit").addEventListener("click", openBMCModal);
+    document.getElementById("prov-bmc-edit").addEventListener("click", function () { openBMCModal(); });
+    document.getElementById("prov-bmc-sync").addEventListener("click", onSyncToBMC);
   }
 
   // ---- loaders --------------------------------------------------------
@@ -650,6 +651,13 @@
     const body = document.getElementById("prov-bmc-body");
     const testBtn = document.getElementById("prov-bmc-test");
     const editBtn = document.getElementById("prov-bmc-edit");
+    const syncBtn = document.getElementById("prov-bmc-sync");
+
+    // 同步按钮：只在未注册 BMC + agent 上报了 BMC.IP 时显示
+    const reportedBMCIP = (window.MK.latestReport && window.MK.latestReport.bmc && window.MK.latestReport.bmc.ip) || "";
+    if (syncBtn) {
+      syncBtn.hidden = !(!currentBMC && reportedBMCIP);
+    }
 
     if (!currentBMC) {
       body.className = "muted";
@@ -689,99 +697,48 @@
       "</dl>";
   }
 
-  function openBMCModal() {
-    const b = currentBMC || { ip: "", port: 623, username: "", ipmi_interface: "lanplus", name: "" };
-    const ifaces = ["lanplus", "lan"];
-    const ifaceOpts = ifaces.map(function (i) {
-      const sel = i === (b.ipmi_interface || "lanplus") ? " selected" : "";
-      return '<option value="' + i + '"' + sel + ">" + i + "</option>";
-    }).join("");
-
-    const pwdPlaceholder = currentBMC ? "（留空保持现有值）" : "必填";
-
-    const body =
-      '<div class="kv-form">' +
-      '<label class="kv"><span>机器 UUID</span>' +
-        '<input type="text" value="' + MK.escapeHTML(muuid) +
-        '" readonly disabled class="mono"></label>' +
-      '<label class="kv"><span>名称 <span class="muted">（可选别名）</span></span>' +
-        '<input type="text" id="prov-bmc-name" maxlength="64" value="' +
-        MK.escapeHTML(b.name || "") + '" autocomplete="off" placeholder="例如：rack01-r630-01"></label>' +
-      '<label class="kv"><span>IP 地址</span>' +
-        '<input type="text" id="prov-bmc-ip" value="' + MK.escapeHTML(b.ip || "") +
-        '" required autocomplete="off"></label>' +
-      '<label class="kv"><span>端口</span>' +
-        '<input type="number" id="prov-bmc-port" min="1" max="65535" value="' +
-        MK.escapeHTML(String(b.port || 623)) + '" autocomplete="off"></label>' +
-      '<label class="kv"><span>用户名</span>' +
-        '<input type="text" id="prov-bmc-username" value="' +
-        MK.escapeHTML(b.username || "") + '" required autocomplete="off"></label>' +
-      '<label class="kv"><span>密码</span>' +
-        '<input type="password" id="prov-bmc-password" placeholder="' + pwdPlaceholder +
-        '" autocomplete="new-password"></label>' +
-      '<label class="kv"><span>接口</span>' +
-        '<select id="prov-bmc-iface">' + ifaceOpts + "</select></label>" +
-      "</div>";
-
-    const footer =
-      '<button type="button" class="btn btn-ghost" data-modal-close>取消</button> ' +
-      '<button type="submit" id="prov-bmc-save" class="btn btn-primary">' +
-      (currentBMC ? "保存 BMC" : "创建 BMC") + "</button>";
-
-    const title = currentBMC ? "编辑 BMC" : "配置 BMC";
-    const dlg = MK.openModal(MK.modalShell(title, body, footer));
-    dlg.querySelector("form").addEventListener("submit", function (ev) {
-      ev.preventDefault();
-      submitBMC(dlg);
+  // onSyncToBMC reads the agent-reported BMC IP and opens the BMC modal
+  // with the IP prefilled. Operator only needs to type username/password.
+  // Pre-checks IP conflict against existing bmc_credentials rows; if the IP
+  // is already registered to a different machine, confirm before proceeding.
+  async function onSyncToBMC() {
+    const report = window.MK.latestReport;
+    const bmcIP = (report && report.bmc && report.bmc.ip) || "";
+    if (!bmcIP) {
+      MK.flashError("agent 未上报 BMC IP，无法自动同步");
+      return;
+    }
+    // 预校验：这个 IP 是不是已经被别的机器注册过
+    try {
+      const all = await MK.apiGet("/bmc");
+      const conflict = (all || []).find(function (c) {
+        return c.ip === bmcIP && c.machine_uuid !== muuid;
+      });
+      if (conflict) {
+        const short = (conflict.machine_uuid || "").slice(0, 12);
+        const ok = window.confirm(
+          "BMC IP " + bmcIP + " 已被机器 " + short + "… 注册。\n\n" +
+          "如果是同一台机器（比如重装后换了 UUID），点确定继续；\n" +
+          "如果是不同机器共用 IP，请检查网络配置。"
+        );
+        if (!ok) return;
+      }
+    } catch (e) {
+      // 预校验失败不阻塞流程，后端兜底校验会拦
+      console.warn("bmc list pre-check failed:", e);
+    }
+    MK.openBMCDialog(muuid, { ip: bmcIP }, currentBMC, function (c) {
+      currentBMC = c;
+      renderBMCCard();
     });
   }
 
-  async function submitBMC(dlg) {
-    const name = (dlg.querySelector("#prov-bmc-name").value || "").trim();
-    const ip = dlg.querySelector("#prov-bmc-ip").value.trim();
-    const portRaw = dlg.querySelector("#prov-bmc-port").value.trim();
-    const username = dlg.querySelector("#prov-bmc-username").value.trim();
-    const password = dlg.querySelector("#prov-bmc-password").value; // 不要 trim
-    const iface = dlg.querySelector("#prov-bmc-iface").value;
-
-    if (!ip || !username) {
-      MK.flashError("IP 与用户名必填");
-      return;
-    }
-    if (name.length > 64) {
-      MK.flashError("名称长度不能超过 64");
-      return;
-    }
-    if (!currentBMC && !password) {
-      MK.flashError("新建 BMC 时密码必填");
-      return;
-    }
-
-    const body = {
-      name: name,
-      ip: ip,
-      username: username,
-      ipmi_interface: iface,
-    };
-    if (portRaw) {
-      const p = parseInt(portRaw, 10);
-      if (!isNaN(p)) body.port = p;
-    }
-    if (password) body.password = password;
-
-    const saveBtn = dlg.querySelector("#prov-bmc-save");
-    saveBtn.disabled = true;
-    try {
-      currentBMC = await MK.apiSend("PUT", "/bmc/" + encodeURIComponent(muuid), body);
-      MK.closeModal();
-      MK.flashSuccess("BMC 已保存");
-      MK.clearError();
+  // openBMCModal (edit path) delegates to the shared MK.openBMCDialog.
+  function openBMCModal() {
+    MK.openBMCDialog(muuid, null, currentBMC, function (c) {
+      currentBMC = c;
       renderBMCCard();
-    } catch (e) {
-      MK.flashError(e.message);
-    } finally {
-      saveBtn.disabled = false;
-    }
+    });
   }
 
   async function testBMC() {

@@ -436,11 +436,18 @@ func (s *Server) handler(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCPv4)
 }
 
 func destFor(req *dhcpv4.DHCPv4, peer net.Addr) net.Addr {
-	if req.IsBroadcast() || req.GatewayIPAddr.IsUnspecified() && (peer == nil || isZeroPeer(peer)) {
-		return &net.UDPAddr{IP: net.IPv4bcast, Port: 68}
-	}
+	// RFC 2131 §4.1: if giaddr is set, the reply MUST be unicast to the
+	// relay agent at giaddr:67, regardless of the client's broadcast flag.
+	// The relay is responsible for delivering the reply to the client
+	// (broadcast or unicast based on its own logic). Previously we checked
+	// IsBroadcast() first, which caused cross-subnet replies to be sent as
+	// L2 broadcasts on the server's own subnet — the relay never saw them
+	// and the client never received the OFFER.
 	if !req.GatewayIPAddr.IsUnspecified() {
 		return &net.UDPAddr{IP: req.GatewayIPAddr, Port: 67}
+	}
+	if req.IsBroadcast() || (peer == nil || isZeroPeer(peer)) {
+		return &net.UDPAddr{IP: net.IPv4bcast, Port: 68}
 	}
 	return peer
 }

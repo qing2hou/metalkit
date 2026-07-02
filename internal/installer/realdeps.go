@@ -192,14 +192,14 @@ func (l LsblkDiskLister) List(ctx context.Context) ([]Disk, error) {
 	}
 	var parsed struct {
 		BlockDevices []struct {
-			Name      string   `json:"name"`
-			Path      string   `json:"path"`
-			Size      int64    `json:"size"`
-			RM        flexBool `json:"rm"`
-			RO        flexBool `json:"ro"`
-			Tran      string   `json:"tran"`
-			Model     string   `json:"model"`
-			WWN       string   `json:"wwn"`
+			Name  string   `json:"name"`
+			Path  string   `json:"path"`
+			Size  int64    `json:"size"`
+			RM    flexBool `json:"rm"`
+			RO    flexBool `json:"ro"`
+			Tran  string   `json:"tran"`
+			Model string   `json:"model"`
+			WWN   string   `json:"wwn"`
 		} `json:"blockdevices"`
 	}
 	if err := json.Unmarshal(out, &parsed); err != nil {

@@ -2,12 +2,16 @@
 //
 // Flow:
 //   1. user picks a file + fills metadata
-//   2. we compute SHA-256 of the whole file (SubtleCrypto, streaming over slices)
-//   3. POST /api/v1/images/uploads → returns {id, num_chunks, chunk_size, ...}
-//   4. PUT /api/v1/images/uploads/{id}/chunks/{n} for each chunk, with
-//      X-Chunk-Sha256 header (server verifies)
-//   5. POST /api/v1/images/uploads/{id}/finalize → returns the Image row
-//   6. refresh the catalog table
+//   2. POST /api/v1/images/uploads → returns {id, num_chunks, chunk_size, ...}
+//   3. PUT /api/v1/images/uploads/{id}/chunks/{n} for each chunk
+//   4. POST /api/v1/images/uploads/{id}/finalize → returns the Image row
+//   5. refresh the catalog table
+//
+// The server streams SHA-256 while assembling chunks in finalize, and uses
+// that hash for file naming, dedup, and the images.sha256 column. The client
+// does NOT compute any hash — that previously failed on >2GB files because
+// Chrome's blob.arrayBuffer() caps near 2GB. expected_sha256 is sent empty;
+// the server treats empty as "skip pre-finalize verification."
 //
 // If the user aborts mid-upload, we DELETE the session so server-side temp
 // files get cleaned up.
@@ -80,96 +84,6 @@
     if (diff < 86400) return Math.floor(diff / 3600) + " 小时前";
     return Math.floor(diff / 86400) + " 天前";
   }
-
-  function bufToHex(buf) {
-    const b = new Uint8Array(buf);
-    const hex = new Array(b.length);
-    for (let i = 0; i < b.length; i++) {
-      hex[i] = b[i].toString(16).padStart(2, "0");
-    }
-    return hex.join("");
-  }
-
-  async function sha256Hex(blob) {
-    const buf = await blob.arrayBuffer();
-    const digest = await sha256Digest(buf);
-    return bufToHex(digest);
-  }
-
-  // sha256Digest returns an ArrayBuffer of the SHA-256 hash.
-  // Uses SubtleCrypto when available (secure context), falls back to pure JS
-  // for HTTP non-localhost (e.g. 192.168.x.x internal deployments).
-  async function sha256Digest(data) {
-    if (crypto.subtle) {
-      return crypto.subtle.digest("SHA-256", data);
-    }
-    return sha256Pure(data);
-  }
-
-  // Pure JS SHA-256 — only used as fallback when crypto.subtle is unavailable.
-  function sha256Pure(data) {
-    const msg = new Uint8Array(data);
-
-    // Constants
-    const K = [
-      0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
-      0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
-      0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
-      0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
-      0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
-      0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
-      0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
-      0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
-    ];
-
-    // Initial hash values
-    let H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
-
-    // Padding (RFC 6234 §4.1): 0x80 | zeroes | 64-bit big-endian bit length.
-    // Total padded size must be a multiple of 64 bytes.
-    const bitLen = msg.length * 8;
-    const zeroBytes = (56 - (msg.length + 1) % 64 + 64) % 64;
-    const padLen = 1 + zeroBytes;
-    const padded = new Uint8Array(msg.length + padLen + 8);
-    padded.set(msg);
-    padded[msg.length] = 0x80;
-    const dv = new DataView(padded.buffer);
-    dv.setUint32(padded.length - 4, bitLen >>> 0, false);
-    dv.setUint32(padded.length - 8, Math.floor(bitLen / 0x100000000), false);
-
-    // Process 512-bit blocks
-    for (let i = 0; i < padded.length; i += 64) {
-      const W = new Uint32Array(64);
-      for (let t = 0; t < 16; t++) {
-        W[t] = (padded[i + t*4] << 24) | (padded[i + t*4 + 1] << 16) | (padded[i + t*4 + 2] << 8) | padded[i + t*4 + 3];
-      }
-      for (let t = 16; t < 64; t++) {
-        const s0 = rotr(W[t-15], 7) ^ rotr(W[t-15], 18) ^ (W[t-15] >>> 3);
-        const s1 = rotr(W[t-2], 17) ^ rotr(W[t-2], 19) ^ (W[t-2] >>> 10);
-        W[t] = (W[t-16] + s0 + W[t-7] + s1) >>> 0;
-      }
-
-      let [a,b,c,d,e,f,g,h] = H;
-      for (let t = 0; t < 64; t++) {
-        const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-        const ch = (e & f) ^ (~e & g);
-        const t1 = (h + S1 + ch + K[t] + W[t]) >>> 0;
-        const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-        const maj = (a & b) ^ (a & c) ^ (b & c);
-        const t2 = (S0 + maj) >>> 0;
-        h = g; g = f; f = e; e = (d + t1) >>> 0;
-        d = c; c = b; b = a; a = (t1 + t2) >>> 0;
-      }
-      H = [H[0]+a, H[1]+b, H[2]+c, H[3]+d, H[4]+e, H[5]+f, H[6]+g, H[7]+h].map(function(v) { return v >>> 0; });
-    }
-
-    const out = new ArrayBuffer(32);
-    const outDV = new DataView(out);
-    for (let i = 0; i < 8; i++) { outDV.setUint32(i*4, H[i], false); }
-    return out;
-  }
-
-  function rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
 
   // ---- catalog list ---------------------------------------------------
 
@@ -357,18 +271,17 @@
     currentUpload = { sessionID: null, cancelled: false };
 
     try {
-      // 1. compute full-file SHA-256.
-      setProgress(0, 1, "正在计算文件哈希…");
-      const sha = await sha256Hex(f);
-      if (currentUpload.cancelled) return;
-
-      // 2. init session.
+      // 1. init session. Server streams SHA-256 during chunk assembly, so we
+      //    don't compute it client-side — that fails on >2GB files (Chrome's
+      //    ArrayBuffer limit). expected_sha256="" tells the server to skip
+      //    pre-finalize verification and use the hash it computes itself.
+      setProgress(0, 1, "正在初始化上传会话…");
       const initBody = {
         name: $("upload-name").value || f.name,
         version: $("upload-version").value || "",
         family: $("upload-family").value || "",
         notes: $("upload-notes").value || "",
-        expected_sha256: sha,
+        expected_sha256: "",
         total_size: f.size,
         chunk_size: CHUNK_SIZE,
       };
@@ -385,14 +298,16 @@
       const sess = await initResp.json();
       currentUpload.sessionID = sess.id;
 
-      // 3. PUT chunks.
+      // 2. PUT chunks. No per-chunk SHA-256 — server verifies final assembled
+      //    file hash in finalize, and total-size check catches missing/extra
+      //    bytes. Skipping per-chunk hash avoids reading each 8MB slice into
+      //    an ArrayBuffer, which matters for the overall upload throughput.
       const total = sess.num_chunks;
       for (let n = 1; n <= total; n++) {
         if (currentUpload.cancelled) return;
         const start = (n - 1) * sess.chunk_size;
         const end = Math.min(start + sess.chunk_size, f.size);
         const blob = f.slice(start, end);
-        const chunkSha = await sha256Hex(blob);
         setProgress(n - 1, total, "上传分块 " + n + " / " + total);
         const putResp = await fetch(
           API_BASE + "/images/uploads/" + encodeURIComponent(sess.id) + "/chunks/" + n,
@@ -401,7 +316,6 @@
             credentials: "same-origin",
             headers: {
               "Content-Type": "application/octet-stream",
-              "X-Chunk-Sha256": chunkSha,
             },
             body: blob,
           }

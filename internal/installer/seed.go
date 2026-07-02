@@ -9,13 +9,13 @@
 //   - user-data:      chpasswd + ssh_pwauth + hostname + sshd drop-in.
 //   - meta-data:      instance-id and local-hostname (NoCloud minimum).
 //   - network-config: cloud-init Network Config v2 — cloud-init renders
-//                     this into the single /etc/netplan/50-cloud-init.yaml
-//                     on first boot. We do NOT write our own netplan file
-//                     via user-data write_files: that produced two
-//                     conflicting files (01-metalkit.yaml + 50-cloud-init
-//                     .yaml) and netplan applied the wrong one. Letting
-//                     cloud-init own the only netplan file removes the
-//                     conflict.
+//     this into the single /etc/netplan/50-cloud-init.yaml
+//     on first boot. We do NOT write our own netplan file
+//     via user-data write_files: that produced two
+//     conflicting files (01-metalkit.yaml + 50-cloud-init
+//     .yaml) and netplan applied the wrong one. Letting
+//     cloud-init own the only netplan file removes the
+//     conflict.
 //
 // Network config rendering:
 //
@@ -49,10 +49,34 @@ import (
 	"metalkit/internal/profiles"
 )
 
-// BuildSeed renders user-data + meta-data + network-config into
+// BuildSeed is the package-level entry point that dispatches to the
+// per-OS installer selected by spec.Profile.OSFamily. Production code in
+// installer.go:Run calls pickOSInstaller + BuildSeed directly, but this
+// wrapper is retained for tests and any external callers.
+func BuildSeed(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot string) error {
+	inst, err := pickOSInstaller(spec.Profile.OSFamily)
+	if err != nil {
+		return err
+	}
+	return inst.BuildSeed(ctx, deps, spec, mntRoot)
+}
+
+// buildSeedCommon renders user-data + meta-data + network-config into
 // <mntRoot>/var/lib/cloud/seed/nocloud-net/ so cloud-init on the
 // installed system auto-discovers it on first boot.
-func BuildSeed(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot string) error {
+//
+// renderer, rhel7, and isRHELFamily are OS-family properties resolved
+// by the caller (per-OS OSInstaller.BuildSeed implementation) — this
+// function is family-agnostic and does not read /etc/os-release.
+func buildSeedCommon(
+	ctx context.Context,
+	deps Deps,
+	spec jobs.InstallSpec,
+	mntRoot string,
+	renderer components.NetworkRenderer,
+	rhel7 bool,
+	isRHELFamily bool,
+) error {
 	if mntRoot == "" {
 		return fmt.Errorf("install: BuildSeed: mntRoot is empty")
 	}
@@ -79,10 +103,6 @@ func BuildSeed(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot st
 	// run before writeIfcfg so we don't delete our own ifcfg-eth0.
 	cleanStaleNetworkConfig(ctx, deps, mntRoot)
 
-	// Resolve the effective network renderer: explicit selection > OS-family
-	// auto-detection. Then dispatch to the appropriate rendering path.
-	renderer := resolveRenderer(spec.NetworkRenderer, deps, mntRoot)
-
 	// Cloud-init's NetworkManager renderer has a known bug with bond
 	// configurations on RockyLinux 8+ / RHEL 8+: it generates duplicate NM
 	// connection files — one bond-slave (using the YAML key name) and one
@@ -90,8 +110,6 @@ func BuildSeed(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot st
 	// plain one, so slaves never join the bond. Bypass cloud-init's network
 	// rendering entirely for NM + bond and write NM keyfiles directly.
 	bypassCloudInitNetwork := renderer == components.NetworkManagerRenderer && spec.Profile.Network.Bond != nil
-
-	rhel7 := isRHEL7Root(deps, mntRoot)
 
 	if !bypassCloudInitNetwork {
 		// Write the network-config v2 so cloud-init has something to
@@ -164,7 +182,7 @@ func BuildSeed(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot st
 	// here would trigger a full-disk relabel on first boot — which on
 	// large XFS partitions takes 30+ minutes with no Plymouth progress
 	// display, looking like a hang (qa.md #4).
-	if isRHELFamilyRoot(deps, mntRoot) && !selinuxWillBeDisabled(deps, mntRoot) {
+	if isRHELFamily && !selinuxWillBeDisabled(deps, mntRoot) {
 		// Paths we wrote into the rootfs that need SELinux relabeling.
 		relabelPaths := []string{
 			"/etc/cloud",
@@ -205,27 +223,10 @@ func BuildSeed(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot st
 		writeDirectHostname(deps, mntRoot, host)
 		writeDirectPassword(deps, mntRoot, spec.Profile.RootPasswordHash)
 		writeDirectSSHDConfig(deps, mntRoot)
-		writeDirectNetworkConfig(deps, spec, mntRoot)
+		writeDirectNetworkConfig(deps, spec, mntRoot, renderer, rhel7)
 	}
 
 	return nil
-}
-
-// resolveRenderer determines the effective network renderer. If the profile
-// has an explicit selection (non-empty), it wins. Otherwise we fall back to
-// OS-detection heuristics that replicate the pre-component-selection behavior.
-func resolveRenderer(explicit string, deps Deps, mntRoot string) components.NetworkRenderer {
-	if explicit != "" {
-		return components.NetworkRenderer(explicit)
-	}
-	// Auto-detect: replicate the old hard-coded logic as defaults.
-	if isRHEL7Root(deps, mntRoot) {
-		return components.SysconfigRenderer
-	}
-	if prefersNetworkManagerRenderer(deps, mntRoot) {
-		return components.NetworkManagerRenderer
-	}
-	return components.NetPlanRenderer
 }
 
 // renderUserData emits the #cloud-config YAML body. Stable ordering of
@@ -594,44 +595,14 @@ func cleanStaleNetworkConfig(_ context.Context, deps Deps, mntRoot string) {
 	}
 }
 
-// isRHELFamilyRoot detects any RHEL-family distribution (CentOS, RHEL,
-// Rocky, AlmaLinux, Fedora, openEuler) from /etc/os-release inside the mounted
-// rootfs. Used to decide whether SELinux autorelabel is needed on first boot —
-// all RHEL-family distros ship with SELinux in enforcing mode.
-func isRHELFamilyRoot(deps Deps, mntRoot string) bool {
-	data, err := deps.FS.ReadFile(filepath.Join(mntRoot, "etc", "os-release"))
-	if err != nil {
-		return false
-	}
-	c := string(data)
-	cLower := strings.ToLower(c)
-	for _, marker := range []string{
-		`id="centos"`,
-		`id="rhel"`,
-		`id="rocky"`,
-		`id="almalinux"`,
-		`id="fedora"`,
-		`id="openeuler"`,
-		`id_like="rhel`,
-		`id_like="fedora`,
-		`id_like=rhel`,
-		`id_like=fedora`,
-	} {
-		if strings.Contains(cLower, marker) {
-			return true
-		}
-	}
-	return false
-}
-
 // selinuxWillBeDisabled returns true if /etc/selinux/config in the target
 // rootfs has SELINUX=disabled (or no SELinux config at all). Used to skip
-// restorecon/autorelabel logic in BuildSeed — see comment there. Note this
-// reports the *current* state of the config file, which is what we want:
-// installGRUBChrootRHEL disables SELinux *after* BuildSeed runs (so during
-// BuildSeed SELinux may still be "enforcing" in config), but a MetalKit-
-// prepared image (see IMAGE-PREP.md) already has SELinux=disabled before
-// install, and in that case we want to skip relabel here.
+// restorecon/autorelabel logic in buildSeedCommon — see comment there. Note
+// this reports the *current* state of the config file, which is what we want:
+// installGRUBChrootRHEL disables SELinux *after* buildSeedCommon runs (so
+// during buildSeedCommon SELinux may still be "enforcing" in config), but a
+// MetalKit-prepared image (see IMAGE-PREP.md) already has SELinux=disabled
+// before install, and in that case we want to skip relabel here.
 func selinuxWillBeDisabled(deps Deps, mntRoot string) bool {
 	data, err := deps.FS.ReadFile(filepath.Join(mntRoot, "etc", "selinux", "config"))
 	if err != nil {
@@ -658,54 +629,6 @@ func disableCloudInitNetwork(deps Deps, mntRoot string) {
 	path := filepath.Join(dsDir, "97-metalkit-no-network.cfg")
 	content := "# Managed by metalkit installer — NM keyfiles written directly.\n# Disable cloud-init network rendering to avoid conflicts.\nnetwork: {config: disabled}\n"
 	_ = deps.FS.WriteFile(path, []byte(content), 0o644)
-}
-
-// prefersNetworkManagerRenderer reports whether the target rootfs should
-// have cloud-init emit NetworkManager keyfiles instead of legacy ifcfg.
-// True for modern RHEL family (Rocky / AlmaLinux / RHEL 8+ / Fedora / openEuler);
-// false for CentOS 7 / RHEL 7 (no NM renderer in their cloud-init) and
-// for non-RHEL distros (Ubuntu uses netplan natively).
-func prefersNetworkManagerRenderer(deps Deps, mntRoot string) bool {
-	if isOpenEulerRoot(deps, mntRoot) {
-		return true
-	}
-	if !isRHELFamilyRoot(deps, mntRoot) {
-		return false
-	}
-	if isRHEL7Root(deps, mntRoot) {
-		return false
-	}
-	return true
-}
-
-// isOpenEulerRoot detects openEuler from /etc/os-release inside the mounted rootfs.
-func isOpenEulerRoot(deps Deps, mntRoot string) bool {
-	data, err := deps.FS.ReadFile(filepath.Join(mntRoot, "etc", "os-release"))
-	if err != nil {
-		return false
-	}
-	return strings.Contains(strings.ToLower(string(data)), `id="openeuler"`)
-}
-
-// isKylinRoot detects 银河麒麟 (Kylin) from /etc/os-release inside the mounted rootfs.
-func isKylinRoot(deps Deps, mntRoot string) bool {
-	data, err := deps.FS.ReadFile(filepath.Join(mntRoot, "etc", "os-release"))
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(data), `ID="kylin"`)
-}
-
-// isOpenSUSERoot detects openSUSE from /etc/os-release inside the mounted rootfs.
-func isOpenSUSERoot(deps Deps, mntRoot string) bool {
-	data, err := deps.FS.ReadFile(filepath.Join(mntRoot, "etc", "os-release"))
-	if err != nil {
-		return false
-	}
-	c := string(data)
-	return strings.Contains(c, `ID="opensuse-leap"`) ||
-		strings.Contains(c, `ID="opensuse-tumbleweed"`) ||
-		strings.Contains(c, `ID="opensuse"`)
 }
 
 // writeNMRendererConfig pins cloud-init's network renderer to NetworkManager
@@ -1090,23 +1013,6 @@ func ternary(cond bool, a, b string) string {
 	return b
 }
 
-// isRHEL7Root detects CentOS / RHEL 7 from /etc/os-release inside the mounted
-// rootfs. Cloud-init 19.4 on those distributions does not fully support
-// network-config v2; we write the ifcfg file directly instead.
-func isRHEL7Root(deps Deps, mntRoot string) bool {
-	data, err := deps.FS.ReadFile(filepath.Join(mntRoot, "etc", "os-release"))
-	if err != nil {
-		return false
-	}
-	content := string(data)
-	hasRHEL := strings.Contains(content, `ID="centos"`) ||
-		strings.Contains(content, `ID="rhel"`) ||
-		strings.Contains(content, `ID="rocky"`) ||
-		strings.Contains(content, "ID_LIKE=\"rhel")
-	hasV7 := strings.Contains(content, `VERSION_ID="7`) // matches "7" and "7.9"
-	return hasRHEL && hasV7
-}
-
 // writeIfcfg writes a RHEL 7-style ifcfg file directly into the mounted
 // rootfs at /etc/sysconfig/network-scripts/ifcfg-eth<N>. This bypasses
 // cloud-init's network-config v2 renderer which CentOS 7's cloud-init 19.4
@@ -1300,10 +1206,10 @@ func writeIfcfgBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bind
 // expandHostname applies the profile's HostnameTemplate substitutions:
 //
 //   - {serial}  → first 8 chars of binding.MachineUUID (we don't fetch the
-//                 real SMBIOS serial in M2.3; documented in plan §B5).
+//     real SMBIOS serial in M2.3; documented in plan §B5).
 //   - {uuid8}   → first 8 chars of binding.MachineUUID.
 //   - {mac}     → left literal — agent doesn't reliably know its MAC at
-//                 install time without a NIC selector match; documented.
+//     install time without a NIC selector match; documented.
 //
 // If binding.Hostname is non-empty it overrides the template entirely.
 func expandHostname(template string, b bindings.Binding, _ profiles.Profile) string {
@@ -1413,12 +1319,13 @@ func writeDirectSSHDConfig(deps Deps, mntRoot string) {
 
 // writeDirectNetworkConfig writes network configuration files directly
 // into the rootfs based on the resolved renderer. This is a fallback
-// for images without cloud-init.
-func writeDirectNetworkConfig(deps Deps, spec jobs.InstallSpec, mntRoot string) {
+// for images without cloud-init. The renderer and rhel7 flag are passed
+// in from the calling OSInstaller.BuildSeed (resolved once from the OS
+// family) so this function does not re-read /etc/os-release.
+func writeDirectNetworkConfig(deps Deps, spec jobs.InstallSpec, mntRoot string, renderer components.NetworkRenderer, rhel7 bool) {
 	nc := spec.Profile.Network
 	b := spec.Binding
 	nics := deps.NICs
-	renderer := resolveRenderer(spec.NetworkRenderer, deps, mntRoot)
 
 	switch renderer {
 	case components.NetworkManagerRenderer:
@@ -1443,7 +1350,7 @@ func writeDirectNetworkConfig(deps Deps, spec jobs.InstallSpec, mntRoot string) 
 		writeENIRendererConfig(deps, spec, mntRoot)
 	case components.NetPlanRenderer:
 		// Write netplan YAML directly as fallback.
-		writeDirectNetplan(deps, mntRoot, nc, b, nics)
+		writeDirectNetplan(deps, mntRoot, nc, b, nics, rhel7)
 	}
 }
 
@@ -1644,14 +1551,15 @@ func writeNMKeyfileVLAN(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 }
 
 // writeDirectNetplan writes a netplan YAML file directly as a fallback
-// when cloud-init is absent on netplan-based distros.
-func writeDirectNetplan(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo) {
+// when cloud-init is absent on netplan-based distros. rhel7 is passed
+// in from the caller (resolved once from the OS family) so this function
+// does not re-read /etc/os-release.
+func writeDirectNetplan(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo, rhel7 bool) {
 	netplanDir := filepath.Join(mntRoot, "etc", "netplan")
 	if !deps.FS.Exists(netplanDir) {
 		_ = deps.FS.MkdirAll(netplanDir, 0o755)
 	}
 
-	rhel7 := isRHEL7Root(deps, mntRoot)
 	netCfg := renderNetworkConfig(nc, b, nics, rhel7)
 	content := "network:\n" + indentYAML(netCfg)
 

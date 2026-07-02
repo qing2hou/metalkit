@@ -175,9 +175,9 @@ func findESP(ctx context.Context, deps Deps, parent, skip string) (string, error
 
 // parentDiskOf strips a trailing partition suffix from partDev:
 //
-//   /dev/sda3       -> /dev/sda
-//   /dev/nvme0n1p3  -> /dev/nvme0n1
-//   /dev/mmcblk0p1  -> /dev/mmcblk0
+//	/dev/sda3       -> /dev/sda
+//	/dev/nvme0n1p3  -> /dev/nvme0n1
+//	/dev/mmcblk0p1  -> /dev/mmcblk0
 //
 // If partDev has no numeric suffix it's returned unchanged.
 func parentDiskOf(partDev string) string {
@@ -278,12 +278,12 @@ func mountFromFstab(ctx context.Context, deps Deps, mntRoot string) ([]string, s
 		}
 		mounted = append(mounted, target)
 		if e.target == "/boot/efi" || e.target == "/boot" {
-				// openEuler mounts the ESP at /boot (not /boot/efi).
-				// In that case the vfat partition declared in fstab IS the
-				// ESP — we must detect this so the caller (InstallGRUB) knows
-				// the ESP location and the fallback findESP() is skipped.
-				espMount = target
-			}
+			// openEuler mounts the ESP at /boot (not /boot/efi).
+			// In that case the vfat partition declared in fstab IS the
+			// ESP — we must detect this so the caller (InstallGRUB) knows
+			// the ESP location and the fallback findESP() is skipped.
+			espMount = target
+		}
 	}
 	return mounted, espMount, nil
 }

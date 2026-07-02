@@ -451,6 +451,16 @@ Dell R630 装了两张老 NVIDIA Kepler 架构 GPU（Tesla K 系列，0000:04:00
 
 ### 修复（临时 / live 救援）
 
+**应急（立刻静默控制台，不重启）**：
+
+```bash
+dmesg -n 1
+```
+
+`-n 1` 把内核日志级别设为 1（只 alert 以上才打印到控制台），PRIVRING 这类 warning/info 级别的日志被屏蔽。**只是不显示，日志还在 dmesg 缓冲区里**，`dmesg` 命令仍然能看到。生效到下次重启，重启后需要重新执行。
+
+**持久化（写入配置，重启后仍然静默）**：
+
 ```bash
 # 临时禁用 nouveau modeset
 echo "options nouveau modeset=0" > /etc/modprobe.d/nouveau.conf
@@ -727,6 +737,56 @@ modernc.org/sqlite 驱动在 checkout 每个新连接前会应用所有 `_pragma
 
 ---
 
+## 22. Debian 14 cloud kernel 在非 RAID 盘上启动卡死（apparmor audit backlog + soft lockup）
+
+### 现象
+
+Debian 14 genericcloud 装到非 RAID 盘（SATA/NVMe 直通，无 RAID 控制器）后，启动到 systemd 用户态阶段卡死：
+
+```
+[  23.685220] systemd[1]: Started systemd-journald.service - Journal Service.
+[  24.073446] EXT4-fs (sdc1): resizing filesystem from 292995473 to 292995473 blocks
+[  25.833531] audit: type=1400 ... apparmor="STATUS" operation="profile_load" profile="unconfined" name="keybase"
+[  25.843651] audit: audit_backlog=65 > audit_backlog_limit=64
+[  25.856267] audit: audit_lost=1 audit_rate_limit=0 audit_backlog_limit=64
+[  25.856269] audit: backlog limit exceeded
+[  25.885024] audit: type=1400 ... profile_load name="kchmviewer"
+[  25.885027] audit: type=1400 ... profile_load name="b"
+[  125.287907] hrtimer: interrupt took 13193 ns
+```
+
+关键特征：
+- `25.885s` 到 `125.287s` 中间整整 100 秒空档，然后 `hrtimer: interrupt took 13193 ns` 是 soft lockup 警告
+- 卡死前在批量加载 apparmor profile（keybase / nautilus / kchmviewer 这些桌面应用 profile）
+- audit 子系统被打爆：`audit_backlog=65 > audit_backlog_limit=64`，`audit_lost` 累加
+- 当前内核是 `7.0.12-deb14.1-amd64`（Debian 14 cloud kernel），说明走了"非 RAID 跳过装标准内核"分支
+
+### 根因
+
+`regenerateInitramfsDebian` 的 `isRAIDControllerDisk` 智能检测判断错了场景。Debian 14 cloud kernel 不只是缺 RAID 驱动，还存在两个物理机上才会暴露的问题：
+
+1. **cloud kernel 砍掉了基础模块**：`/lib/modules/<cloud-kver>/modules.devname` 为空 → systemd 跳过 `kmod-static-nodes.service`；`fuse` 模块缺失 → `modprobe@fuse` skipped。这些是 cosmetic，不致命。
+
+2. **apparmor + audit backlog 死锁**（致命）：cloud kernel 的 apparmor 在物理机上批量加载 profile（keybase / nautilus / kchmviewer 等 desktop profile 也在镜像里），每条 profile_load 都生成 audit 记录。`audit_backlog_limit=64` 在 25ms 内被打爆，audit 子系统开始丢事件并进入慢路径，最终触发 soft lockup（hrtimer interrupt took 13193 ns）。在虚拟机里 audit 速率不一样，所以 cloud image 在云上没事。
+
+3. **智能检测的误判**：`isRAIDControllerDisk` 通过 sysfs 看到目标盘驱动是 `ahci`/`nvme` 就返回 false，跳过 `apt install linux-image-amd64`。结果 cloud kernel 留在盘上，物理机启动后 apparmor 卡死。
+
+**核心结论**：Debian 13/14 cloud kernel 不只是缺 RAID 驱动，整体为云环境裁剪过头，物理机直接不可启动，**与是否 RAID 盘无关**。智能检测的"非 RAID 跳过"分支在 Debian 13/14 上是错的。
+
+### 修复方向
+
+对 Debian 13/14（识别到 cloud kernel）**强制装标准内核**，不走 `isRAIDControllerDisk` 跳过分支。智能检测只保留给 Rocky 10 / openEuler 这类 cloud kernel 在物理机上能正常启动、只是缺 RAID 驱动的发行版。
+
+判断条件：在 `regenerateInitramfsDebian` 里加 cloud kernel 识别（`uname -r` 含 `cloud-amd64` 或 `/lib/modules/<kver>` 缺 `modules.devname`）。如果是 Debian cloud kernel，无论是否 RAID 盘都装 `linux-image-amd64` + purge cloud kernel。无网络时打 warn 日志但不阻塞安装流程（保留现有 best-effort 语义）。
+
+### 经验
+
+- "cloud kernel 缺驱动" 不止是缺驱动，可能整个子系统（apparmor/audit）在物理机上都有问题。检测时要看 cloud kernel 整体是否物理机友好，而不是只看 RAID 驱动
+- 智能检测的 fallback 要保守：拿不准就装标准内核，宁可装失败也不要让不可启动的 cloud kernel 留在盘上
+- soft lockup + audit backlog 同时出现，几乎都是 audit 子系统卡死，不是 IO 卡死
+
+---
+
 ## 部署 agent 到 live ISO 的流程
 
 MetalKit 的安装逻辑跑在 agent 二进制里，agent 在 live ISO 的 squashfs 中。**修复 installer 代码后必须重建 squashfs 才能让修复生效**，仅替换 controller 不够。
@@ -758,16 +818,87 @@ md5sum /tmp/check/usr/local/bin/metalkit-agent
 
 ---
 
+## 23. Rocky 10 / cloud image 在非 RAID 盘上也进 dracut emergency：`/dev/disk/by-uuid/... does not exist`
+
+### 现象
+
+webui 选 Rocky 10 GenericCloud 镜像，装到 800G 非 RAID 盘（SATA/NVMe 直通）。装机流程报成功，但首次启动进 dracut emergency：
+
+```
+[    8.317991] BIOS EDD facility v0.16 2004-Jun-25, 0 devices found
+[    8.332725] Not activating Mandatory Access Control as /sbin/tomoyo-init does not exist.
+[    8.346869] systemd[1]: Successfully loaded SELinux policy in 100.067ms.
+[    8.375243] systemd[1]: Detected virtualization kvm.
+Welcome to SUSE Linux Enterprise Server 12 SP5!
+[    8.404299] systemd[1]: Set hostname to <linux-4b7g>.
+...
+[    8.903250] systemd[1]: Starting Dracut Emergency Shell...
+Warning: /dev/disk/by-uuid/01582c00-2b49-4e9b-86ee-75f418a4b720 does not exist
+Generating "/run/initramfs/rdsosreport.txt"
+
+Entering emergency mode. Exit the shell to continue.
+```
+
+### 根因（两个独立问题）
+
+**问题 A：cloud image 的 initramfs 在物理机上找不到 root（与是否 RAID 无关）**
+
+Rocky 10 GenericCloud 的 initramfs 是为云环境（virtio 根盘）裁剪的。即使目标盘是非 RAID 的 SATA/NVMe，cloud image 的 stock initramfs 也可能：
+- 没把 `ahci` / `nvme` 模块打包进去（默认假设云上 virtio_blk 足够）
+- 缺 `kernel-modules` 包（IMAGE-PREP.md #4-#8 说过），导致 `/lib/modules/<kver>/` 下没有可加载的存储驱动
+
+`ensureKernelModulesInstalled` 的 `isRAIDControllerDisk` 智能检测在这里犯了和 #22 一样的错：**只看目标盘是否 RAID，没看 cloud image 整体是否物理机友好**。非 RAID 盘跳过 `dnf install kernel-modules` 后，cloud image 的 broken initramfs 留在盘上，首次启动找不到 root UUID。
+
+**问题 B：dracut banner 显示 SUSE 12 SP5（镜像错标）**
+
+dracut 的 "Welcome to ..." banner 来自 initramfs 内嵌的 `/etc/os-release`。live ISO 是 Debian 12 base，不是 SUSE，所以 SUSE banner 只可能来自装机镜像本身 —— **controller 上那个标着 "Rocky 10" 的 qcow2 文件，实际内容是 SUSE 12 SP5**。文件名/标签和镜像内容不一致，可能是上传时命名错了，或者上传了错误的文件。
+
+### 修复方向
+
+**问题 A**：和 #22 同样思路。对 Rocky 10 GenericCloud（识别特征：缺 `kernel-modules` 包 或 cloud image 标记），无论目标盘是否 RAID，都强制 `dnf install -y kernel-modules kernel-modules-extra` + `dracut --force --force-drivers "..."`。`isRAIDControllerDisk` 的跳过分支只保留给 cloud image 已知物理机友好的发行版（如 openEuler 24.03 自带完整驱动）。
+
+**问题 B**：装机流程加 image sanity check —— 写盘前 `qemu-nbd` 连上 qcow2，读 `/etc/os-release` 的 `PRETTY_NAME`，和 webui 选的发行版对比，不一致就 abort 装机并报错。这能避免把 SUSE 镜像当 Rocky 装的浪费。
+
+### 应急排查（用户侧）
+
+进入 dracut emergency shell 后：
+
+```sh
+# 看实际磁盘
+ls /dev/sd* /dev/nvme* 2>/dev/null
+lsblk
+
+# 看 cloud image 的 initramfs 有没有 ahci/nvme 模块
+lsinitrd /boot/initramfs-$(uname -r).img | grep -E 'ahci|nvme|virtio_blk'
+
+# 手动加载看能否找到 root
+modprobe ahci
+modprobe nvme
+ls /dev/sd* /dev/nvme* 2>/dev/null
+
+# 找到 root 后手动挂载继续启动
+mount /dev/sdXN /sysroot
+exit
+```
+
+### 经验
+
+- cloud image 在物理机上的"缺驱动"问题，**与是否 RAID 盘无关**。`isRAIDControllerDisk` 的跳过分支对 cloud image 整体是错的，应该按发行版 + cloud image 标记判断，不是按目标盘的 RAID 属性
+- dracut emergency + `by-uuid does not exist` 几乎都是 initramfs 没加载到存储驱动；先 `lsinitrd` 看模块在不在，再决定是修 initramfs 还是换镜像
+- 启动 banner 异常（发行版对不上）→ 第一反应查镜像内容是否被错标，不要假设 webui 标签正确
+
+---
+
 ## 测试的发行版支持矩阵
 
 | 发行版 | 版本 | 状态 | 备注 |
 |--------|------|------|------|
 | Rocky Linux | 8.10 GenericCloud | OK | 需修复 #1 #2 |
 | Rocky Linux | 9 GenericCloud | OK | 需修复 #3 |
-| Rocky Linux | 10 GenericCloud | OK | 需修复 #4 #5 #8 #10 |
+| Rocky Linux | 10 GenericCloud | OK | 需修复 #4 #5 #8 #10 #23（非 RAID 盘也踩 cloud initramfs 坑，#15 的非 RAID 跳过不适用） |
 | Debian | 12 generic | OK | |
-| Debian | 13 genericcloud | OK | 需修复 #11 #12 #13 #16（cloud kernel 缺 RAID 驱动）；非 RAID 盘无网络可装（#15） |
-| Debian | 14 genericcloud | OK | 需修复 #11 #12 #13 #16（同上）；非 RAID 盘无网络可装（#15） |
+| Debian | 13 genericcloud | OK | 需修复 #11 #12 #13 #16 #22（cloud kernel 物理机不可启动，强制装标准内核）；#15 的非 RAID 跳过在 Debian 13/14 不适用 |
+| Debian | 14 genericcloud | OK | 需修复 #11 #12 #13 #16 #22（同上） |
 | Ubuntu | 24.04 (noble) server cloudimg | OK | |
 | Ubuntu | 26.04 (resolute) server cloudimg | OK | |
 | openEuler | 20.03 LTS SP4 | OK | 需修复 #17（ESP 嵌套目录） |
@@ -780,3 +911,6 @@ md5sum /tmp/check/usr/local/bin/metalkit-agent
 - #19 dd 后 lsblk 看不到分区 → blockdev --rereadpt
 - #20 NVRAM 残留旧条目 → 白名单 pruneStaleNVRAM
 - #21 SQLITE_BUSY → 见对应章节
+- #22 Debian 13/14 cloud kernel 在物理机整体不可启动（apparmor/audit 卡死），强制装标准内核，#15 的非 RAID 跳过不适用
+- #23 Rocky 10 / cloud image 在非 RAID 盘也进 dracut emergency（cloud initramfs 缺 ahci/nvme），#15 的非 RAID 跳过同样不适用；附镜像错标排查（dracut banner 异常）
+- #14 Dell R630 NVIDIA Kepler GPU 持续刷 nouveau PRIVRING 错误，临时 `dmesg -n 1` 静默，永久方案 blacklist 或 `nomodeset`

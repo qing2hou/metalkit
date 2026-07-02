@@ -18,8 +18,8 @@ import (
 // mockExec records calls; runs canned responses keyed on argv[0] (name)
 // or, when set, a full argv string match.
 type mockExec struct {
-	mu       sync.Mutex
-	calls    []mockExecCall
+	mu        sync.Mutex
+	calls     []mockExecCall
 	pipeCalls []mockPipeCall
 	// On returns canned output/error for a command. The key is the
 	// program name (args[0]); if a more specific key is needed callers
@@ -28,8 +28,8 @@ type mockExec struct {
 	OnFull  map[string]mockExecResult
 	Default mockExecResult
 	// PipeOn matches by program name; if absent we return nil (success).
-	PipeOn       map[string]error
-	PipeCapture  *bytes.Buffer // optional: copy stdin into here for inspection
+	PipeOn      map[string]error
+	PipeCapture *bytes.Buffer // optional: copy stdin into here for inspection
 	// OnFunc, if set, is called for every Run with the recorded name/args
 	// before lookup; lets tests peek at side-effect state.
 	OnFunc func(name string, args []string)
@@ -107,10 +107,10 @@ func (m *mockExec) Calls() []mockExecCall {
 
 // mockFS is an in-memory FS.
 type mockFS struct {
-	mu       sync.Mutex
-	files    map[string][]byte
-	dirs     map[string]bool
-	notADir  map[string]bool // paths Exists==true but IsDir()==false
+	mu      sync.Mutex
+	files   map[string][]byte
+	dirs    map[string]bool
+	notADir map[string]bool // paths Exists==true but IsDir()==false
 }
 
 func newMockFS() *mockFS {
@@ -232,11 +232,11 @@ func (m *mockDisks) List(_ context.Context) ([]Disk, error) {
 
 // mockReporter records all stage transitions and log lines.
 type mockReporter struct {
-	mu      sync.Mutex
-	stages  []string
-	logs    []string
-	success bool
-	failed  string
+	mu       sync.Mutex
+	stages   []string
+	logs     []string
+	success  bool
+	failed   string
 	StageErr error
 }
 
@@ -281,7 +281,7 @@ type errReader struct {
 	err error
 }
 
-func (e errReader) Read(_ []byte) (int, error)   { return 0, e.err }
+func (e errReader) Read(_ []byte) (int, error) { return 0, e.err }
 
 func testLogger(t *testing.T) *slog.Logger {
 	t.Helper()

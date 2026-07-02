@@ -36,20 +36,20 @@ import (
 	"metalkit/internal/jobs"
 )
 
-// InstallGRUB installs the bootloader into mntRoot. espMount is the
-// mountpoint of the ESP inside mntRoot (e.g. "/boot/efi"); empty means
-// BIOS. devPath is the parent disk device (e.g. /dev/sda).
+// installGRUBDispatch is the single bootloader switch point. Per-OS
+// OSInstaller.InstallBootloader implementations resolve the effective
+// bootloader (explicit spec.Bootloader wins, else the family default via
+// resolveBootloaderFor) and pass it here. The three strategies are
+// implemented by installGRUBHostDebian / installGRUBChrootRHEL /
+// installGRUBHostFallback below.
 //
-// The implementation dispatches based on the bootloader selection from
-// the profile (or auto-detected from the target rootfs). The auto-detect
-// logic preserves the original behavior: chroot grub2-install for modern
-// RHEL, host grub-install for Debian/Ubuntu.
-func InstallGRUB(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot, devPath, espMount string) error {
+// mntRoot is the mounted target rootfs. espMount is the absolute path of
+// the ESP inside mntRoot (e.g. "/boot/efi"); empty means BIOS. devPath is
+// the parent disk device (e.g. /dev/sda).
+func installGRUBDispatch(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot, devPath, espMount string, bl components.Bootloader) error {
 	if mntRoot == "" {
 		return fmt.Errorf("install: InstallGRUB: mntRoot is empty")
 	}
-
-	bl := resolveBootloader(spec.Bootloader, deps, mntRoot)
 	switch bl {
 	case components.GRUBHostDebian:
 		return installGRUBHostDebian(ctx, deps, spec, mntRoot, devPath, espMount)
@@ -62,67 +62,18 @@ func InstallGRUB(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot,
 	}
 }
 
-// resolveBootloader determines the effective bootloader strategy. If the
-// profile has an explicit selection (non-empty), it wins. Otherwise we fall
-// back to OS-detection heuristics that replicate the pre-component-selection
-// behavior.
-func resolveBootloader(explicit string, deps Deps, mntRoot string) components.Bootloader {
-	if explicit != "" {
-		return components.Bootloader(explicit)
-	}
-	// Auto-detect: replicate the old shouldChrootGrub2 logic.
-	if shouldChrootGrub2(deps, mntRoot) {
-		return components.GRUBChrootRHEL
-	}
-	return components.GRUBHostDebian
-}
-
-// shouldChrootGrub2 reports whether to take the chroot grub2-install
-// branch. Two conditions must hold:
-//
-//  1. The target rootfs ships /usr/sbin/grub2-install (or sbin/...).
-//     RHEL-family images do; Debian/Ubuntu cloud images don't.
-//  2. The target is a "modern" RHEL family (Rocky / AlmaLinux / RHEL 8+ /
-//     Fedora). CentOS 7 also has grub2-install but is intentionally kept
-//     on the host-grub path because that's what's been known-working in
-//     production — we don't want to swap a tested path for an untested
-//     one just because a binary is present.
-//
-// The combined gate keeps Ubuntu happy (no chroot binary), keeps CentOS 7
-// happy (explicit ID/version filter), and fixes Rocky 9 (which lands here).
-func shouldChrootGrub2(deps Deps, mntRoot string) bool {
-	if !hasChrootGrub2Install(deps, mntRoot) {
-		return false
-	}
-	data, err := deps.FS.ReadFile(filepath.Join(mntRoot, "etc", "os-release"))
+// InstallGRUB is the package-level entry point that dispatches to the
+// per-OS installer selected by spec.Profile.OSFamily. Production code in
+// installer.go:Run calls pickOSInstaller + InstallBootloader directly,
+// but this wrapper is retained for tests and any external callers that
+// want the OS-family-resolved dispatch without constructing the
+// OSInstaller themselves.
+func InstallGRUB(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot, devPath, espMount string) error {
+	inst, err := pickOSInstaller(spec.Profile.OSFamily)
 	if err != nil {
-		return false
+		return err
 	}
-	c := string(data)
-	// Explicit allowlist: modern RHEL-family that we know needs the
-	// chroot path. Add new IDs here as we validate them on real hardware.
-	// Match case-insensitively: openEuler ships ID="openEuler"
-	// (capital E), while Rocky/Alma use all-lowercase IDs.
-	cLower := strings.ToLower(c)
-	for _, marker := range []string{
-		`id="rocky"`,
-		`id="almalinux"`,
-		`id="fedora"`,
-		`id="openeuler"`,
-		`id="opensuse-leap"`,
-		`id="opensuse-tumbleweed"`,
-		`id="opensuse"`,
-	} {
-		if strings.Contains(cLower, marker) {
-			return true
-		}
-	}
-	// RHEL itself: only 8+. RHEL 7 mirrors CentOS 7's quirks; keep it on
-	// the host path until proven otherwise.
-	if strings.Contains(cLower, `id="rhel"`) && !strings.Contains(cLower, `version_id="7`) {
-		return true
-	}
-	return false
+	return inst.InstallBootloader(ctx, deps, spec, mntRoot, devPath, espMount)
 }
 
 // installGRUBChrootRHEL installs/registers the bootloader for a modern
@@ -692,32 +643,28 @@ func regenerateInitramfsDebian(ctx context.Context, deps Deps, spec jobs.Install
 		return
 	}
 
-	// The cloud kernel is missing RAID drivers. Check whether the target
-	// disk is actually behind a RAID/HBA controller. If not (pure SATA,
-	// NVMe, or virtio), the cloud kernel's built-in ahci/nvme/virtio
-	// drivers can boot the disk fine — the missing RAID drivers are
-	// irrelevant. Skip the standard-kernel install so the install
-	// succeeds without network.
-	if !isRAIDControllerDisk(ctx, deps, devPath) {
-		if deps.Logger != nil {
-			deps.Logger.Info("regenerate-initramfs-debian: target disk not on RAID controller, cloud kernel's ahci/nvme sufficient — skipping standard-kernel install",
-				"dev", devPath)
-		}
-		if deps.Reporter != nil {
-			_ = deps.Reporter.Log(ctx, "info",
-				fmt.Sprintf("skipped standard-kernel install: %s is not behind a RAID controller (cloud kernel's ahci/nvme drivers suffice)", devPath))
-		}
-		return
-	}
-
+	// The cloud kernel is missing storage drivers. Debian/Ubuntu cloud
+	// kernels (-cloud-amd64, -kvm) are stripped for VMs: even on a bare
+	// SATA/NVMe disk the stock initramfs often lacks ahci/nvme modules
+	// needed to find root, so the box hangs after "Run /init as init
+	// process". The isRAIDControllerDisk check used to gate this and skip
+	// non-RAID targets, but that's wrong — cloud kernels are broken on
+	// physical hardware regardless of RAID. Always install the standard
+	// kernel when critical drivers are missing.
 	missingList := make([]string, 0, len(missing))
 	for d := range missing {
 		missingList = append(missingList, d)
 	}
+	if deps.Logger != nil {
+		deps.Logger.Info("regenerate-initramfs-debian: cloud kernel missing storage drivers, installing standard kernel",
+			"dev", devPath, "missing", strings.Join(missingList, ", "))
+	}
 	if deps.Reporter != nil {
 		_ = deps.Reporter.Log(ctx, "info",
-			fmt.Sprintf("installing full kernel for missing storage drivers: %s", strings.Join(missingList, ", ")))
+			fmt.Sprintf("cloud kernel missing storage drivers [%s] — installing linux-image-amd64 + rebuilding initramfs",
+				strings.Join(missingList, ", ")))
 	}
+	_ = isRAIDControllerDisk(ctx, deps, devPath) // logged for diagnostics, no longer gates the install
 
 	// Write a working resolv.conf so apt can resolve mirrors. Same logic
 	// as the RHEL path: the live system's /etc/resolv.conf may be a
@@ -1098,12 +1045,12 @@ func purgeCloudKernelDebian(ctx context.Context, deps Deps, mntRoot string) {
 
 // pinDebianDefaultKernel picks the standard kernel whose /lib/modules has
 // the RAID drivers (megaraid_sas, etc.), then makes GRUB boot it by:
-//   1. running `chroot update-grub` so the new kernel's menuentry appears
-//   2. setting GRUB_DEFAULT=saved in /etc/default/grub (Debian cloud images
-//      default to 0, which would pick the cloud kernel that sorts higher
-//      lexically: "cloud-amd64" > "amd64")
-//   3. re-running update-grub so grub.cfg emits the saved_entry lookup
-//   4. writing saved_entry=<menuentry-title> to grubenv
+//  1. running `chroot update-grub` so the new kernel's menuentry appears
+//  2. setting GRUB_DEFAULT=saved in /etc/default/grub (Debian cloud images
+//     default to 0, which would pick the cloud kernel that sorts higher
+//     lexically: "cloud-amd64" > "amd64")
+//  3. re-running update-grub so grub.cfg emits the saved_entry lookup
+//  4. writing saved_entry=<menuentry-title> to grubenv
 //
 // On Debian, saved_entry is the menuentry TITLE (e.g.
 // "Debian GNU/Linux, with Linux 6.12.90+deb13.1-amd64"), NOT the kernel
@@ -1301,7 +1248,8 @@ func pinDebianDefaultKernel(ctx context.Context, deps Deps, mntRoot string) {
 // /boot/grub2/grub.cfg (RHEL family) layouts.
 //
 // Example grub.cfg line we parse:
-//   menuentry 'Debian GNU/Linux, with Linux 6.12.90+deb13.1-amd64' --class debian ... $menuentry_id_option 'gnulinux-6.12.90+deb13.1-amd64-advanced-98f79480-...' {
+//
+//	menuentry 'Debian GNU/Linux, with Linux 6.12.90+deb13.1-amd64' --class debian ... $menuentry_id_option 'gnulinux-6.12.90+deb13.1-amd64-advanced-98f79480-...' {
 //
 // We extract the LAST single-quoted string on the menuentry line (the ID),
 // not the first (the title). This is what GRUB matches saved_entry against.
@@ -1352,7 +1300,8 @@ func findMenuentryIDForKernel(deps Deps, mntRoot, kver string) string {
 // $menuentry_id_option. Returns "" if no ID is found.
 //
 // The line looks like:
-//   'Title' --class debian ... $menuentry_id_option 'gnulinux-...-advanced-<uuid>' {
+//
+//	'Title' --class debian ... $menuentry_id_option 'gnulinux-...-advanced-<uuid>' {
 //
 // We find $menuentry_id_option and grab the next single-quoted string. On
 // older GRUB without the option, we fall back to "" (GRUB will use the
@@ -1377,21 +1326,6 @@ func extractMenuentryID(line string) string {
 		return ""
 	}
 	return rest[1 : 1+end]
-}
-
-// hasChrootGrub2Install reports whether the target rootfs ships its own
-// /usr/sbin/grub2-install (or sbin/grub2-install). RHEL-family images do;
-// Debian/Ubuntu don't. Used to decide which InstallGRUB branch to take.
-func hasChrootGrub2Install(deps Deps, mntRoot string) bool {
-	for _, p := range []string{
-		filepath.Join(mntRoot, "usr", "sbin", "grub2-install"),
-		filepath.Join(mntRoot, "sbin", "grub2-install"),
-	} {
-		if deps.FS.Exists(p) {
-			return true
-		}
-	}
-	return false
 }
 
 // detectRHELBootloaderID returns the distro's expected EFI dir name
@@ -1474,19 +1408,20 @@ func bridgeRHELGrubCfg(deps Deps, mntRoot string) {
 // drops to dracut emergency shell.
 //
 // Two-pass strategy:
-//   Pass 1: Detect missing critical drivers (megaraid_sas, vfat, etc.) under
-//           /lib/modules/<KVER>/. If missing, chroot `dnf install -y
-//           kernel-modules kernel-modules-extra` to pull the full driver set.
-//           (Rocky/RHEL 10 GenericCloud omits this package by default.)
-//   Pass 2: For each kernel, `dracut --no-hostonly --force --force-drivers
-//           "megaraid_sas mpt3sas hpsa aacraid smartpqi nvme vfat fat"`
-//           --force-drivers (vs --add-drivers) makes dracut write
-//           /etc/cmdline.d/20-force_drivers.conf in the initramfs so the
-//           drivers are insmod'd during early boot — not just available on
-//           the filesystem. This matters for vfat: the kernel needs vfat
-//           loaded BEFORE systemd tries to mount /boot/efi, and
-//           systemd-modules-load in the rootfs is too late (plus SELinux
-//           may deny access to /etc/modules-load.d files, see qa.md #7 #8).
+//
+//	Pass 1: Detect missing critical drivers (megaraid_sas, vfat, etc.) under
+//	        /lib/modules/<KVER>/. If missing, chroot `dnf install -y
+//	        kernel-modules kernel-modules-extra` to pull the full driver set.
+//	        (Rocky/RHEL 10 GenericCloud omits this package by default.)
+//	Pass 2: For each kernel, `dracut --no-hostonly --force --force-drivers
+//	        "megaraid_sas mpt3sas hpsa aacraid smartpqi nvme vfat fat"`
+//	        --force-drivers (vs --add-drivers) makes dracut write
+//	        /etc/cmdline.d/20-force_drivers.conf in the initramfs so the
+//	        drivers are insmod'd during early boot — not just available on
+//	        the filesystem. This matters for vfat: the kernel needs vfat
+//	        loaded BEFORE systemd tries to mount /boot/efi, and
+//	        systemd-modules-load in the rootfs is too late (plus SELinux
+//	        may deny access to /etc/modules-load.d files, see qa.md #7 #8).
 //
 // Best-effort: a failure here is logged but does not abort the install,
 // since some targets (e.g. fully baked images) may not need it.

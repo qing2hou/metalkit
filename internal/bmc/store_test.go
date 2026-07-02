@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -220,9 +221,11 @@ func TestList(t *testing.T) {
 	f := newFixture(t)
 	mu1 := f.seedMachine(t, '6')
 	mu2 := f.seedMachine(t, '7')
-	for _, mu := range []string{mu1, mu2} {
+	// Each machine gets a distinct BMC IP — same IP across machines is now
+	// rejected by Upsert (ErrIPConflict) to prevent operator misconfiguration.
+	for i, mu := range []string{mu1, mu2} {
 		if _, err := f.store.Upsert(context.Background(), UpsertInput{
-			MachineUUID: mu, IP: "10.0.0.30", Username: "u",
+			MachineUUID: mu, IP: fmt.Sprintf("10.0.0.%d", 30+i), Username: "u",
 			Password: pstr("p"), UpdatedBy: "admin",
 		}); err != nil {
 			t.Fatalf("Upsert: %v", err)
@@ -337,5 +340,51 @@ func TestBadInputs(t *testing.T) {
 				t.Errorf("err %q does not contain %q", err.Error(), c.wants)
 			}
 		})
+	}
+}
+
+func TestUpsertIPConflict(t *testing.T) {
+	f := newFixture(t)
+	mu1 := f.seedMachine(t, '8')
+	mu2 := f.seedMachine(t, '9')
+	ctx := context.Background()
+	// mu1 claims IP 10.0.0.50
+	if _, err := f.store.Upsert(ctx, UpsertInput{
+		MachineUUID: mu1, IP: "10.0.0.50", Username: "u",
+		Password: pstr("p"), UpdatedBy: "admin",
+	}); err != nil {
+		t.Fatalf("first Upsert: %v", err)
+	}
+	// mu2 trying to claim the SAME IP must fail with ErrIPConflict
+	_, err := f.store.Upsert(ctx, UpsertInput{
+		MachineUUID: mu2, IP: "10.0.0.50", Username: "u",
+		Password: pstr("p"), UpdatedBy: "admin",
+	})
+	if err == nil {
+		t.Fatalf("want ErrIPConflict, got nil")
+	}
+	var conflict ErrIPConflict
+	if !errors.As(err, &conflict) {
+		t.Fatalf("want ErrIPConflict, got %T: %v", err, err)
+	}
+	if conflict.Existing != mu1 {
+		t.Errorf("conflict.Existing=%q want %q", conflict.Existing, mu1)
+	}
+	if conflict.IP != "10.0.0.50" {
+		t.Errorf("conflict.IP=%q want 10.0.0.50", conflict.IP)
+	}
+	// mu1 updating its own row with the same IP must succeed (not conflict)
+	if _, err := f.store.Upsert(ctx, UpsertInput{
+		MachineUUID: mu1, IP: "10.0.0.50", Username: "u2",
+		Password: pstr("p2"), UpdatedBy: "admin",
+	}); err != nil {
+		t.Fatalf("mu1 self-update: %v", err)
+	}
+	// mu1 changing to a NEW IP must succeed
+	if _, err := f.store.Upsert(ctx, UpsertInput{
+		MachineUUID: mu1, IP: "10.0.0.51", Username: "u3",
+		Password: pstr("p3"), UpdatedBy: "admin",
+	}); err != nil {
+		t.Fatalf("mu1 change IP: %v", err)
 	}
 }

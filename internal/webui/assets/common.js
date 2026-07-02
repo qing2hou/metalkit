@@ -1022,6 +1022,102 @@
     }
   }
 
+  // openBMCDialog opens a modal for creating/editing BMC credentials for a
+  // machine. Used by both the list page (sync button) and the detail page
+  // (provisioning card). prefill = {ip:"10.0.0.10"} from agent report;
+  // existing = the current Credential object (for edit) or null (for create).
+  // onSaved(credential) is called after successful PUT, before closeModal.
+  function openBMCDialog(uuid, prefill, existing, onSaved) {
+    const base = { ip: "", port: 623, username: "", ipmi_interface: "lanplus", name: "" };
+    const b = Object.assign({}, base, prefill || {}, existing || {});
+    const ifaces = ["lanplus", "lan"];
+    const ifaceOpts = ifaces.map(function (i) {
+      const sel = i === (b.ipmi_interface || "lanplus") ? " selected" : "";
+      return '<option value="' + i + '"' + sel + ">" + i + "</option>";
+    }).join("");
+    const pwdPlaceholder = existing ? "（留空保持现有值）" : "必填";
+
+    const body =
+      '<div class="kv-form">' +
+      '<label class="kv"><span>机器 UUID</span>' +
+        '<input type="text" value="' + escapeHTML(uuid) +
+        '" readonly disabled class="mono"></label>' +
+      '<label class="kv"><span>名称 <span class="muted">（可选别名）</span></span>' +
+        '<input type="text" id="bmc-name" maxlength="64" value="' +
+        escapeHTML(b.name || "") + '" autocomplete="off" placeholder="例如：rack01-r630-01"></label>' +
+      '<label class="kv"><span>IP 地址</span>' +
+        '<input type="text" id="bmc-ip" value="' + escapeHTML(b.ip || "") +
+        '" required autocomplete="off"></label>' +
+      '<label class="kv"><span>端口</span>' +
+        '<input type="number" id="bmc-port" min="1" max="65535" value="' +
+        escapeHTML(String(b.port || 623)) + '" autocomplete="off"></label>' +
+      '<label class="kv"><span>用户名</span>' +
+        '<input type="text" id="bmc-username" value="' +
+        escapeHTML(b.username || "") + '" required autocomplete="off"></label>' +
+      '<label class="kv"><span>密码</span>' +
+        '<input type="password" id="bmc-password" placeholder="' + pwdPlaceholder +
+        '" autocomplete="new-password"></label>' +
+      '<label class="kv"><span>接口</span>' +
+        '<select id="bmc-iface">' + ifaceOpts + "</select></label>" +
+      "</div>";
+
+    const footer =
+      '<button type="button" class="btn btn-ghost" data-modal-close>取消</button> ' +
+      '<button type="submit" id="bmc-save" class="btn btn-primary">' +
+      (existing ? "保存 BMC" : "创建 BMC") + "</button>";
+
+    const title = existing ? "编辑 BMC" : "配置 BMC";
+    const dlg = openModal(modalShell(title, body, footer));
+    dlg.querySelector("form").addEventListener("submit", async function (ev) {
+      ev.preventDefault();
+      const name = (dlg.querySelector("#bmc-name").value || "").trim();
+      const ip = dlg.querySelector("#bmc-ip").value.trim();
+      const portRaw = dlg.querySelector("#bmc-port").value.trim();
+      const username = dlg.querySelector("#bmc-username").value.trim();
+      const password = dlg.querySelector("#bmc-password").value;
+      const iface = dlg.querySelector("#bmc-iface").value;
+
+      if (!ip || !username) {
+        flashError("IP 与用户名必填");
+        return;
+      }
+      if (name.length > 64) {
+        flashError("名称长度不能超过 64");
+        return;
+      }
+      if (!existing && !password) {
+        flashError("新建 BMC 时密码必填");
+        return;
+      }
+
+      const reqBody = {
+        name: name,
+        ip: ip,
+        username: username,
+        ipmi_interface: iface,
+      };
+      if (portRaw) {
+        const p = parseInt(portRaw, 10);
+        if (!isNaN(p)) reqBody.port = p;
+      }
+      if (password) reqBody.password = password;
+
+      const saveBtn = dlg.querySelector("#bmc-save");
+      saveBtn.disabled = true;
+      try {
+        const c = await apiSend("PUT", "/bmc/" + encodeURIComponent(uuid), reqBody);
+        closeModal();
+        flashSuccess("BMC 已保存");
+        clearError();
+        if (typeof onSaved === "function") onSaved(c);
+      } catch (e) {
+        flashError(e.message);
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+  }
+
   window.MK = {
     API_BASE: API_BASE,
     escapeHTML: escapeHTML,
@@ -1047,5 +1143,6 @@
     logout: logout,
     loadCurrentUser: loadCurrentUser,
     openInstallModal: openInstallModal,
+    openBMCDialog: openBMCDialog,
   };
 })();

@@ -241,15 +241,21 @@ type MachineSummary struct {
 	LastSeen     time.Time `json:"last_seen"`
 	Status       string    `json:"status"`
 	LatestReport int64     `json:"latest_report"`
+	BMCIP        string    `json:"bmc_ip"`       // agent-reported BMC IP, parsed from latest report's JSON body
+	BMCManaged   bool      `json:"bmc_managed"`  // true if bmc_credentials row exists for this machine
 }
 
 // ListMachines returns all machines, most-recently-seen first.
 func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT uuid, serial, manufacturer, product_name, first_seen, last_seen, status,
-               COALESCE(latest_report, 0)
-        FROM machines
-        ORDER BY last_seen DESC
+        SELECT m.uuid, m.serial, m.manufacturer, m.product_name,
+               m.first_seen, m.last_seen, m.status,
+               COALESCE(m.latest_report, 0),
+               COALESCE(json_extract(r.body, '$.bmc.ip'), ''),
+               EXISTS(SELECT 1 FROM bmc_credentials b WHERE b.machine_uuid = m.uuid)
+        FROM machines m
+        LEFT JOIN reports r ON r.id = m.latest_report
+        ORDER BY m.last_seen DESC
     `)
 	if err != nil {
 		return nil, fmt.Errorf("query machines: %w", err)
@@ -262,8 +268,11 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
 			m                    MachineSummary
 			firstSeen, lastSeen  int64
 			serial, mfr, product sql.NullString
+			bmcIP                sql.NullString
+			managed              bool
 		)
-		if err := rows.Scan(&m.UUID, &serial, &mfr, &product, &firstSeen, &lastSeen, &m.Status, &m.LatestReport); err != nil {
+		if err := rows.Scan(&m.UUID, &serial, &mfr, &product, &firstSeen, &lastSeen,
+			&m.Status, &m.LatestReport, &bmcIP, &managed); err != nil {
 			return nil, fmt.Errorf("scan machine: %w", err)
 		}
 		m.Serial = serial.String
@@ -271,6 +280,8 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
 		m.ProductName = product.String
 		m.FirstSeen = time.Unix(firstSeen, 0).UTC()
 		m.LastSeen = time.Unix(lastSeen, 0).UTC()
+		m.BMCIP = bmcIP.String
+		m.BMCManaged = managed
 		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {

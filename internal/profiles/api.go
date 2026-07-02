@@ -1,6 +1,7 @@
 package profiles
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -18,16 +19,34 @@ import (
 //   PUT    /{id}              partial update (only specified fields change)
 //   DELETE /{id}              delete (will be ON DELETE RESTRICT once bindings land)
 
+// ReferenceDeleter cascade-deletes bindings and historical jobs referencing
+// a profile. Optional dependency: when set, the delete handler removes
+// referencing rows before the profile, so users can delete profiles that
+// are still bound to machines or have historical jobs without manual cleanup.
+type ReferenceDeleter interface {
+	DeleteByProfile(ctx context.Context, profileID string) (int, error)
+}
+
 // API binds the store to HTTP handlers.
 type API struct {
-	store  *Store
-	logger *slog.Logger
+	store          *Store
+	logger         *slog.Logger
+	bindingDeleter ReferenceDeleter
+	jobDeleter     ReferenceDeleter
 }
 
 // NewAPI constructs an API.
 func NewAPI(store *Store, logger *slog.Logger) *API {
 	return &API{store: store, logger: logger}
 }
+
+// SetBindingDeleter wires the bindings cascade-delete dependency. Must be
+// called before RegisterRoutes. Pass nil to disable cascade behavior.
+func (a *API) SetBindingDeleter(d ReferenceDeleter) { a.bindingDeleter = d }
+
+// SetJobDeleter wires the jobs cascade-delete dependency. Must be called
+// before RegisterRoutes. Pass nil to keep jobs blocking profile deletes.
+func (a *API) SetJobDeleter(d ReferenceDeleter) { a.jobDeleter = d }
 
 // RegisterRoutes mounts profile endpoints on mux.
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
@@ -119,6 +138,24 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 	id, ok := validProfileID(w, r.PathValue("id"))
 	if !ok {
 		return
+	}
+	if a.bindingDeleter != nil {
+		if n, err := a.bindingDeleter.DeleteByProfile(r.Context(), id); err != nil {
+			a.logger.Error("cascade-delete bindings for profile", "err", err, "id", id)
+			writeError(w, http.StatusInternalServerError, "delete failed")
+			return
+		} else if n > 0 {
+			a.logger.Info("cascade-deleted bindings referencing profile", "count", n, "id", id)
+		}
+	}
+	if a.jobDeleter != nil {
+		if n, err := a.jobDeleter.DeleteByProfile(r.Context(), id); err != nil {
+			a.logger.Error("cascade-delete jobs for profile", "err", err, "id", id)
+			writeError(w, http.StatusInternalServerError, "delete failed")
+			return
+		} else if n > 0 {
+			a.logger.Info("cascade-deleted jobs referencing profile", "count", n, "id", id)
+		}
 	}
 	if err := a.store.Delete(r.Context(), id); err != nil {
 		if errors.Is(err, ErrNotFound) {

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"metalkit/internal/jobs"
+	"metalkit/internal/profiles"
 )
 
 func TestInstallGRUB_UEFI_HappyPath(t *testing.T) {
@@ -19,7 +20,7 @@ func TestInstallGRUB_UEFI_HappyPath(t *testing.T) {
 	fs := newMockFS()
 	deps := Deps{Exec: exec, FS: fs}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "ubuntu"}}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
@@ -70,7 +71,7 @@ func TestInstallGRUB_BIOS_HappyPath(t *testing.T) {
 	exec := newMockExec()
 	deps := Deps{Exec: exec, FS: newMockFS()}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", ""); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "ubuntu"}}, "/mnt/root", "/dev/sda", ""); err != nil {
 		t.Fatalf("BIOS install should succeed: %v", err)
 	}
 
@@ -109,7 +110,7 @@ func TestInstallGRUB_GrubInstallFailureSurfaces(t *testing.T) {
 	exec := newMockExec()
 	exec.On["grub-install"] = mockExecResult{Err: errString("device not found")}
 	deps := Deps{Exec: exec, FS: newMockFS()}
-	err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", "/boot/efi")
+	err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "ubuntu"}}, "/mnt/root", "/dev/sda", "/boot/efi")
 	if err == nil {
 		t.Fatal("grub-install failure must surface")
 	}
@@ -123,7 +124,7 @@ func TestInstallGRUB_UpdateGrubFallsBackToHost(t *testing.T) {
 	exec.OnFull["chroot /mnt/root grub-mkconfig -o /boot/grub/grub.cfg"] = mockExecResult{Err: errString("not found")}
 	deps := Deps{Exec: exec, FS: newMockFS()}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", ""); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "ubuntu"}}, "/mnt/root", "/dev/sda", ""); err != nil {
 		t.Fatalf("BIOS install with host grub-mkconfig fallback should succeed: %v", err)
 	}
 
@@ -152,7 +153,7 @@ func TestInstallGRUB_AllUpdateGrubMethodsFail(t *testing.T) {
 	exec.On["grub-mkconfig"] = mockExecResult{Err: errString("overlay")}
 	deps := Deps{Exec: exec, FS: newMockFS(), Logger: testLogger(t)}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", ""); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "ubuntu"}}, "/mnt/root", "/dev/sda", ""); err != nil {
 		t.Fatalf("install should succeed even when all update-grub methods fail: %v", err)
 	}
 }
@@ -164,7 +165,7 @@ func TestInstallGRUB_RHELGrub2Symlink(t *testing.T) {
 	fs.files["/mnt/root/boot/grub2/grub.cfg"] = []byte("set root=...")
 	deps := Deps{Exec: exec, FS: fs}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "ubuntu"}}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
@@ -198,7 +199,7 @@ func TestInstallGRUB_RockyTarget_UEFI_RegistersShimViaEfibootmgr(t *testing.T) {
 	fs.files["/proc/mounts"] = []byte("/dev/sda2 /mnt/root/boot/efi vfat rw 0 0\n")
 	deps := Deps{Exec: exec, FS: fs}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "rhel"}}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
@@ -260,7 +261,7 @@ func TestInstallGRUB_RockyTarget_UEFI_MissingShimFallsBackToGrub2Install(t *test
 
 	// With mock exec (unregistered commands succeed), grub2-install fallback
 	// should succeed and the overall install should not error.
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "rhel"}}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
 		t.Fatalf("expected grub2-install fallback to succeed, got: %v", err)
 	}
 }
@@ -278,7 +279,7 @@ func TestInstallGRUB_RockyTarget_UEFI_FallsBackToGrubWhenShimAbsent(t *testing.T
 	fs.files["/proc/mounts"] = []byte("/dev/nvme0n1p1 /mnt/root/boot/efi vfat rw 0 0\n")
 	deps := Deps{Exec: exec, FS: fs}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/nvme0n1", "/boot/efi"); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "rhel"}}, "/mnt/root", "/dev/nvme0n1", "/boot/efi"); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
@@ -321,7 +322,7 @@ func TestInstallGRUB_RockyTarget_UEFI_RemovesStaleEntryAndRecreates(t *testing.T
 	)}
 	deps := Deps{Exec: exec, FS: fs}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "rhel"}}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
@@ -377,7 +378,7 @@ func TestInstallGRUB_CentOS7Target_StaysOnHostGrubInstall(t *testing.T) {
 	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="centos"` + "\n" + `VERSION_ID="7"` + "\n")
 	deps := Deps{Exec: exec, FS: fs}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "rhel7"}}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
@@ -407,7 +408,7 @@ func TestInstallGRUB_RockyTarget_BIOS(t *testing.T) {
 	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="rocky"` + "\n")
 	deps := Deps{Exec: exec, FS: fs}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", ""); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "rhel"}}, "/mnt/root", "/dev/sda", ""); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
@@ -442,7 +443,7 @@ func TestInstallGRUB_UbuntuTarget_UsesHostGrubInstall(t *testing.T) {
 	// Crucially: no /usr/sbin/grub2-install in target.
 	deps := Deps{Exec: exec, FS: fs}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "ubuntu"}}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
@@ -471,7 +472,7 @@ func TestInstallGRUB_GrubCfgAlreadyExists_NoOverwrite(t *testing.T) {
 	fs.files["/mnt/root/boot/grub/grub.cfg"] = []byte("existing cfg")
 	deps := Deps{Exec: exec, FS: fs}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "openeuler"}}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
@@ -498,7 +499,7 @@ func TestInstallGRUB_OpenEuler_CapitalE_MatchesChrootPath(t *testing.T) {
 	fs.files["/proc/mounts"] = []byte("/dev/sda1 /mnt/root/boot/efi vfat rw 0 0\n")
 	deps := Deps{Exec: exec, FS: fs}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", "/mnt/root/boot/efi"); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "openeuler"}}, "/mnt/root", "/dev/sda", "/mnt/root/boot/efi"); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
@@ -556,7 +557,7 @@ func TestInstallGRUB_OpenEuler_UEFI_BootMountPoint(t *testing.T) {
 	deps := Deps{Exec: exec, FS: fs}
 
 	// espMount is /mnt/root/boot, not /mnt/root/boot/efi.
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", "/mnt/root/boot"); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "openeuler"}}, "/mnt/root", "/dev/sda", "/mnt/root/boot"); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
@@ -600,7 +601,7 @@ func TestInstallGRUB_OpenEuler_UEFI_NoPrebakedEFI_FallbackToGrub2Install(t *test
 	fs.files["/proc/mounts"] = []byte("/dev/sda1 /mnt/root/boot vfat rw 0 0\n")
 	deps := Deps{Exec: exec, FS: fs}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", "/mnt/root/boot"); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "openeuler"}}, "/mnt/root", "/dev/sda", "/mnt/root/boot"); err != nil {
 		t.Fatalf("expected grub2-install fallback to succeed, got: %v", err)
 	}
 
@@ -627,7 +628,7 @@ func TestInstallGRUB_OpenEuler_BIOS(t *testing.T) {
 	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="openEuler"` + "\n")
 	deps := Deps{Exec: exec, FS: fs}
 
-	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{}, "/mnt/root", "/dev/sda", ""); err != nil {
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "openeuler"}}, "/mnt/root", "/dev/sda", ""); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 

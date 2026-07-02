@@ -157,7 +157,11 @@ func Run(ctx context.Context, deps Deps, spec jobs.InstallSpec) (retErr error) {
 	if err := deps.Reporter.Stage(ctx, StageSeed); err != nil {
 		return fmt.Errorf("install: stage %s: %w", StageSeed, err)
 	}
-	if err := BuildSeed(ctx, deps, spec, mntRoot); err != nil {
+	osInst, err := pickOSInstaller(spec.Profile.OSFamily)
+	if err != nil {
+		return fmt.Errorf("install: pick os installer: %w", err)
+	}
+	if err := osInst.BuildSeed(ctx, deps, spec, mntRoot); err != nil {
 		return err
 	}
 
@@ -165,7 +169,7 @@ func Run(ctx context.Context, deps Deps, spec jobs.InstallSpec) (retErr error) {
 	if err := deps.Reporter.Stage(ctx, StageGrubInstall); err != nil {
 		return fmt.Errorf("install: stage %s: %w", StageGrubInstall, err)
 	}
-	if err := InstallGRUB(ctx, deps, spec, mntRoot, target.DevPath, espMount); err != nil {
+	if err := osInst.InstallBootloader(ctx, deps, spec, mntRoot, target.DevPath, espMount); err != nil {
 		return err
 	}
 

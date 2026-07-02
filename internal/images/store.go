@@ -119,7 +119,11 @@ func (s *Store) CreateUpload(ctx context.Context, in CreateUploadInput) (*Upload
 	if in.TotalSize > MaxImageSize {
 		return nil, fmt.Errorf("images: total_size %d exceeds limit %d", in.TotalSize, MaxImageSize)
 	}
-	if !sha256RE.MatchString(in.ExpectedSHA256) {
+	// expected_sha256 is optional — when empty, the server computes SHA-256
+	// from assembled chunks in FinalizeUpload and uses that hash for file
+	// naming, dedup, and the images.sha256 column. When non-empty, it must be
+	// a valid 64-hex string and the server verifies it post-assembly.
+	if in.ExpectedSHA256 != "" && !sha256RE.MatchString(in.ExpectedSHA256) {
 		return nil, errors.New("images: expected_sha256 must be 64 lowercase hex chars")
 	}
 	chunkSize := in.ChunkSize
@@ -135,14 +139,18 @@ func (s *Store) CreateUpload(ctx context.Context, in CreateUploadInput) (*Upload
 
 	// Reject early if a finalized image with this sha already exists. The
 	// finalize path checks again under transaction, but doing it here saves the
-	// user an upload they can't commit.
-	var existing string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id FROM images WHERE sha256 = ?`, in.ExpectedSHA256).Scan(&existing)
-	if err == nil {
-		return nil, fmt.Errorf("%w: image %s already exists", ErrDuplicate, existing)
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("dedupe check: %w", err)
+	// user an upload they can't commit. Skipped when the client didn't supply
+	// an expected hash — FinalizeImage's transactional check still catches dups
+	// using the server-computed hash.
+	if in.ExpectedSHA256 != "" {
+		var existing string
+		err := s.db.QueryRowContext(ctx,
+			`SELECT id FROM images WHERE sha256 = ?`, in.ExpectedSHA256).Scan(&existing)
+		if err == nil {
+			return nil, fmt.Errorf("%w: image %s already exists", ErrDuplicate, existing)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("dedupe check: %w", err)
+		}
 	}
 
 	// Cap concurrent sessions so a runaway client cannot exhaust disk by

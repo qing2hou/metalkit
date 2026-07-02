@@ -7,12 +7,14 @@
   if (document.body.dataset.page !== "list") return;
 
   // Column index map (must match index.html thead order):
-  //   0 Status, 1 Serial, 2 Manufacturer/Product, 3 UUID, 4 Last seen, 5 Actions
-  var COL = { STATUS: 0, SERIAL: 1, PRODUCT: 2, UUID: 3, LAST_SEEN: 4 };
+  //   0 Status, 1 Serial, 2 Manufacturer/Product, 3 UUID,
+  //   4 BMC IP, 5 Managed, 6 Last seen, 7 Actions
+  var COL = { STATUS: 0, SERIAL: 1, PRODUCT: 2, UUID: 3, BMC: 4, MANAGED: 5, LAST_SEEN: 6 };
   var SORTABLE = {
     status:    { col: COL.STATUS,    type: "status" },
     serial:    { col: COL.SERIAL,    type: "string" },
     product:   { col: COL.PRODUCT,   type: "string" },
+    bmc:       { col: COL.BMC,       type: "string" },
     last_seen: { col: COL.LAST_SEEN, type: "date"   }
   };
 
@@ -41,7 +43,17 @@
         if (bar) bar.hidden = false;
         barUnhidden = true;
       }
-      applyAll();
+      // sortRows mutates tbody (appendChild), which would re-trigger this
+      // observer and loop forever. Disconnect during applyAll, reconnect
+      // after. Using microtask to avoid taking a snapshot of mid-mutation.
+      observer.disconnect();
+      try {
+        applyAll();
+      } finally {
+        queueMicrotask(function () {
+          observer.observe(tbody, { childList: true });
+        });
+      }
     });
     observer.observe(tbody, { childList: true });
   });
@@ -217,7 +229,8 @@
     var hay = (
       rowText(tr, COL.SERIAL) + " " +
       rowText(tr, COL.PRODUCT) + " " +
-      rowUUID(tr)
+      rowUUID(tr) + " " +
+      rowText(tr, COL.BMC)
     ).toLowerCase();
     return hay.indexOf(q) !== -1;
   }

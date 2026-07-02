@@ -12,7 +12,7 @@
     <div class="topbar-inner">
       <h1 class="brand"><a href="/ui/">metalkit</a></h1>
       <nav class="topnav">
-        <a href="/ui/">机器</a>
+        <a href="/ui/" class="active">机器</a>
         <a href="/ui/images">镜像</a>
         <a href="/ui/subnets">子网</a>
         <a href="/ui/profiles">配置</a>
@@ -69,6 +69,7 @@
           <h4>BMC</h4>
           <div id="prov-bmc-body" class="muted">加载中&hellip;</div>
           <div class="action-row">
+            <button id="prov-bmc-sync" type="button" class="btn btn-primary" hidden>同步到 BMC</button>
             <button id="prov-bmc-test" type="button" class="btn">立即测试</button>
             <button id="prov-bmc-edit" type="button" class="btn">编辑 BMC</button>
           </div>

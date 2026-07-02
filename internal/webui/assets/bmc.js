@@ -173,9 +173,6 @@
       '<button type="button" class="btn test-btn" data-uuid="' + muEsc + '">测试</button> ' +
       '<select class="btn power-select" data-uuid="' + muEsc + '">' + powerOpts + '</select> ' +
       '<button type="button" class="btn onboard-btn" data-uuid="' + muEsc + '" title="' + MK.escapeHTML(onboardTitle) + '">纳管</button> ' +
-      (isPlaceholder
-        ? ''
-        : '<button type="button" class="btn reinstall-btn" data-uuid="' + muEsc + '" title="打开重装对话框 —— 可选择 image + profile 后触发 PXE 重启">重装</button> ') +
       '<button type="button" class="btn edit-btn" data-uuid="' + muEsc + '">编辑</button> ' +
       '<button type="button" class="btn btn-danger delete-btn" data-uuid="' + muEsc + '">删除</button>';
 
@@ -189,8 +186,6 @@
       sel.value = "";
       if (action) powerBMC(c, action);
     });
-    const reBtn = td.querySelector(".reinstall-btn");
-    if (reBtn) reBtn.addEventListener("click", function () { reinstallMachine(c); });
     return td;
   }
 
@@ -488,153 +483,6 @@
     });
   }
 
-  // ---- reinstall ---------------------------------------------------
-  //
-  // 重装走 binding desired_state = "reinstall" —— orchestrator 下一 tick 检测到
-  // 后会调 ipmitool chassis bootdev pxe + power cycle 强制目标机重进 live。
-  // 需要 binding 已经设了 image + profile；占位 BMC 没有真实 machine_uuid，
-  // actionsCell 已经隐藏了重装按钮，这里 defensively 再校验一次。
-
-  async function reinstallMachine(c) {
-    const muuid = c.machine_uuid;
-    if (PLACEHOLDER_RE.test(muuid)) {
-      MK.flashError("占位 BMC 还没绑定真实机器，无法重装");
-      return;
-    }
-    const label = (c.name || "").trim() || muuid.slice(0, 8);
-
-    let binding = null;
-    try {
-      binding = await MK.apiGet("/bindings/" + encodeURIComponent(muuid));
-    } catch (err) {
-      binding = null;
-    }
-
-    let images = [];
-    let profiles = [];
-    try {
-      const results = await Promise.all([
-        MK.apiGet("/images"),
-        MK.apiGet("/profiles"),
-      ]);
-      images = (results[0] && results[0].items) || results[0] || [];
-      profiles = (results[1] && results[1].items) || results[1] || [];
-    } catch (err) {
-      MK.flashError("加载 image / profile 列表失败：" + err.message);
-      return;
-    }
-
-    images = images.slice().sort(function (a, b) {
-      return String(a.name || "").localeCompare(String(b.name || ""));
-    });
-    profiles = profiles.slice().sort(function (a, b) {
-      return String(a.name || "").localeCompare(String(b.name || ""));
-    });
-
-    const curImageID = (binding && binding.image_id) || "";
-    const curProfileID = (binding && binding.profile_id) || "";
-    const curStatic = (binding && binding.static_address) || "";
-    const curHostname = (binding && binding.hostname_override) || "";
-
-    const imgOpts = ['<option value="">— 选择镜像 —</option>'].concat(
-      images.map(function (i) {
-        const lbl = (i.name || i.id) +
-          (i.version ? " " + i.version : "") +
-          (i.family ? " (" + i.family + ")" : "");
-        const sel = i.id === curImageID ? " selected" : "";
-        return '<option value="' + MK.escapeHTML(i.id) + '"' + sel + ">" +
-          MK.escapeHTML(lbl) + "</option>";
-      })
-    ).join("");
-
-    const profOpts = ['<option value="">— 选择配置 —</option>'].concat(
-      profiles.map(function (p) {
-        const lbl = (p.name || p.id) +
-          (p.os_family && p.os_family !== "any" ? " [" + p.os_family + "]" : "");
-        const sel = p.id === curProfileID ? " selected" : "";
-        return '<option value="' + MK.escapeHTML(p.id) + '"' + sel + ">" +
-          MK.escapeHTML(lbl) + "</option>";
-      })
-    ).join("");
-
-    const imgFamilyByID = {};
-    images.forEach(function (i) { imgFamilyByID[i.id] = (i.family || "").toLowerCase(); });
-    const profFamilyByID = {};
-    profiles.forEach(function (p) { profFamilyByID[p.id] = (p.os_family || "any").toLowerCase(); });
-
-    const body =
-      '<div class="form-error error-banner" id="form-error" hidden></div>' +
-      '<p class="muted">对 <strong>' + MK.escapeHTML(label) + '</strong>' +
-      ' (<code>' + MK.escapeHTML(muuid.slice(0, 8)) + '</code>)' +
-      ' 触发重装。Orchestrator 下一 tick 会通过 BMC 把目标机 PXE 重启进 live —— ' +
-      '盘上现有数据会被覆盖。</p>' +
-      '<label for="re-image">镜像<select id="re-image" required>' + imgOpts + '</select></label>' +
-      '<label for="re-profile">配置<select id="re-profile" required>' + profOpts + '</select></label>' +
-      '<div id="re-compat" class="muted" hidden></div>' +
-      '<label for="re-static">静态地址 (可选 CIDR)<input id="re-static" type="text" value="' +
-        MK.escapeHTML(curStatic) + '" placeholder="例如 192.168.10.160/24" autocomplete="off"></label>' +
-      '<label for="re-hostname">主机名覆盖 (可选)<input id="re-hostname" type="text" value="' +
-        MK.escapeHTML(curHostname) + '" placeholder="覆盖 profile 模板" autocomplete="off"></label>';
-
-    const footer =
-      '<button type="button" class="btn btn-ghost" data-modal-close>取消</button> ' +
-      '<button type="submit" id="re-submit" class="btn btn-danger">确认重装</button>';
-
-    const dlg = MK.openModal(MK.modalShell("重装 " + label, body, footer));
-    const imgSel = dlg.querySelector("#re-image");
-    const profSel = dlg.querySelector("#re-profile");
-    const compatEl = dlg.querySelector("#re-compat");
-    const errEl = dlg.querySelector("#form-error");
-
-    function refreshCompat() {
-      const imgFam = imgFamilyByID[imgSel.value] || "";
-      const profFam = profFamilyByID[profSel.value] || "any";
-      if (!imgSel.value || !profSel.value) { compatEl.hidden = true; return; }
-      if (profFam === "any" || imgFam === "" || imgFam === profFam) {
-        compatEl.hidden = true;
-        return;
-      }
-      compatEl.hidden = false;
-      compatEl.innerHTML =
-        '<span class="badge" data-status="pending">⚠ 兼容性</span> 镜像家族 <code>' +
-        MK.escapeHTML(imgFam) + "</code> 与配置 os_family <code>" +
-        MK.escapeHTML(profFam) + "</code> 不匹配，保存时后端会拒绝。";
-    }
-    imgSel.addEventListener("change", refreshCompat);
-    profSel.addEventListener("change", refreshCompat);
-    refreshCompat();
-
-    const form = dlg.querySelector("form");
-    form.addEventListener("submit", async function (ev) {
-      ev.preventDefault();
-      const imageID = imgSel.value.trim();
-      const profileID = profSel.value.trim();
-      if (!imageID || !profileID) {
-        errEl.textContent = "镜像与配置必填";
-        errEl.hidden = false;
-        return;
-      }
-      const staticAddr = dlg.querySelector("#re-static").value.trim();
-      const hostname = dlg.querySelector("#re-hostname").value.trim();
-      const submitBtn = dlg.querySelector("#re-submit");
-      submitBtn.disabled = true;
-      try {
-        await MK.apiSend("PUT", "/bindings/" + encodeURIComponent(muuid), {
-          image_id: imageID,
-          profile_id: profileID,
-          desired_state: "reinstall",
-          static_address: staticAddr,
-          hostname_override: hostname,
-        });
-        MK.closeModal();
-        MK.flashSuccess("已请求重装 “" + label + "” —— orchestrator 将在下一 tick 触发 PXE 重启");
-      } catch (err) {
-        errEl.textContent = "触发重装失败：" + err.message;
-        errEl.hidden = false;
-        submitBtn.disabled = false;
-      }
-    });
-  }
 
   // ---- bulk import via CSV ------------------------------------------
   //

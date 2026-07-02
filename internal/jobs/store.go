@@ -381,6 +381,18 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return tx.Commit()
 }
 
+// DeleteByImage removes every job referencing the given image id. job_logs
+// cascade-delete via their ON DELETE CASCADE FK. Used by the images delete
+// handler so images can be removed even when historical jobs reference them.
+func (s *Store) DeleteByImage(ctx context.Context, imageID string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM jobs WHERE image_id = ?`, imageID)
+	if err != nil {
+		return 0, fmt.Errorf("delete jobs by image: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 func (s *Store) terminate(ctx context.Context, id, target, errMsg string, allowedFrom []string) error {
 	id, err := validateJobID(id)
 	if err != nil {
@@ -608,6 +620,19 @@ func (s *Store) RefCountByProfile(ctx context.Context, profileID string) (int, e
 		return 0, fmt.Errorf("count jobs for profile: %w", err)
 	}
 	return n, nil
+}
+
+// DeleteByProfile removes every job referencing the given profile id.
+// job_logs cascade-delete via their ON DELETE CASCADE FK. Used by the
+// profiles delete handler so profiles can be removed even when historical
+// jobs reference them.
+func (s *Store) DeleteByProfile(ctx context.Context, profileID string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM jobs WHERE profile_id = ?`, profileID)
+	if err != nil {
+		return 0, fmt.Errorf("delete jobs by profile: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 func newJobID() (string, error) {

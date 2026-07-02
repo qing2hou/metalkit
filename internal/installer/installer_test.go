@@ -55,7 +55,7 @@ func happySpec() jobs.InstallSpec {
 		MachineUUID:  "abcd1234deadbeef",
 		ImageBlobURL: "/api/v1/images/abc/blob",
 		ImageSHA256:  "deadbeef",
-		Profile: profiles.Profile{
+		Profile: profiles.Profile{OSFamily: "ubuntu",
 			HostnameTemplate: "n",
 			RootPasswordHash: "$6$s$" + strings.Repeat("a", 86),
 			TargetDisk:       profiles.TargetDisk{Mode: "smallest"},

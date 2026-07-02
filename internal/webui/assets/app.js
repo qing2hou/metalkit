@@ -35,6 +35,19 @@
     return u.slice(0, 8) + "…" + u.slice(-4);
   }
 
+  // toUnixSec normalizes last_seen/first_seen which may be either a unix
+  // epoch seconds (number/string) or an ISO-8601 string. Returns 0 for
+  // null/empty/invalid input so sort comparisons never produce NaN (which
+  // would hang Array.sort in some engines).
+  function toUnixSec(v) {
+    if (v == null) return 0;
+    const n = Number(v);
+    if (isFinite(n) && n > 0) return n;
+    const d = new Date(v);
+    const ms = d.getTime();
+    return isFinite(ms) ? Math.floor(ms / 1000) : 0;
+  }
+
   function wireRefreshButton() {
     const btn = $("refresh-btn");
     if (!btn) return;
@@ -113,8 +126,9 @@
 
     // sort by last_seen desc; stable secondary sort by uuid
     rows.sort(function (a, b) {
-      const lb = Number(b.last_seen || 0) - Number(a.last_seen || 0);
-      if (lb !== 0) return lb;
+      const la = toUnixSec(a.last_seen);
+      const lb = toUnixSec(b.last_seen);
+      if (lb !== la) return lb - la;
       return String(a.uuid || "").localeCompare(String(b.uuid || ""));
     });
 
@@ -125,7 +139,7 @@
       const status = humanStatus(row.status);
       const mfgProd = [row.manufacturer, row.product_name].filter(Boolean).join(" / ") || "-";
       const uuid = row.uuid || "";
-      const lastSeen = Number(row.last_seen || 0);
+      const lastSeen = toUnixSec(row.last_seen);
       const lastSeenTitle = fmtAbsolute(lastSeen);
 
       tr.innerHTML =
@@ -133,9 +147,18 @@
         '<td>' + escapeHTML(row.serial || "-") + '</td>' +
         '<td>' + escapeHTML(mfgProd) + '</td>' +
         '<td><span class="mono copyable" data-copy="' + escapeHTML(uuid) + '" title="' + escapeHTML(uuid) + '（点击复制）">' + escapeHTML(truncateUUID(uuid)) + '</span></td>' +
+        '<td class="mono">' + escapeHTML(row.bmc_ip || "-") + '</td>' +
+        '<td>' + (row.bmc_managed
+          ? '<span class="managed-dot" title="已纳管">✓</span>'
+          : '<span class="muted" title="未纳管">-</span>') + '</td>' +
         '<td title="' + escapeHTML(lastSeenTitle) + '">' + escapeHTML(fmtRelative(lastSeen)) + '</td>' +
         '<td class="col-actions">' +
           '<a href="/ui/m/' + encodeURIComponent(uuid) + '" class="btn btn-ghost btn-sm">详情</a>' +
+          (row.bmc_ip && !row.bmc_managed
+            ? '<button type="button" class="btn btn-sm sync-bmc-btn" data-uuid="' +
+              escapeHTML(uuid) + '" data-bmc-ip="' + escapeHTML(row.bmc_ip) +
+              '" title="用上报的 BMC IP 预填凭据">同步BMC</button> '
+            : '') +
           '<button type="button" class="btn btn-primary btn-sm install-row-btn" data-uuid="' +
           escapeHTML(uuid) + '">装机/重装</button>' +
           '<button type="button" class="btn btn-danger btn-sm delete-row-btn" data-uuid="' +
@@ -158,6 +181,43 @@
       btn.addEventListener("click", function () {
         triggerDeleteMachine(btn.dataset.uuid || "", btn.dataset.serial || "");
       });
+    });
+
+    // wire 同步BMC buttons —— 预校验 IP 冲突 + 打开预填表单
+    tbody.querySelectorAll(".sync-bmc-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        triggerSyncBMC(btn.dataset.uuid || "", btn.dataset.bmcIp || "");
+      });
+    });
+  }
+
+  async function triggerSyncBMC(uuid, bmcIP) {
+    if (!uuid || !window.MK) return;
+    if (!bmcIP) {
+      window.MK.flashError("agent 未上报 BMC IP，无法自动同步");
+      return;
+    }
+    // 预校验：这个 IP 是不是已经被别的机器注册过
+    try {
+      const all = await window.MK.apiGet("/bmc");
+      const conflict = (all || []).find(function (c) {
+        return c.ip === bmcIP && c.machine_uuid !== uuid;
+      });
+      if (conflict) {
+        const short = (conflict.machine_uuid || "").slice(0, 12);
+        const ok = window.confirm(
+          "BMC IP " + bmcIP + " 已被机器 " + short + "… 注册。\n\n" +
+          "如果是同一台机器（比如重装后换了 UUID），点确定继续；\n" +
+          "如果是不同机器共用 IP，请检查网络配置。"
+        );
+        if (!ok) return;
+      }
+    } catch (e) {
+      console.warn("bmc list pre-check failed:", e);
+    }
+    window.MK.openBMCDialog(uuid, { ip: bmcIP }, null, function () {
+      // 保存成功后刷新列表（更新纳管状态）
+      loadMachines();
     });
   }
 
@@ -309,14 +369,14 @@
     $("m-uuid").dataset.copy = m.uuid || "";
     $("m-manufacturer").textContent = m.manufacturer || "-";
 
-    $("m-first-seen").textContent = fmtRelative(m.first_seen);
-    $("m-first-seen").title = fmtAbsolute(m.first_seen);
-    $("m-last-seen").textContent = fmtRelative(m.last_seen);
-    $("m-last-seen").title = fmtAbsolute(m.last_seen);
+    $("m-first-seen").textContent = fmtRelative(toUnixSec(m.first_seen));
+    $("m-first-seen").title = fmtAbsolute(toUnixSec(m.first_seen));
+    $("m-last-seen").textContent = fmtRelative(toUnixSec(m.last_seen));
+    $("m-last-seen").title = fmtAbsolute(toUnixSec(m.last_seen));
 
     const stale = $("m-stale-badge");
     if (stale) {
-      const lastSeen = Number(m.last_seen || 0);
+      const lastSeen = toUnixSec(m.last_seen);
       const ageSec = Math.floor(Date.now() / 1000 - lastSeen);
       stale.hidden = !(lastSeen > 0 && ageSec > 24 * 3600);
       if (!stale.hidden) stale.title = "上次上报已过 " + Math.floor(ageSec / 3600) + " 小时，数据可能过期";
@@ -399,6 +459,10 @@
       flashError("上报数据为空");
       return;
     }
+    // Expose latest report to other UI slices (detail-prov.js reads bmc.ip
+    // for the "同步到 BMC" button prefill).
+    window.MK = window.MK || {};
+    window.MK.latestReport = report;
 
     // Header timestamp pulled from the report itself.
     if (report.collected_at) {

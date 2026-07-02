@@ -440,6 +440,7 @@ func run() int {
 		logger.Error("bindings open", "err", err)
 		return 1
 	}
+	imgAPI.SetBindingDeleter(bindStore)
 	bindAPI := bindings.NewAPI(bindStore, logger.With("component", "bindings-api"))
 
 	// Refuse subnet DELETE when any binding still points at it (until we
@@ -475,6 +476,9 @@ func run() int {
 		logger.Error("jobs open", "err", err)
 		return 1
 	}
+	imgAPI.SetJobDeleter(jobsStore)
+	profileAPI.SetBindingDeleter(bindStore)
+	profileAPI.SetJobDeleter(jobsStore)
 	var ipmiClient *ipmi.Client
 	ipmiClient, err = ipmi.NewClient(logger.With("component", "ipmi"), ipmi.ClientOptions{})
 	if err != nil {

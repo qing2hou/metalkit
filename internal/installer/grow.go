@@ -5,9 +5,11 @@
 // pick the first one whose blkid TYPE is a real Linux filesystem
 // (ext2/3/4, xfs). We can NOT just take "the highest-numbered partition"
 // because Ubuntu cloud images put the ESP at the tail:
-//   /dev/sda1   ext4   rootfs
-//   /dev/sda14         BIOS boot stub (no FS)
-//   /dev/sda15  vfat   ESP
+//
+//	/dev/sda1   ext4   rootfs
+//	/dev/sda14         BIOS boot stub (no FS)
+//	/dev/sda15  vfat   ESP
+//
 // Reverse iteration with FS filtering walks past sda15/sda14 and lands on
 // sda1, while Debian/Rocky/RHEL layouts (root is the highest-numbered)
 // still match on the first probe.
@@ -237,9 +239,10 @@ func isAntiRootLabel(label string) bool {
 // names. Returns an error if partDev doesn't start with disk's path.
 //
 // Examples:
-//   PartitionNumber("/dev/sda",      "/dev/sda3")        -> 3, nil
-//   PartitionNumber("/dev/nvme0n1",  "/dev/nvme0n1p3")   -> 3, nil
-//   PartitionNumber("/dev/mmcblk0",  "/dev/mmcblk0p1")   -> 1, nil
+//
+//	PartitionNumber("/dev/sda",      "/dev/sda3")        -> 3, nil
+//	PartitionNumber("/dev/nvme0n1",  "/dev/nvme0n1p3")   -> 3, nil
+//	PartitionNumber("/dev/mmcblk0",  "/dev/mmcblk0p1")   -> 1, nil
 func PartitionNumber(disk, partDev string) (int, error) {
 	if !strings.HasPrefix(partDev, disk) {
 		return 0, fmt.Errorf("install: partition %q does not belong to disk %q", partDev, disk)

@@ -201,7 +201,9 @@ func (s *Store) FinalizeUpload(ctx context.Context, sessionID string, extractor 
 		return nil, fmt.Errorf("images: assembled size %d != declared %d", totalBytes, sess.TotalSize)
 	}
 	got := hex.EncodeToString(h.Sum(nil))
-	if got != sess.ExpectedSHA256 {
+	// Skip client-hash verification when the client didn't supply one — the
+	// server still uses `got` for file naming, dedup, and images.sha256 below.
+	if sess.ExpectedSHA256 != "" && got != sess.ExpectedSHA256 {
 		_ = os.Remove(stage)
 		return nil, ErrSHAMismatch{Want: sess.ExpectedSHA256, Got: got}
 	}

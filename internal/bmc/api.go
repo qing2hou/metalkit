@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -128,6 +129,13 @@ func (a *API) upsert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	case err != nil:
+		var conflict ErrIPConflict
+		if errors.As(err, &conflict) {
+			writeError(w, http.StatusConflict,
+				fmt.Sprintf("bmc ip %q 已被机器 %s 注册，请确认是否同一台机器",
+					conflict.IP, conflict.Existing))
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

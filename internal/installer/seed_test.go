@@ -69,7 +69,7 @@ func TestRenderUserData_DHCP(t *testing.T) {
 	spec := jobs.InstallSpec{
 		JobID:       "job-aaaa-bbbb-cccc-dddd",
 		MachineUUID: "deadbeef00000000",
-		Profile: profiles.Profile{
+		Profile: profiles.Profile{OSFamily: "ubuntu",
 			HostnameTemplate: "n-{uuid8}",
 			RootPasswordHash: "$6$salt$" + strings.Repeat("a", 86),
 			Network:          profiles.NetworkConfig{Method: "dhcp", NICSelector: "auto"},
@@ -117,7 +117,7 @@ func TestRenderUserData_DHCP(t *testing.T) {
 func TestRenderUserData_Static(t *testing.T) {
 	spec := jobs.InstallSpec{
 		JobID: "job-static",
-		Profile: profiles.Profile{
+		Profile: profiles.Profile{OSFamily: "ubuntu",
 			HostnameTemplate: "host-{uuid8}",
 			RootPasswordHash: "$6$abcd$" + strings.Repeat("b", 86),
 			Network: profiles.NetworkConfig{
@@ -647,7 +647,7 @@ func TestBuildSeed(t *testing.T) {
 	deps := Deps{Exec: exec, FS: fs, WorkDir: "/tmp/test-install"}
 	spec := jobs.InstallSpec{
 		JobID: "job-x",
-		Profile: profiles.Profile{
+		Profile: profiles.Profile{OSFamily: "ubuntu",
 			HostnameTemplate: "n",
 			RootPasswordHash: "$6$s$" + strings.Repeat("a", 86),
 			Network:          profiles.NetworkConfig{Method: "dhcp", NICSelector: "auto"},
@@ -700,124 +700,15 @@ func TestBuildSeed_EmptyMntRootErrors(t *testing.T) {
 	}
 }
 
-// ---- isRHEL7Root -----------------------------------------------------------
-
-func TestIsRHEL7Root(t *testing.T) {
-	tests := []struct {
-		name      string
-		osRelease string
-		want      bool
-	}{
-		{
-			name: "centos7",
-			osRelease: `NAME="CentOS Linux"
-VERSION="7 (Core)"
-ID="centos"
-ID_LIKE="rhel fedora"
-VERSION_ID="7"`,
-			want: true,
-		},
-		{
-			name: "rhel7",
-			osRelease: `NAME="Red Hat Enterprise Linux Server"
-VERSION="7.9 (Maipo)"
-ID="rhel"
-ID_LIKE="fedora"
-VERSION_ID="7.9"`,
-			want: true,
-		},
-		{
-			name: "ubuntu22",
-			osRelease: `NAME="Ubuntu"
-VERSION="22.04.4 LTS (Jammy Jellyfish)"
-ID=ubuntu
-ID_LIKE=debian
-VERSION_ID="22.04"`,
-			want: false,
-		},
-		{
-			name: "rocky9",
-			osRelease: `NAME="Rocky Linux"
-VERSION="9.3 (Blue Onyx)"
-ID="rocky"
-ID_LIKE="rhel fedora"
-VERSION_ID="9.3"`,
-			want: false,
-		},
-		{
-			name: "debian12",
-			osRelease: `PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
-NAME="Debian GNU/Linux"
-VERSION_ID="12"
-ID=debian`,
-			want: false,
-		},
-		{
-			name:      "missing file",
-			osRelease: "",
-			want:      false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			fs := newMockFS()
-			if tc.osRelease != "" {
-				_ = fs.MkdirAll("/mnt/root/etc", 0o755)
-				_ = fs.WriteFile("/mnt/root/etc/os-release", []byte(tc.osRelease), 0o644)
-			}
-			got := isRHEL7Root(Deps{FS: fs}, "/mnt/root")
-			if got != tc.want {
-				t.Fatalf("isRHEL7Root = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 // ---- isRHELFamilyRoot ------------------------------------------------------
-
-func TestIsRHELFamilyRoot(t *testing.T) {
-	tests := []struct {
-		name      string
-		osRelease string
-		want      bool
-	}{
-		{name: "centos7", osRelease: `ID="centos"`, want: true},
-		{name: "rhel9", osRelease: `ID="rhel"`, want: true},
-		{name: "rocky9", osRelease: `ID="rocky"
-ID_LIKE="rhel fedora"`, want: true},
-		{name: "almalinux9", osRelease: `ID="almalinux"`, want: true},
-		{name: "fedora", osRelease: `ID="fedora"`, want: true},
-		{name: "oracle (ID_LIKE only)", osRelease: `ID="ol"
-ID_LIKE="rhel fedora"`, want: true},
-		{name: "ubuntu22", osRelease: `ID=ubuntu
-ID_LIKE=debian`, want: false},
-		{name: "debian12", osRelease: `ID=debian`, want: false},
-		{name: "missing", osRelease: "", want: false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			fs := newMockFS()
-			if tc.osRelease != "" {
-				_ = fs.MkdirAll("/mnt/root/etc", 0o755)
-				_ = fs.WriteFile("/mnt/root/etc/os-release", []byte(tc.osRelease), 0o644)
-			}
-			got := isRHELFamilyRoot(Deps{FS: fs}, "/mnt/root")
-			if got != tc.want {
-				t.Fatalf("isRHELFamilyRoot = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
 
 // ---- /.autorelabel on RHEL family ------------------------------------------
 
 func TestBuildSeed_RHELFamily_SELinuxRelabel(t *testing.T) {
 	cases := []struct {
-		name      string
-		osRelease string
-		wantRelabel bool
+		name            string
+		osRelease       string
+		wantRelabel     bool
 		selinuxDisabled bool
 	}{
 		{name: "centos7", osRelease: `ID="centos"
@@ -848,7 +739,7 @@ VERSION_ID="10"`, wantRelabel: false, selinuxDisabled: true},
 			deps := Deps{Exec: exec, FS: fs, WorkDir: "/tmp/test"}
 			spec := jobs.InstallSpec{
 				JobID: "job-selinux",
-				Profile: profiles.Profile{
+				Profile: profiles.Profile{OSFamily: "rhel7",
 					HostnameTemplate: "host-{uuid8}",
 					RootPasswordHash: "$6$h$" + strings.Repeat("c", 86),
 					Network: profiles.NetworkConfig{
@@ -937,9 +828,9 @@ func TestWriteIfcfg_StaticByMAC(t *testing.T) {
 func TestWriteIfcfg_StaticByMAC_PicksRightEthIndex(t *testing.T) {
 	fs := newMockFS()
 	nc := profiles.NetworkConfig{
-		Method:      "static",
-		PrefixLen:   24,
-		Gateway:     "192.168.10.1",
+		Method:    "static",
+		PrefixLen: 24,
+		Gateway:   "192.168.10.1",
 		// Picks the SECOND NIC.
 		NICSelector: "by-mac:24:6e:96:4f:f8:f1",
 	}
@@ -1034,7 +925,7 @@ VERSION_ID="7"`
 	deps := Deps{Exec: newMockExec(), FS: fs, WorkDir: "/tmp/test-install"}
 	spec := jobs.InstallSpec{
 		JobID: "job-centos7",
-		Profile: profiles.Profile{
+		Profile: profiles.Profile{OSFamily: "rhel7",
 			HostnameTemplate: "centos7-{uuid8}",
 			RootPasswordHash: "$6$h$" + strings.Repeat("b", 86),
 			Network: profiles.NetworkConfig{
@@ -1094,7 +985,7 @@ VERSION_ID="9.3"`
 	deps := Deps{Exec: newMockExec(), FS: fs, WorkDir: "/tmp/test-install"}
 	spec := jobs.InstallSpec{
 		JobID: "job-rocky9",
-		Profile: profiles.Profile{
+		Profile: profiles.Profile{OSFamily: "rhel",
 			HostnameTemplate: "rocky-{uuid8}",
 			RootPasswordHash: "$6$h$" + strings.Repeat("c", 86),
 			Network:          profiles.NetworkConfig{Method: "dhcp", NICSelector: "auto"},
@@ -1151,7 +1042,7 @@ VERSION_ID="7"`
 	deps := Deps{Exec: newMockExec(), FS: fs, WorkDir: "/tmp/test-install"}
 	spec := jobs.InstallSpec{
 		JobID: "job-centos7",
-		Profile: profiles.Profile{
+		Profile: profiles.Profile{OSFamily: "rhel7",
 			HostnameTemplate: "centos7-{uuid8}",
 			RootPasswordHash: "$6$h$" + strings.Repeat("c", 86),
 			Network:          profiles.NetworkConfig{Method: "dhcp", NICSelector: "auto"},
@@ -1186,7 +1077,7 @@ VERSION_ID="22.04"`
 	deps := Deps{Exec: newMockExec(), FS: fs, WorkDir: "/tmp/test-install"}
 	spec := jobs.InstallSpec{
 		JobID: "job-ubuntu",
-		Profile: profiles.Profile{
+		Profile: profiles.Profile{OSFamily: "ubuntu",
 			HostnameTemplate: "ubuntu-{uuid8}",
 			RootPasswordHash: "$6$h$" + strings.Repeat("c", 86),
 			Network:          profiles.NetworkConfig{Method: "dhcp", NICSelector: "auto"},
@@ -1229,7 +1120,7 @@ VERSION_ID="7"`
 	}
 	spec := jobs.InstallSpec{
 		JobID: "job-centos7-bond",
-		Profile: profiles.Profile{
+		Profile: profiles.Profile{OSFamily: "rhel7",
 			HostnameTemplate: "centos7-{uuid8}",
 			RootPasswordHash: "$6$h$" + strings.Repeat("b", 86),
 			Network: profiles.NetworkConfig{
@@ -1317,40 +1208,6 @@ VERSION_ID="7"`
 
 // --- openEuler seed tests ---------------------------------------------------
 
-// isOpenEulerRoot must match both ID="openEuler" (capital E) and
-// ID="openeuler" (all lowercase).
-func TestIsOpenEulerRoot_CaseInsensitive(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		osRel string
-		want  bool
-	}{
-		{"capital_E", `ID="openEuler"` + "\n", true},
-		{"lowercase", `ID="openeuler"` + "\n", true},
-		{"not_openeuler", `ID="rocky"` + "\n", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fs := newMockFS()
-			fs.files["/mnt/root/etc/os-release"] = []byte(tc.osRel)
-			deps := Deps{FS: fs}
-			got := isOpenEulerRoot(deps, "/mnt/root")
-			if got != tc.want {
-				t.Errorf("isOpenEulerRoot = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-// isRHELFamilyRoot must match ID="openEuler" (capital E).
-func TestIsRHELFamilyRoot_OpenEuler(t *testing.T) {
-	fs := newMockFS()
-	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="openEuler"` + "\n" + `VERSION_ID="24.03"` + "\n")
-	deps := Deps{FS: fs}
-	if !isRHELFamilyRoot(deps, "/mnt/root") {
-		t.Fatal("isRHELFamilyRoot should return true for ID=openEuler")
-	}
-}
-
 // When cloud-init is absent from the target rootfs, BuildSeed must write
 // hostname, password, sshd config, and network config directly.
 func TestBuildSeed_NoCloudInit_WritesDirectConfig(t *testing.T) {
@@ -1366,7 +1223,7 @@ func TestBuildSeed_NoCloudInit_WritesDirectConfig(t *testing.T) {
 	}
 
 	spec := jobs.InstallSpec{
-		Profile: profiles.Profile{
+		Profile: profiles.Profile{OSFamily: "openeuler",
 			HostnameTemplate: "node-{uuid8}",
 			RootPasswordHash: "$6$newhash",
 			Network: profiles.NetworkConfig{
@@ -1443,10 +1300,10 @@ func TestBuildSeed_WithCloudInit_NoDirectWrite(t *testing.T) {
 	deps := Deps{Exec: exec, FS: fs}
 
 	spec := jobs.InstallSpec{
-		Profile: profiles.Profile{
+		Profile: profiles.Profile{OSFamily: "ubuntu",
 			HostnameTemplate: "node-{uuid8}",
 			RootPasswordHash: "$6$newhash",
-			Network: profiles.NetworkConfig{Method: "dhcp"},
+			Network:          profiles.NetworkConfig{Method: "dhcp"},
 		},
 		Binding: bindings.Binding{MachineUUID: "abcdef01-0000-0000-0000-000000000000"},
 	}
@@ -1482,7 +1339,7 @@ func TestBuildSeed_NoCloudInit_Bond_NMKeyfiles(t *testing.T) {
 	}
 
 	spec := jobs.InstallSpec{
-		Profile: profiles.Profile{
+		Profile: profiles.Profile{OSFamily: "openeuler",
 			HostnameTemplate: "node-{uuid8}",
 			RootPasswordHash: "$6$hash",
 			Network: profiles.NetworkConfig{

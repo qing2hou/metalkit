@@ -34,4 +34,20 @@ CREATE TABLE IF NOT EXISTS heartbeats (
     ts   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_hb_uuid_ts ON heartbeats(uuid, ts DESC);
+
+-- bmc_credentials is owned by the bmc package, but ListMachines JOINs it
+-- to surface "managed" status on the machine list. CREATE IF NOT EXISTS
+-- keeps this idempotent alongside bmc.NewStore's own schema migration.
+CREATE TABLE IF NOT EXISTS bmc_credentials (
+    machine_uuid    TEXT PRIMARY KEY NOT NULL,
+    ip              TEXT NOT NULL,
+    port            INTEGER NOT NULL DEFAULT 623,
+    username        TEXT NOT NULL,
+    password_ct     BLOB NOT NULL,
+    ipmi_interface  TEXT NOT NULL DEFAULT 'lanplus',
+    name            TEXT,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    updated_by      TEXT NOT NULL
+);
 `
