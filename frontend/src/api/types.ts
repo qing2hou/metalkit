@@ -269,11 +269,29 @@ export interface JobLog {
 // ---------- settings ----------
 
 export interface DhcpSettings {
-  mode?: 'proxy' | 'full'
-  interface?: string
-  listen?: string
-  // full 模式相关字段以宽松类型承接，具体键名以后端返回为准
-  [key: string]: unknown
+  mode: 'proxy' | 'full'
+  /** DHCP 服务绑定的网卡；变更需重启 controller 生效 */
+  interface: string
+  /** full 模式地址池（proxy 模式忽略） */
+  start: string
+  end: string
+  netmask: string
+  gateway: string
+  dns: string[]
+  lease_hours: number
+  exclude: string[]
+}
+
+export interface DhcpSettingsResponse extends DhcpSettings {
+  restart_required: boolean
+}
+
+export interface InterfaceInfo {
+  name: string
+  ipv4?: string
+  up: boolean
+  is_current: boolean
+  hardware_addr?: string
 }
 
 // ---------- audit ----------

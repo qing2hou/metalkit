@@ -218,7 +218,7 @@
 | `/ui/bmc` | `BmcView` | BMC 凭据 + 电源操作(危险操作需输入「确认」)+ PXE 纳管 + CSV 导入 |
 | `/ui/jobs` | `JobsView` | job 列表:状态过滤、取消、一键清除已完成、5s 轮询 |
 | `/ui/jobs/{id}` | `JobDetailView` | 单 job 详情:阶段、增量日志 tail(since_id)、导出、自适应轮询 |
-| `/ui/settings` | `SettingsView` | DHCP 设置(proxy/full) |
+| `/ui/settings` | `SettingsView` | DHCP 设置：模式(proxy/full)、绑定网卡(下拉选择,含 IP/状态,变更需重启)、地址池(起止/掩码/网关)、DNS、租期、排除 IP;网段类改动热重载生效 |
 | `/ui/login` | `LoginView` | 登录页(submit → `/api/v1/auth/login` → cookie,支持 `?next=` 回跳) |
 
 前端构建:改 `frontend/` 后运行 `make frontend`(node 环境构建并提交产物到 `internal/webui/assets/`);只有 Go 环境的机器可直接 `make build`。dev 模式 `cd frontend && npm run dev`(API 代理到 127.0.0.1:8080)。

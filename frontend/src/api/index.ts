@@ -7,6 +7,8 @@ import type {
   BmcCredential,
   BmcTestResult,
   DhcpSettings,
+  DhcpSettingsResponse,
+  InterfaceInfo,
   Image,
   Job,
   JobLog,
@@ -130,8 +132,9 @@ export const jobsApi = {
 // ---------- settings ----------
 
 export const settingsApi = {
-  getDhcp: () => apiGet<DhcpSettings>('/settings/dhcp'),
-  putDhcp: (settings: DhcpSettings) => apiSend<DhcpSettings>('PUT', '/settings/dhcp', settings),
+  getDhcp: () => apiGet<DhcpSettingsResponse>('/settings/dhcp'),
+  putDhcp: (settings: DhcpSettings) => apiSend<DhcpSettingsResponse>('PUT', '/settings/dhcp', settings),
+  interfaces: () => apiGet<InterfaceInfo[]>('/settings/interfaces'),
 }
 
 // ---------- audit ----------

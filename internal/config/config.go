@@ -71,6 +71,12 @@ type Config struct {
 	// "metalkit" — change in config.yaml per-environment.
 	DefaultRootPassword string `yaml:"defaultRootPassword"`
 
+	// ServerIPPinned records whether serverIP came from config.yaml (true)
+	// or was auto-detected from the interface (false). Not settable via
+	// YAML; overlays use it to decide whether switching the DHCP interface
+	// may re-derive serverIP.
+	ServerIPPinned bool `yaml:"-"`
+
 	// HTTPS serves the HTTP port over TLS. Users holds the operator
 	// accounts for the Web UI (replaces the single adminUser/adminPass pair
 	// when non-empty; the legacy pair remains as fallback for back-compat).
@@ -147,14 +153,19 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("interface: required")
 	}
 
-	// Auto-detect serverIP from interface if not specified
+	// Auto-detect serverIP from interface if not specified. Whether it was
+	// pinned is recorded so later overlays (settings store) know whether
+	// they may re-derive it when the operator switches the DHCP NIC.
 	if c.ServerIP == "" {
 		detectedIP, err := detectInterfaceIP(c.Interface)
 		if err != nil {
 			return nil, fmt.Errorf("auto-detect serverIP from %s: %w", c.Interface, err)
 		}
 		c.ServerIP = detectedIP
+		c.ServerIPPinned = false
 		slog.Info("auto-detected serverIP", "interface", c.Interface, "ip", c.ServerIP)
+	} else {
+		c.ServerIPPinned = true
 	}
 
 	addr, err := netip.ParseAddr(c.ServerIP)
@@ -337,6 +348,13 @@ func (c *Config) ResolveDHCPPool() error {
 	}
 	p.Exclude = merged
 	return nil
+}
+
+// DetectInterfaceIPv4 returns the first usable IPv4 on the named interface
+// (same selection rules as the serverIP auto-detection). Exported for the
+// settings overlay, which re-derives serverIP when the DHCP NIC changes.
+func DetectInterfaceIPv4(ifaceName string) (string, error) {
+	return detectInterfaceIP(ifaceName)
 }
 
 // detectInterfaceIP returns the first non-loopback IPv4 address on the

@@ -26,12 +26,19 @@ const (
 	KeyDHCPDNS        = "dhcp.pool.dns"         // comma-separated
 	KeyDHCPLeaseHours = "dhcp.pool.lease_hours" // integer string
 	KeyDHCPExclude    = "dhcp.pool.exclude"     // comma-separated
+
+	// KeyDHCPInterface selects the NIC the DHCP server binds to. Unlike the
+	// pool keys, this one CANNOT hot-reload: the insomniacslk/dhcp server
+	// binds the interface at Start time, so a change here takes effect on
+	// the next controller restart (the UI surfaces restart_required).
+	KeyDHCPInterface = "dhcp.interface"
 )
 
 // DHCPSettings is the GET response and the PUT request shape.
 // Sent to the browser; the UI form maps 1:1 to these fields.
 type DHCPSettings struct {
 	Mode       string   `json:"mode"`
+	Interface  string   `json:"interface"` // NIC the DHCP server binds; restart to apply
 	Start      string   `json:"start"`
 	End        string   `json:"end"`
 	Netmask    string   `json:"netmask"`
@@ -86,6 +93,72 @@ func (a *API) WithReloader(r DHCPReloader) *API {
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/settings/dhcp", a.getDHCP)
 	mux.HandleFunc("PUT /api/v1/settings/dhcp", a.putDHCP)
+	mux.HandleFunc("GET /api/v1/settings/interfaces", a.listInterfaces)
+}
+
+// InterfaceInfo describes one bindable NIC for the UI's interface picker.
+type InterfaceInfo struct {
+	Name         string `json:"name"`
+	IPv4         string `json:"ipv4,omitempty"`
+	Up           bool   `json:"up"`
+	IsCurrent    bool   `json:"is_current"` // matches the effective dhcp interface
+	HardwareAddr string `json:"hardware_addr,omitempty"`
+}
+
+// listInterfaces enumerates the host NICs the DHCP server could bind to.
+// Loopback and interfaces without an IPv4 address are skipped except the
+// loopback itself is kept visible (masks nothing, but some lab setups use
+// it); docker/veth bridges are legitimate targets in lab networks so they
+// stay listed.
+func (a *API) listInterfaces(w http.ResponseWriter, r *http.Request) {
+	current, _, err := a.effectiveInterface(r.Context())
+	if err != nil {
+		a.logger.Error("settings list interfaces", "err", err)
+		writeError(w, http.StatusInternalServerError, "fetch failed")
+		return
+	}
+
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		a.logger.Error("settings list interfaces", "err", err)
+		writeError(w, http.StatusInternalServerError, "fetch failed")
+		return
+	}
+	out := []InterfaceInfo{}
+	for _, ifc := range ifaces {
+		ipv4 := ""
+		addrs, _ := ifc.Addrs()
+		for _, ad := range addrs {
+			ipn, ok := ad.(*net.IPNet)
+			if !ok || ipn.IP.To4() == nil || ipn.IP.IsLoopback() {
+				continue
+			}
+			ones, _ := ipn.Mask.Size()
+			if ones >= 31 {
+				continue
+			}
+			ipv4 = ipn.IP.String()
+			break
+		}
+		out = append(out, InterfaceInfo{
+			Name:         ifc.Name,
+			IPv4:         ipv4,
+			Up:           ifc.Flags&net.FlagUp != 0,
+			IsCurrent:    ifc.Name == current,
+			HardwareAddr: ifc.HardwareAddr.String(),
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// effectiveInterface returns the NIC the DHCP server is (or after restart,
+// would be) bound to: settings override → config.yaml value.
+func (a *API) effectiveInterface(ctx context.Context) (name string, fromStore bool, err error) {
+	name = a.bootCfg.Interface
+	if v, e := a.store.Get(ctx, KeyDHCPInterface); e == nil && v != "" {
+		return v, true, nil
+	}
+	return name, false, nil
 }
 
 func (a *API) getDHCP(w http.ResponseWriter, r *http.Request) {
@@ -108,6 +181,26 @@ func (a *API) putDHCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Interface may be changed alongside the pool. The DHCP server binds the
+	// NIC at Start; a change is accepted but only applied on restart.
+	// Empty input (or an empty boot config — tests construct partial cfgs)
+	// means "keep whatever is in effect"; only a NON-empty value is checked
+	// against the host so typos fail fast at save time.
+	if strings.TrimSpace(in.Interface) == "" {
+		in.Interface = a.bootCfg.Interface
+	}
+	if in.Interface != "" {
+		ifc, err := net.InterfaceByName(in.Interface)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("interface %q: not found on this host", in.Interface))
+			return
+		}
+		if ifc.Flags&net.FlagUp == 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("interface %q is down", in.Interface))
+			return
+		}
+	}
+
 	if err := validateDHCPSettings(&in, a.bootCfg); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -122,6 +215,11 @@ func (a *API) putDHCP(w http.ResponseWriter, r *http.Request) {
 		KeyDHCPDNS:        strings.Join(in.DNS, ","),
 		KeyDHCPLeaseHours: strconv.Itoa(in.LeaseHours),
 		KeyDHCPExclude:    strings.Join(in.Exclude, ","),
+	}
+	// Only store a non-empty interface: an empty value means "keep whatever
+	// is in effect", and storing "" would orphan the column.
+	if in.Interface != "" {
+		kv[KeyDHCPInterface] = in.Interface
 	}
 	if err := a.store.SetMany(r.Context(), kv, basicAuthUser(r)); err != nil {
 		a.logger.Error("settings put dhcp", "err", err)
@@ -144,6 +242,12 @@ func (a *API) putDHCP(w http.ResponseWriter, r *http.Request) {
 			restartRequired = false
 		}
 	}
+	// Interface changes are never hot-reloadable: the DHCP server binds the
+	// NIC at Start. Force the banner so the operator restarts to apply.
+	// (Empty both sides = unchanged, e.g. legacy PUTs without the field.)
+	if in.Interface != "" && in.Interface != a.bootCfg.Interface {
+		restartRequired = true
+	}
 
 	writeJSON(w, http.StatusOK, DHCPSettingsResponse{
 		DHCPSettings:    in,
@@ -156,7 +260,7 @@ func (a *API) putDHCP(w http.ResponseWriter, r *http.Request) {
 // applied at startup in main.go, so the UI shows exactly what the next
 // controller restart would use.
 func (a *API) effectiveDHCP(ctx context.Context) (DHCPSettings, error) {
-	out := DHCPSettings{Mode: a.bootCfg.DHCPMode}
+	out := DHCPSettings{Mode: a.bootCfg.DHCPMode, Interface: a.bootCfg.Interface}
 	if a.bootCfg.DHCPPool != nil {
 		out.Start = a.bootCfg.DHCPPool.Start
 		out.End = a.bootCfg.DHCPPool.End
@@ -169,13 +273,16 @@ func (a *API) effectiveDHCP(ctx context.Context) (DHCPSettings, error) {
 
 	overrides, err := a.store.GetMany(ctx, []string{
 		KeyDHCPMode, KeyDHCPStart, KeyDHCPEnd, KeyDHCPNetmask, KeyDHCPGateway,
-		KeyDHCPDNS, KeyDHCPLeaseHours, KeyDHCPExclude,
+		KeyDHCPDNS, KeyDHCPLeaseHours, KeyDHCPExclude, KeyDHCPInterface,
 	})
 	if err != nil {
 		return out, err
 	}
 	if v, ok := overrides[KeyDHCPMode]; ok {
 		out.Mode = v
+	}
+	if v, ok := overrides[KeyDHCPInterface]; ok && v != "" {
+		out.Interface = v
 	}
 	if v, ok := overrides[KeyDHCPStart]; ok {
 		out.Start = v
@@ -218,7 +325,7 @@ func ApplyOverridesToConfig(ctx context.Context, store *Store, cfg *config.Confi
 	}
 	overrides, err := store.GetMany(ctx, []string{
 		KeyDHCPMode, KeyDHCPStart, KeyDHCPEnd, KeyDHCPNetmask, KeyDHCPGateway,
-		KeyDHCPDNS, KeyDHCPLeaseHours, KeyDHCPExclude,
+		KeyDHCPDNS, KeyDHCPLeaseHours, KeyDHCPExclude, KeyDHCPInterface,
 	})
 	if err != nil {
 		return err
@@ -232,6 +339,26 @@ func ApplyOverridesToConfig(ctx context.Context, store *Store, cfg *config.Confi
 			cfg.DHCPMode = v
 		default:
 			logger.Warn("settings override: unknown dhcp.mode, ignored", "value", v)
+		}
+	}
+	// Interface override: the DHCP server (and the auto-derived serverIP,
+	// when config.yaml didn't pin one) follows the operator's NIC choice.
+	if v, ok := overrides[KeyDHCPInterface]; ok && v != "" && v != cfg.Interface {
+		if _, err := net.InterfaceByName(v); err != nil {
+			logger.Warn("settings override: dhcp.interface not found, ignored", "value", v)
+		} else {
+			cfg.Interface = v
+			// serverIP pinned in config stays authoritative; otherwise the
+			// main loader already auto-detected it from the OLD interface —
+			// re-derive from the new one so iPXE URLs stay correct.
+			if !cfg.ServerIPPinned {
+				if ip, err := config.DetectInterfaceIPv4(v); err == nil {
+					cfg.ServerIP = ip
+				} else {
+					logger.Warn("settings override: no IPv4 on dhcp.interface; keeping old serverIP", "iface", v, "err", err)
+				}
+			}
+			logger.Info("settings override: dhcp.interface applied", "iface", v)
 		}
 	}
 	// Pool overrides are only meaningful in full mode.

@@ -3,8 +3,10 @@ package settings
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -218,5 +220,86 @@ func TestApplyOverridesToConfig_OverlaysPool(t *testing.T) {
 	}
 	if cfg.DHCPPool.Start != "10.0.0.50" || cfg.DHCPPool.End != "10.0.0.150" || cfg.DHCPPool.LeaseHours != 48 {
 		t.Errorf("pool overlay failed: %+v", cfg.DHCPPool)
+	}
+}
+
+func TestAPI_InterfaceFieldLifecycle(t *testing.T) {
+	s := newTestStore(t)
+	// lo always exists on every test host; use it as the "other" NIC.
+	lo, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Skip("no loopback interface")
+	}
+	cfg := &config.Config{
+		ServerIP:  "192.168.10.120",
+		Interface: "not-the-real-one", // differs from what we PUT
+		DHCPMode:  config.DHCPModeProxy,
+	}
+	api := NewAPI(s, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// PUT switching the NIC → saved, and restart_required even though the
+	// reloader (nil here → "failed" path) is irrelevant: interface changes
+	// can never hot-apply.
+	body := fmt.Sprintf(`{"mode":"proxy","interface":%q}`, lo.Name)
+	req, _ := http.NewRequest("PUT", srv.URL+"/api/v1/settings/dhcp", strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, raw)
+	}
+	var got DHCPSettingsResponse
+	_ = json.NewDecoder(resp.Body).Decode(&got)
+	if got.Interface != lo.Name {
+		t.Errorf("interface echo = %q, want %q", got.Interface, lo.Name)
+	}
+	if !got.RestartRequired {
+		t.Error("restart_required = false, want true (NIC change needs restart)")
+	}
+
+	// GET reflects the override.
+	resp2, _ := http.Get(srv.URL + "/api/v1/settings/dhcp")
+	defer resp2.Body.Close()
+	var got2 DHCPSettings
+	_ = json.NewDecoder(resp2.Body).Decode(&got2)
+	if got2.Interface != lo.Name {
+		t.Errorf("GET interface = %q, want %q", got2.Interface, lo.Name)
+	}
+
+	// Interfaces list marks the current one.
+	resp3, _ := http.Get(srv.URL + "/api/v1/settings/interfaces")
+	defer resp3.Body.Close()
+	var ifaces []InterfaceInfo
+	_ = json.NewDecoder(resp3.Body).Decode(&ifaces)
+	found := false
+	for _, i := range ifaces {
+		if i.Name == lo.Name {
+			found = true
+			if !i.IsCurrent {
+				t.Errorf("%s should be marked current", lo.Name)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("loopback missing from interfaces list (%d entries)", len(ifaces))
+	}
+
+	// PUT naming a nonexistent NIC → 400 at save time.
+	req, _ = http.NewRequest("PUT", srv.URL+"/api/v1/settings/dhcp",
+		strings.NewReader(`{"mode":"proxy","interface":"definitely-not-a-nic-xyz"}`))
+	resp4, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT bad nic: %v", err)
+	}
+	defer resp4.Body.Close()
+	if resp4.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad nic status = %d, want 400", resp4.StatusCode)
 	}
 }
