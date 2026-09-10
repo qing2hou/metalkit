@@ -116,8 +116,9 @@ type OperatorUser struct {
 // Server serves the iPXE chain script and boot artifacts.
 type Server struct {
 	cfg      Config
-	httpAddr string // ":PORT" form used inside iPXE URLs
-	srv      *http.Server
+	httpAddr string       // ":PORT" form used inside iPXE URLs
+	srv      *http.Server // TLS listener when HTTPS is configured, else the only listener
+	httpSrv  *http.Server // plain-HTTP listener (machine channel) when HTTPS is configured
 	audit    *audit.Store
 }
 
@@ -185,32 +186,86 @@ func (s *Server) Start(ctx context.Context) error {
 		// WriteTimeout intentionally 0: boot file downloads can be slow.
 	}
 
-	useTLS := s.cfg.HTTPS != nil
-	if useTLS {
+	// --- Dual listeners when HTTPS is configured -------------------------------
+	// (see config.HTTPSConfig for rationale): TLS listener serves everything;
+	// the plain-HTTP listener keeps only the machine channel (PXE/iPXE and
+	// live-boot agents have no trust store) and redirects humans to TLS.
+	if s.cfg.HTTPS != nil {
 		h := *s.cfg.HTTPS
 		cert, err := ensureTLSMaterial(h, s.cfg.ServerIP, h.AutoDNSName, s.cfg.Logger)
 		if err != nil {
 			return err
 		}
-		s.srv.TLSConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
+
+		// TLS server: full handler chain.
+		s.srv = &http.Server{
+			Addr:              h.HTTPSAddr,
+			Handler:           s.logMiddleware(sessionOrBasicAuth(s.cfg.AdminUser, s.cfg.AdminPass, s.cfg.Users, s.cfg.Sessions, s.cfg.Logger, s.auditMiddleware(mux))),
+			ReadHeaderTimeout: 10 * time.Second,
+			TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 		}
+
+		// Plain HTTP server: machine channel verbatim, humans redirected.
+		httpHandler := machineChannelOrRedirect(h.HTTPSAddr,
+			s.logMiddleware(sessionOrBasicAuth(s.cfg.AdminUser, s.cfg.AdminPass, s.cfg.Users, s.cfg.Sessions, s.cfg.Logger, s.auditMiddleware(s.routes()))))
+		s.httpSrv = &http.Server{
+			Addr:              s.cfg.ListenAddr,
+			Handler:           httpHandler,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+
+		errCh := make(chan error, 2)
+		s.cfg.Logger.Info("httpd listening", "addr", s.cfg.ListenAddr, "https_addr", h.HTTPSAddr, "server_ip", s.cfg.ServerIP, "boot_dir", s.cfg.BootDir, "tls", true)
+		if s.cfg.AdminPass == "" && len(s.cfg.Users) == 0 {
+			s.cfg.Logger.Warn("httpd auth disabled: no adminPass and no users — UI and /api/v1/* are open to the network")
+		}
+		run := func(srv *http.Server) {
+			var err error
+			if srv == s.srv {
+				err = srv.ListenAndServeTLS("", "") // certs come from TLSConfig
+			} else {
+				err = srv.ListenAndServe()
+			}
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+				return
+			}
+			errCh <- nil
+		}
+		go run(s.srv)
+		go run(s.httpSrv)
+
+		select {
+		case <-ctx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			for _, srv := range []*http.Server{s.srv, s.httpSrv} {
+				if err := srv.Shutdown(shutdownCtx); err != nil {
+					s.cfg.Logger.Warn("httpd shutdown error", "err", err)
+				}
+			}
+			<-errCh
+			return nil
+		case err := <-errCh:
+			return err
+		}
+	}
+
+	// --- Plain HTTP only (back-compat) -----------------------------------------
+	s.srv = &http.Server{
+		Addr:              s.cfg.ListenAddr,
+		Handler:           s.logMiddleware(sessionOrBasicAuth(s.cfg.AdminUser, s.cfg.AdminPass, s.cfg.Users, s.cfg.Sessions, s.cfg.Logger, s.auditMiddleware(mux))),
+		ReadHeaderTimeout: 10 * time.Second,
+		// WriteTimeout intentionally 0: boot file downloads can be slow.
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		s.cfg.Logger.Info("httpd listening", "addr", s.cfg.ListenAddr, "server_ip", s.cfg.ServerIP, "boot_dir", s.cfg.BootDir, "tls", useTLS)
+		s.cfg.Logger.Info("httpd listening", "addr", s.cfg.ListenAddr, "server_ip", s.cfg.ServerIP, "boot_dir", s.cfg.BootDir)
 		if s.cfg.AdminPass == "" && len(s.cfg.Users) == 0 {
 			s.cfg.Logger.Warn("httpd auth disabled: no adminPass and no users — UI and /api/v1/* are open to the network")
 		}
-		var err error
-		if useTLS {
-			// Certificates come from TLSConfig; the file args stay empty.
-			err = s.srv.ListenAndServeTLS("", "")
-		} else {
-			err = s.srv.ListenAndServe()
-		}
+		err := s.srv.ListenAndServe()
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return

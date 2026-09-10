@@ -27,6 +27,10 @@ import (
 //     into StateDir, SANs cover ServerIP + localhost + all interface IPs
 //     (plus AutoDNSName when set).
 type HTTPSConfig struct {
+	// HTTPSAddr is the TLS listener address (e.g. ":8443"). The config
+	// loader fills the default; see config.HTTPSConfig for the dual-
+	// listener model.
+	HTTPSAddr   string
 	CertFile    string
 	KeyFile     string
 	StateDir    string

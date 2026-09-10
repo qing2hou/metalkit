@@ -227,7 +227,7 @@
 
 | 能力 | 说明 |
 |---|---|
-| HTTPS | `https:` 配置块;自签证书自动生成(含 serverIP/localhost SANs)或静态证书文件;cookie 自动 Secure |
+| HTTPS | `https:` 双监听:`httpsAddr`(默认 :8443)承载 TLS 全量;原 `httpAddr` 仅保留机器通道(/boot、/healthz、report/heartbeat/agent),人用路径 308 重定向到 TLS(保留方法与 body)。自签证书自动生成或静态证书文件;cookie 自动 Secure |
 | 多用户 | `users:` 配置命名账号(sha512crypt hash),登录/Basic-Auth 双轨;操作者身份进审计 |
 | 审计 | 变更类 API 全量记录(方法/路径/状态码/操作者/IP);装机密码查看单独记录;`/ui/audit` 页可按操作者/动作过滤 |
 | 镜像上传 | 8MiB 分块+断点续传(会话幂等续传)+逐块 SHA-256+扩展名预检 |

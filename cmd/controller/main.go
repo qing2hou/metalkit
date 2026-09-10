@@ -543,6 +543,7 @@ func run() int {
 	var httpsCfg *httpd.HTTPSConfig
 	if cfg.HTTPS != nil {
 		httpsCfg = &httpd.HTTPSConfig{
+			HTTPSAddr:   cfg.HTTPS.HTTPSAddr,
 			CertFile:    cfg.HTTPS.CertFile,
 			KeyFile:     cfg.HTTPS.KeyFile,
 			StateDir:    cfg.HTTPS.StateDir,

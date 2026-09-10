@@ -35,16 +35,26 @@ adminPass: ""
 #     passHash: "$6$rounds=...$..."
 #     role: operator
 
-# Serve the HTTP listener over TLS. Two modes:
-#   auto (default when the block is present): a self-signed certificate is
-#     generated on first boot into <stateDir> (default: alongside the DB),
-#     with SANs for serverIP + localhost + all interface IPs (+ autoDNSName).
-#     Operators either accept the browser warning once or distribute the cert.
+# HTTPS dual-listener mode. When this block is present:
+#   - httpsAddr (default ":8443") serves EVERYTHING over TLS.
+#   - the original httpAddr keeps serving the MACHINE channel only
+#     (/boot/*, /healthz, /api/v1/report, /api/v1/heartbeat/*,
+#     /api/v1/agent/*) — PXE/iPXE and live-boot agents have no trust store
+#     and cannot do TLS, so these must stay on plain HTTP.
+#   - every human-facing path on httpAddr (the UI, the operator API)
+#     responds 308 → the HTTPS listener, preserving method and body.
+#
+# Certificate modes:
+#   auto (default): a self-signed certificate is generated on first boot
+#     into <stateDir> (default: alongside the DB), with SANs for serverIP +
+#     localhost + all interface IPs (+ autoDNSName). Operators either accept
+#     the browser warning once or distribute the cert.
 #   static: give certFile + keyFile (PEM) to use your own certificate
 #     (e.g. signed by the org CA). Restart picks up rotated files.
 # Note: the login session cookie is automatically marked Secure when TLS
 # is enabled.
 # https:
+#   httpsAddr: ":8443"
 #   certFile: /etc/metalkit/tls/controller.crt
 #   keyFile:  /etc/metalkit/tls/controller.key
 #   # stateDir: /var/lib/metalkit/tls   # auto-cert storage (auto mode only)

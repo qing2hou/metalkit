@@ -78,17 +78,29 @@ type Config struct {
 	Users []User       `yaml:"users"`
 }
 
-// HTTPSConfig enables TLS on the HTTP listener. Two modes:
+// HTTPSConfig enables TLS alongside HTTP. Two certificate modes:
 //
 //   - Static: certFile + keyFile point at operator-provided PEM files.
 //     Both must be set together.
 //   - Auto: certFile/keyFile empty → a self-signed certificate is generated
-//     on first boot into HTTPSStateDir (default under the data dir), with
-//     SANs for ServerIP, localhost and the interface IP. Suitable for
-//     management-network deployments where the controller is the TLS root
-//     of its own browsing population (operators accept the browser warning
-//     or distribute the cert).
+//     on first boot into stateDir (default under the data dir), with SANs for
+//     ServerIP, localhost and the interface IP. Suitable for management-
+//     network deployments where the controller is the TLS root of its own
+//     browsing population (operators accept the browser warning or
+//     distribute the cert).
+//
+// Dual-listener model (PXE machines cannot do TLS — no trust store, and the
+// shipped iPXE binaries chain over plain HTTP):
+//
+//   - httpsAddr (default ":8443") speaks TLS and serves EVERYTHING.
+//   - The original httpAddr keeps speaking HTTP but serves only the machine
+//     channel (/boot/*, /healthz, /api/v1/report, /api/v1/heartbeat/*,
+//     /api/v1/agent/*); every human-facing path (/ui, the operator API)
+//     is 308-redirected to the HTTPS listener. iPXE templates and the
+//     agent's metalkit.url keep pointing at the HTTP listener untouched.
 type HTTPSConfig struct {
+	// HTTPSAddr is the TLS listener. Defaults to ":8443".
+	HTTPSAddr   string `yaml:"httpsAddr"`
 	CertFile    string `yaml:"certFile"`
 	KeyFile     string `yaml:"keyFile"`
 	StateDir    string `yaml:"stateDir"`    // where the auto cert/key live; defaults to <dbdir>/tls
@@ -176,6 +188,9 @@ func Load(path string) (*Config, error) {
 		h := c.HTTPS
 		if (h.CertFile == "") != (h.KeyFile == "") {
 			return nil, fmt.Errorf("https: certFile and keyFile must be set together")
+		}
+		if h.HTTPSAddr == "" {
+			h.HTTPSAddr = ":8443"
 		}
 		if h.StateDir == "" {
 			h.StateDir = filepath.Join(filepath.Dir(c.DBPath), "tls")
