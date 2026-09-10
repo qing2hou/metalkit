@@ -277,7 +277,7 @@ func TestMaxInFlightUploads(t *testing.T) {
 	for i := 0; i < MaxUploadSessions; i++ {
 		_, err := s.CreateUpload(ctx, CreateUploadInput{
 			Name: "x", TotalSize: 10,
-			ExpectedSHA256: strSHA(string(rune('a' + i%6)) + string(rune('0' + i/6))),
+			ExpectedSHA256: strSHA(string(rune('a'+i%6)) + string(rune('0'+i/6))),
 			UploadedBy:     "admin",
 		})
 		if err != nil {

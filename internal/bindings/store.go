@@ -34,7 +34,11 @@ var (
 	ErrProfileUnknown = errors.New("bindings: profile_id not in catalog")
 	ErrSubnetUnknown  = errors.New("bindings: subnet_id not in catalog")
 	ErrFamilyMismatch = errors.New("bindings: image family incompatible with profile os_family")
-	ErrInUse          = errors.New("bindings: in use") // for RefCount* helpers
+	// ErrArchMismatch is returned when the image's target CPU architecture
+	// conflicts with the machine's reported CPU architecture. Machines that
+	// never reported a CPU arch (legacy data) skip the check.
+	ErrArchMismatch = errors.New("bindings: image arch incompatible with machine cpu arch")
+	ErrInUse        = errors.New("bindings: in use") // for RefCount* helpers
 )
 
 // Store reads and writes bindings rows. Shares the *sql.DB with the rest of
@@ -204,6 +208,13 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 		return nil, err
 	}
 	if err := familyCompatible(profileFam, imageFam); err != nil {
+		return nil, err
+	}
+	imageArch, err := s.fetchImageArch(ctx, imageID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.archCompatible(ctx, muuid, imageArch); err != nil {
 		return nil, err
 	}
 
@@ -795,6 +806,60 @@ func (s *Store) fetchImageFamily(ctx context.Context, id string) (string, error)
 		return "", fmt.Errorf("fetch image family: %w", err)
 	}
 	return strings.ToLower(strings.TrimSpace(fam.String)), nil
+}
+
+// fetchImageArch returns the image's target arch (lowercase; "" if unset —
+// legacy images uploaded before the arch column existed). ErrImageUnknown if
+// the row is missing.
+func (s *Store) fetchImageArch(ctx context.Context, id string) (string, error) {
+	var arch sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(arch,'') FROM images WHERE id = ?`, id).Scan(&arch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("%w: %s", ErrImageUnknown, id)
+	}
+	if err != nil {
+		return "", fmt.Errorf("fetch image arch: %w", err)
+	}
+	return strings.ToLower(strings.TrimSpace(arch.String)), nil
+}
+
+// archCompatible rejects bindings that would flash an image built for one
+// CPU architecture onto a machine reporting another. Either side may be
+// unknown (""): legacy images carry no arch, and machines that never
+// PXE-booted into the live agent have no report — in those cases the check
+// passes (soft until data exists on both ends).
+func (s *Store) archCompatible(ctx context.Context, muuid, imageArch string) error {
+	if imageArch == "" {
+		return nil // legacy image, no opinion
+	}
+	var machineArch sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+        SELECT json_extract(r.body, '$.cpu.arch')
+        FROM machines m
+        LEFT JOIN reports r ON r.id = m.latest_report
+        WHERE m.uuid = ?`, muuid).Scan(&machineArch)
+	if err != nil {
+		return fmt.Errorf("fetch machine arch: %w", err)
+	}
+	mArch := strings.ToLower(strings.TrimSpace(machineArch.String))
+	if mArch == "" {
+		return nil // machine never reported its arch — can't judge
+	}
+	// The report uses Go's runtime.GOARCH / uname -m vocabulary: amd64 or
+	// arm64 on our agent builds. Normalise the x86_64/aarch64 aliases just
+	// in case a future collector changes sources.
+	switch mArch {
+	case "x86_64", "amd64":
+		mArch = "amd64"
+	case "aarch64", "arm64":
+		mArch = "arm64"
+	}
+	if mArch != imageArch {
+		return fmt.Errorf("%w: image is %q, machine reports %q",
+			ErrArchMismatch, imageArch, mArch)
+	}
+	return nil
 }
 
 // familyCompatible returns nil when an image with imageFam can be installed

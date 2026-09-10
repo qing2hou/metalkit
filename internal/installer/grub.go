@@ -98,6 +98,7 @@ func InstallGRUB(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot,
 // in so the modules embedded in the core image match the on-disk
 // /boot/grub2/i386-pc.
 func installGRUBChrootRHEL(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot, devPath, espMount string) error {
+	arch := archFromSpec(spec)
 	bootID := detectRHELBootloaderID(deps, mntRoot)
 
 	if espMount != "" {
@@ -113,7 +114,7 @@ func installGRUBChrootRHEL(ctx context.Context, deps Deps, spec jobs.InstallSpec
 		// UEFI: try using the image's pre-baked, signed EFI tree first.
 		// If the image doesn't ship EFI files (some openEuler images),
 		// fall back to grub-install which creates them.
-		if err := registerEFIBootEntryRHEL(ctx, deps, mntRoot, devPath, bootID); err != nil {
+		if err := registerEFIBootEntryRHEL(ctx, deps, mntRoot, devPath, bootID, arch.EFIType, arch.Loaders); err != nil {
 			if deps.Logger != nil {
 				deps.Logger.Warn("EFI boot entry registration failed, falling back to grub2-install", "err", err)
 			}
@@ -122,7 +123,7 @@ func installGRUBChrootRHEL(ctx context.Context, deps Deps, spec jobs.InstallSpec
 			// have a pre-baked EFI tree.
 			args := []string{
 				mntRoot, "grub2-install",
-				"--target=x86_64-efi",
+				"--target=" + arch.EFIType,
 				"--efi-directory=" + chrootEfiDir,
 				"--boot-directory=/boot",
 				"--bootloader-id=" + bootID,
@@ -144,8 +145,13 @@ func installGRUBChrootRHEL(ctx context.Context, deps Deps, spec jobs.InstallSpec
 		// reach a file buried under efi/EFI/<bootID>/ — FAT32 is
 		// case-insensitive but the path *levels* must still match. Copy the
 		// bootloader files up one level so the firmware finds them.
-		normalizeESPLayout(ctx, deps, espMount, bootID)
+		normalizeESPLayout(ctx, deps, espMount, bootID, arch.Loaders, arch.FallbackFile)
 	} else {
+		if arch.IsArm {
+			// arm64 servers boot UEFI-only; i386-pc (BIOS) has no arm64
+			// equivalent. Refuse rather than half-install a bootloader.
+			return fmt.Errorf("install: BIOS boot not supported on arm64 (image %s/this target is MBR/BIOS); use a UEFI arm64 image", spec.ImageArch)
+		}
 		// BIOS: chroot grub2-install is safe and required (the host's grub
 		// modules don't match).
 		args := []string{
@@ -268,7 +274,7 @@ func installGRUBChrootRHEL(ctx context.Context, deps Deps, spec jobs.InstallSpec
 	// without manually editing the GRUB entry. Replace with
 	// `console=tty0 nomodeset` so logs appear on the local console and
 	// graphics mode doesn't mask them. See qa.md #9.
-	fixRHELGrubCmdline(ctx, deps, mntRoot)
+	fixRHELGrubCmdline(ctx, deps, mntRoot, archFromSpec(spec).SerialConsoles)
 
 	// kdump: cloud images ship kdump enabled by default. On physical
 	// servers kdump arming often fails (no reserved crashkernel memory,
@@ -302,7 +308,7 @@ func installGRUBChrootRHEL(ctx context.Context, deps Deps, spec jobs.InstallSpec
 //
 // Idempotency: if an entry with the same label and loader already exists
 // (BootOrder + Boot####), we don't add a duplicate.
-func registerEFIBootEntryRHEL(ctx context.Context, deps Deps, mntRoot, devPath, bootID string) error {
+func registerEFIBootEntryRHEL(ctx context.Context, deps Deps, mntRoot, devPath, bootID, efiType string, loaders []string) error {
 	// Find the EFI directory for this bootloader ID on the ESP. The ESP
 	// mount point varies: /boot/efi (most distros) or /boot (openEuler).
 	espDir := ""
@@ -323,7 +329,7 @@ func registerEFIBootEntryRHEL(ctx context.Context, deps Deps, mntRoot, devPath, 
 	// Pick the loader file. Prefer shim (Secure Boot path), fall back to
 	// grub directly if the image is shim-less (rare).
 	var loaderFile string
-	for _, cand := range []string{"shimx64.efi", "shim.efi", "grubx64.efi"} {
+	for _, cand := range loaders {
 		if deps.FS.Exists(filepath.Join(espDir, cand)) {
 			loaderFile = cand
 			break
@@ -501,6 +507,7 @@ func efiEntryMatches(efibootmgrOut, label, loaderFile string) bool {
 // variants. This is the original path and works for Debian/Ubuntu cloud
 // images whose /boot/grub layout matches the host's grub-install output.
 func installGRUBHostDebian(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot, devPath, espMount string) error {
+	arch := archFromSpec(spec)
 	bootDir := filepath.Join(mntRoot, "boot")
 	efiDir := espMount
 	if efiDir == "" || !strings.HasPrefix(efiDir, mntRoot) {
@@ -510,7 +517,7 @@ func installGRUBHostDebian(ctx context.Context, deps Deps, spec jobs.InstallSpec
 	if espMount != "" {
 		if _, err := deps.Exec.Run(ctx,
 			"grub-install",
-			"--target=x86_64-efi",
+			"--target="+arch.EFIType,
 			"--efi-directory="+efiDir,
 			"--boot-directory="+bootDir,
 			"--bootloader-id=metalkit",
@@ -519,6 +526,9 @@ func installGRUBHostDebian(ctx context.Context, deps Deps, spec jobs.InstallSpec
 			return fmt.Errorf("install: grub-install (uefi, dev %s): %w", devPath, err)
 		}
 	} else {
+		if arch.IsArm {
+			return fmt.Errorf("install: BIOS boot not supported on arm64; use a UEFI arm64 image")
+		}
 		if _, err := deps.Exec.Run(ctx,
 			"grub-install",
 			"--target=i386-pc",
@@ -607,6 +617,7 @@ func installGRUBHostDebian(ctx context.Context, deps Deps, spec jobs.InstallSpec
 // servers even when the live system has no internet access (apt install
 // would fail and leave the user with an unbootable disk).
 func regenerateInitramfsDebian(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot, devPath string) {
+	arch := archFromSpec(spec)
 	criticalDrivers := []string{"megaraid_sas", "mpt3sas", "hpsa", "aacraid", "smartpqi"}
 	kvers := listKernelVersions(deps, mntRoot)
 	if len(kvers) == 0 {
@@ -727,7 +738,7 @@ func regenerateInitramfsDebian(ctx context.Context, deps Deps, spec jobs.Install
 
 	installArgs = []string{
 		mntRoot, "apt-get", "install", "-y",
-		"linux-image-amd64",
+		arch.DebianMetaKernel,
 	}
 	if out, err := deps.Exec.Run(ctx, "chroot", installArgs...); err != nil {
 		if deps.Logger != nil {
@@ -1853,7 +1864,7 @@ func listKernelVersions(deps Deps, mntRoot string) []string {
 // If /etc/default/grub doesn't exist (non-RHEL target), this is a no-op.
 // If grubby is missing or fails, we fall back to sed-replacing the options
 // line directly in each BLS entry file.
-func fixRHELGrubCmdline(ctx context.Context, deps Deps, mntRoot string) {
+func fixRHELGrubCmdline(ctx context.Context, deps Deps, mntRoot string, serialConsoles []string) {
 	defaultGrub := filepath.Join(mntRoot, "etc", "default", "grub")
 	data, err := deps.FS.ReadFile(defaultGrub)
 	if err != nil {
@@ -1871,11 +1882,16 @@ func fixRHELGrubCmdline(ctx context.Context, deps Deps, mntRoot string) {
 		}
 		val := strings.TrimPrefix(t, "GRUB_CMDLINE_LINUX_DEFAULT=")
 		val = strings.Trim(val, `"'`)
-		// Replace serial console with local console + nomodeset.
+		// Replace serial console with local console + nomodeset. Both the
+		// x86 (ttyS0) and arm64 (ttyAMA0) serial variants are rewritten so
+		// the local console shows boot output regardless of target arch.
 		val = strings.ReplaceAll(val, "console=ttyS0,115200n8", "console=tty0 nomodeset")
-		// Also handle the case where only console=ttyS0 appears without
-		// the baud spec, and ensure nomodeset is present.
+		val = strings.ReplaceAll(val, "console=ttyAMA0,115200n8", "console=tty0 nomodeset")
+		// Also handle the case where only console=ttyS0/ttyAMA0 appears
+		// without the baud spec, and ensure nomodeset is present.
 		val = strings.ReplaceAll(val, "console=ttyS0", "console=tty0")
+		val = strings.ReplaceAll(val, "console=ttyAMA0", "console=tty0")
+		_ = serialConsoles
 		if !strings.Contains(val, "nomodeset") {
 			val = "nomodeset " + val
 		}
@@ -2058,7 +2074,7 @@ func maskKdumpService(ctx context.Context, deps Deps, mntRoot string) {
 // to on a case-insensitive FAT32). Idempotent: if the target level already
 // has a loader binary, nothing happens. Best-effort: failures are logged but
 // do not abort the install — the image may genuinely not need this fix.
-func normalizeESPLayout(ctx context.Context, deps Deps, espMount, bootID string) {
+func normalizeESPLayout(ctx context.Context, deps Deps, espMount, bootID string, loaders []string, fallbackFile string) {
 	if espMount == "" || bootID == "" {
 		return
 	}
@@ -2069,7 +2085,7 @@ func normalizeESPLayout(ctx context.Context, deps Deps, espMount, bootID string)
 	sourceDir := filepath.Join(espMount, "efi", "EFI", bootID)
 
 	hasLoader := func(dir string) bool {
-		for _, loader := range []string{"grubx64.efi", "shimx64.efi", "shim.efi"} {
+		for _, loader := range loaders {
 			if deps.FS.Exists(filepath.Join(dir, loader)) {
 				return true
 			}
@@ -2107,11 +2123,11 @@ func normalizeESPLayout(ctx context.Context, deps Deps, espMount, bootID string)
 	}
 
 	// Some images also ship a fallback BOOT/ directory at the wrong level.
-	// Copy it the same way so \EFI\BOOT\BOOTX64.EFI (the firmware's last
-	// resort) also resolves.
+	// Copy it the same way so \EFI\BOOT\<fallbackFile> (the firmware's
+	// last resort: BOOTX64.EFI on x86, BOOTAA64.EFI on arm64) also resolves.
 	stdBoot := filepath.Join(espMount, "EFI", "BOOT")
 	nestedBoot := filepath.Join(espMount, "efi", "EFI", "BOOT")
-	if deps.FS.Exists(filepath.Join(nestedBoot, "BOOTX64.EFI")) && !deps.FS.Exists(filepath.Join(stdBoot, "BOOTX64.EFI")) {
+	if deps.FS.Exists(filepath.Join(nestedBoot, fallbackFile)) && !deps.FS.Exists(filepath.Join(stdBoot, fallbackFile)) {
 		_ = deps.FS.MkdirAll(stdBoot, 0o755)
 		if _, err := deps.Exec.Run(ctx, "cp", "-a", nestedBoot+"/.", stdBoot+"/"); err != nil {
 			if deps.Logger != nil {

@@ -50,6 +50,7 @@ export const imagesApi = {
     name: string
     version: string
     family: string
+    arch?: string
     notes?: string
     expected_sha256?: string
     total_size: number

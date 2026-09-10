@@ -76,6 +76,7 @@ export interface Report {
   }
   firmware?: Record<string, unknown>
   cpu?: {
+    arch?: string
     sockets?: number
     total_cores?: number
     total_threads?: number
@@ -104,6 +105,8 @@ export interface Image {
   name: string
   version: string
   family: string
+  /** 目标 CPU 架构："amd64" | "arm64"（旧镜像可能为空） */
+  arch?: string
   format: string
   size_bytes: number
   virtual_size?: number
@@ -120,6 +123,7 @@ export interface UploadSession {
   name: string
   version: string
   family: string
+  arch?: string
   notes?: string
   expected_sha256?: string
   total_size: number

@@ -295,11 +295,11 @@ func TestGCStaleUploads(t *testing.T) {
 
 func TestInferFormatFromName(t *testing.T) {
 	cases := map[string]string{
-		"x.qcow2":         "qcow2",
-		"foo.raw":         "raw",
-		"foo.img":         "raw",
-		"weird":           "qcow2",
-		"path/sub/x.RAW":  "qcow2", // case-sensitive: ".RAW" doesn't match
+		"x.qcow2":        "qcow2",
+		"foo.raw":        "raw",
+		"foo.img":        "raw",
+		"weird":          "qcow2",
+		"path/sub/x.RAW": "qcow2", // case-sensitive: ".RAW" doesn't match
 	}
 	for in, want := range cases {
 		if got := inferFormatFromName(in); got != want {

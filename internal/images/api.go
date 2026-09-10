@@ -90,10 +90,27 @@ type initUploadReq struct {
 	Name           string `json:"name"`
 	Version        string `json:"version"`
 	Family         string `json:"family"`
+	Arch           string `json:"arch"`
 	Notes          string `json:"notes"`
 	ExpectedSHA256 string `json:"expected_sha256"`
 	TotalSize      int64  `json:"total_size"`
 	ChunkSize      int64  `json:"chunk_size"`
+}
+
+// normalizeArch maps the loose operator input to the canonical "amd64" |
+// "arm64" vocabulary; empty and unknown-yet-blank stay empty (auto-detect
+// fills them), anything else is rejected by the caller.
+func normalizeArch(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "":
+		return ""
+	case "amd64", "x86_64", "x86-64", "x64":
+		return ArchAmd64
+	case "arm64", "aarch64", "arm":
+		return ArchArm64
+	default:
+		return "invalid:" + s
+	}
 }
 
 func (a *API) initUpload(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +126,7 @@ func (a *API) initUpload(w http.ResponseWriter, r *http.Request) {
 		Name:           in.Name,
 		Version:        in.Version,
 		Family:         in.Family,
+		Arch:           normalizeArch(in.Arch),
 		Notes:          in.Notes,
 		ExpectedSHA256: strings.ToLower(strings.TrimSpace(in.ExpectedSHA256)),
 		TotalSize:      in.TotalSize,
@@ -130,6 +148,21 @@ func (a *API) initUpload(w http.ResponseWriter, r *http.Request) {
 			"family mismatch: filename %q looks like family=%q but you supplied family=%q. "+
 				"Either leave family blank to use auto-detection, or rename the file to match.",
 			in.Name, det.Family, in.Family))
+		return
+	}
+	if strings.HasPrefix(input.Arch, "invalid:") {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"arch %q: must be amd64 or arm64 (x86_64/aarch64 also accepted)", in.Arch))
+		return
+	}
+	// Same conflict guard for arch: an arm64-named file with arch=amd64 is
+	// almost certainly a form mistake, and the fallout (unbootable installs)
+	// only appears hours later on the target machine.
+	if det.Arch != "" && input.Arch != "" && input.Arch != det.Arch {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"arch mismatch: filename %q looks like arch=%s but you supplied arch=%s. "+
+				"Leave arch blank to auto-detect, or rename the file.",
+			in.Name, det.Arch, input.Arch))
 		return
 	}
 	input = MergeDetected(input, det)

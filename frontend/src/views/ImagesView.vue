@@ -8,7 +8,7 @@ import { apiPutRaw } from '@/api/client'
 import { imagesApi } from '@/api'
 import type { Image } from '@/api/types'
 import AppShell from '@/components/AppShell.vue'
-import { detectFromFilename } from '@/lib/filename'
+import { detectArchFromFilename, detectFromFilename } from '@/lib/filename'
 import { fmtAbsolute, fmtBytes } from '@/lib/format'
 import { asRow } from '@/lib/typed'
 
@@ -24,6 +24,7 @@ const form = reactive({
   name: '',
   version: '',
   family: '',
+  arch: '',
   notes: '',
   expectedSha256: '',
 })
@@ -69,6 +70,9 @@ function onFileChange(uploadFile: UploadFile): void {
     if (!form.name) form.name = file.value.name.replace(/\.[^.]+$/, '')
     const guess = detectFromFilename(file.value.name)
     if (guess && !form.family) form.family = guess.family
+    // 文件名含架构标记时预填；与后端 detect.go 同规则
+    const farch = detectArchFromFilename(file.value.name)
+    if (farch && !form.arch) form.arch = farch
   }
 }
 
@@ -77,7 +81,8 @@ const canSubmit = computed(
     Boolean(file.value) &&
     form.name.trim() !== '' &&
     form.version.trim() !== '' &&
-    form.family.trim() !== '',
+    form.family.trim() !== '' &&
+    form.arch !== '',
 )
 
 const KNOWN_EXTS = ['.qcow2', '.img', '.raw', '.vmdk', '.qcow', '.vhd', '.vhdx', '.xz', '.gz', '.zst']
@@ -198,6 +203,7 @@ function resetForm(): void {
   form.name = ''
   form.version = ''
   form.family = ''
+  form.arch = ''
   form.notes = ''
   form.expectedSha256 = ''
   uploadProgress.value = 0
@@ -255,6 +261,14 @@ async function remove(row: Image): Promise<void> {
           <el-table-column prop="name" label="名称" min-width="180" />
           <el-table-column prop="version" label="版本" width="110" />
           <el-table-column prop="family" label="OS 家族" width="110" />
+          <el-table-column label="架构" width="80">
+            <template #default="{ row }">
+              <el-tag v-if="row.arch" :type="row.arch === 'arm64' ? 'warning' : 'info'" size="small" disable-transitions>
+                {{ row.arch }}
+              </el-tag>
+              <span v-else class="mk-subtle">未知</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="format" label="格式" width="90" />
           <el-table-column label="大小" width="100">
             <template #default="{ row }">{{ fmtBytes(row.size_bytes) }}</template>
@@ -303,6 +317,13 @@ async function remove(row: Image): Promise<void> {
             <el-select v-model="form.family" filterable allow-create placeholder="选择或输入">
               <el-option v-for="f in knownFamilies" :key="f" :label="f" :value="f" />
             </el-select>
+          </el-form-item>
+          <el-form-item label="架构" required>
+            <el-radio-group v-model="form.arch">
+              <el-radio-button value="amd64">x86_64 (amd64)</el-radio-button>
+              <el-radio-button value="arm64">ARM64 (aarch64)</el-radio-button>
+            </el-radio-group>
+            <div class="mk-subtle">镜像文件名带 amd64/x86_64/arm64/aarch64 时自动预填</div>
           </el-form-item>
           <el-form-item label="SHA-256">
             <el-input v-model="form.expectedSha256" placeholder="可选，64 位十六进制" class="mono" />

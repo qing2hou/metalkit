@@ -274,6 +274,7 @@ func (a *AgentAPI) getSpec(w http.ResponseWriter, r *http.Request) {
 		ImageBlobURL:    "/api/v1/agent/images/" + image.ID + "/blob",
 		ImageSHA256:     image.SHA256,
 		ImageFormat:     image.Format,
+		ImageArch:       image.Arch,
 		Profile:         *profile,
 		Binding:         *binding,
 		NetworkRenderer: profile.NetworkRenderer,

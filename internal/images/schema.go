@@ -4,19 +4,36 @@ package images
 // the same connection as inventory; FKs work across tables.
 //
 // Two tables:
-//   images           — finalized images, indexed by content hash (sha256)
-//   upload_sessions  — in-flight chunked uploads; rows survive restart so a
-//                      partially-uploaded image can be resumed or GC'd.
+//
+//	images           — finalized images, indexed by content hash (sha256)
+//	upload_sessions  — in-flight chunked uploads; rows survive restart so a
+//	                   partially-uploaded image can be resumed or GC'd.
 //
 // chunk-level state lives on disk (one file per chunk under .tmp/{upload_id}/),
 // not in the DB. We only persist enough metadata to reconstruct progress and
 // to garbage-collect stale sessions.
+// arch values: "amd64" | "arm64" — the target CPU of the disk image,
+// detected from the filename on upload (detect.go) or set by the operator.
+// Image→machine matching is enforced at binding time (bindings.ArchCompatible).
+const ArchAmd64 = "amd64"
+const ArchArm64 = "arm64"
+
+// migrations add columns introduced after the first release. Each entry is
+// idempotent: the ALTER fails with "duplicate column" on databases that
+// already have it, which NewStore swallows (same pattern as
+// bindings/schema.go).
+var migrations = []string{
+	"ALTER TABLE images ADD COLUMN arch TEXT NOT NULL DEFAULT ''",
+	"ALTER TABLE upload_sessions ADD COLUMN arch TEXT NOT NULL DEFAULT ''",
+}
+
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS images (
     id            TEXT PRIMARY KEY,
     name          TEXT NOT NULL,
     version       TEXT,
     family        TEXT,
+    arch          TEXT NOT NULL DEFAULT '',
     format        TEXT NOT NULL,
     size_bytes    INTEGER NOT NULL,
     virtual_size  INTEGER,
@@ -34,6 +51,7 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
     name            TEXT NOT NULL,
     version         TEXT,
     family          TEXT,
+    arch            TEXT NOT NULL DEFAULT '',
     notes           TEXT,
     expected_sha256 TEXT NOT NULL,
     total_size      INTEGER NOT NULL,

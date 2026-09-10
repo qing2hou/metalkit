@@ -59,6 +59,9 @@ const saving = ref(false)
 const disks = computed(() => props.report?.disks ?? [])
 const nics = computed(() => props.report?.nics ?? [])
 
+// 机器上报的 CPU 架构（Report.cpu.arch；未上报为空 → 不做前端判断，后端兜底）
+const machineArch = computed(() => props.report?.cpu?.arch ?? '')
+
 const selectedProfile = computed(() => props.profiles.find((p) => p.id === form.profileId))
 
 // profile → 联动默认值（对应旧版 profile→subnet 联动）
@@ -152,6 +155,12 @@ async function submit(): Promise<void> {
     ElMessage.warning('请先补全表单中的必填/校验项')
     return
   }
+  // 前端架构防呆；未知侧（机器没上报/镜像旧无 arch）放行，后端 ErrArchMismatch 兜底
+  const img = props.images.find((i) => i.id === form.imageId)
+  if (machineArch.value && img?.arch && img.arch !== machineArch.value) {
+    ElMessage.error(`镜像架构 ${img.arch} 与机器架构 ${machineArch.value} 不符`)
+    return
+  }
   saving.value = true
   try {
     // 密码覆盖：binding.root_password 接收明文（8-128 字符），服务端 AES 加密
@@ -217,10 +226,12 @@ async function submit(): Promise<void> {
               <el-option
                 v-for="img in images"
                 :key="img.id"
-                :label="`${img.name} ${img.version} (${img.family})`"
+                :label="`${img.name} ${img.version} (${img.family}${img.arch ? ', ' + img.arch : ''})`"
                 :value="img.id"
+                :disabled="Boolean(machineArch && img.arch && img.arch !== machineArch)"
               />
             </el-select>
+            <div v-if="machineArch" class="mk-subtle">本机架构 {{ machineArch }} — 架构不符的镜像已禁用</div>
           </el-form-item>
         </el-col>
         <el-col :span="12">

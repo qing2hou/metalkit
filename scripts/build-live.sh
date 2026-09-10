@@ -9,21 +9,27 @@
 #           anywhere docker is available; the only option on non-Debian hosts).
 #
 # Default: prefer native if `lb` is on PATH; otherwise docker; otherwise error.
-# Expects bin/agent to exist (run `make agent` or `go build -o bin/agent ./cmd/agent`).
+# Expects a matching-arch agent binary: bin/agent-<arch> (make agent GOARCH=<arch>).
+#
+# --arch amd64|arm64 (default amd64): the target CPU of the live image.
+#   amd64 builds anywhere live-build runs. arm64 needs an arm64-capable
+#   environment: either binfmt+qemu-user-static on the host (native backend),
+#   or `docker run --platform linux/arm64` (docker backend, which this script
+#   requests automatically). Artifacts land in boot/<arch>/ so both trees can
+#   coexist for mixed fleets.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIVE_DIR="$REPO_ROOT/live-image"
-BOOT_OUT="$REPO_ROOT/boot"
-AGENT_SRC="$REPO_ROOT/bin/agent"
-AGENT_DST="$LIVE_DIR/config/includes.chroot/usr/local/bin/metalkit-agent"
 
 BACKEND=auto
+ARCH=amd64
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --native) BACKEND=native; shift ;;
         --docker) BACKEND=docker; shift ;;
+        --arch)   ARCH="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,16p' "$0"
             exit 0 ;;
@@ -31,8 +37,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+case "$ARCH" in
+    amd64|arm64) ;;
+    *) echo "--arch must be amd64 or arm64 (got: $ARCH)" >&2; exit 2 ;;
+esac
+
+AGENT_SRC="$REPO_ROOT/bin/agent-$ARCH"
+AGENT_DST="$LIVE_DIR/config/includes.chroot/usr/local/bin/metalkit-agent"
+BOOT_OUT="$REPO_ROOT/boot/$ARCH"
+
 if [[ ! -x "$AGENT_SRC" ]]; then
-    echo "agent binary not found at $AGENT_SRC — run 'go build -o bin/agent ./cmd/agent' first" >&2
+    echo "agent binary not found at $AGENT_SRC — run 'make agent GOARCH=$ARCH' first" >&2
     exit 1
 fi
 
@@ -68,7 +83,7 @@ case "$BACKEND" in
         (
             cd "$LIVE_DIR"
             lb clean --purge || true
-            lb config
+            lb config --architectures "$ARCH"
             lb build
         )
         ;;
@@ -81,7 +96,13 @@ case "$BACKEND" in
         # Forward host HTTP(S) proxy into the container so apt-get update,
         # live-build's lb config, and debootstrap can reach Debian mirrors.
         # On hosts without a proxy these vars are empty and have no effect.
-        docker run --rm --privileged \
+        # linux/arm64 containers on an x86 host need binfmt/qemu registered
+        # (docker run --privileged + --platform handles the rest). amd64 is a
+        # no-op on amd64 hosts.
+        PLATFORM_FLAG=()
+        [[ "$ARCH" == arm64 ]] && PLATFORM_FLAG=(--platform linux/arm64)
+        docker run --rm --privileged "${PLATFORM_FLAG[@]}" \
+            -e "ARCH=$ARCH" \
             -e "http_proxy=${HTTP_PROXY:-${http_proxy:-}}" \
             -e "https_proxy=${HTTPS_PROXY:-${https_proxy:-}}" \
             -e "HTTP_PROXY=${HTTP_PROXY:-${http_proxy:-}}" \
@@ -102,11 +123,30 @@ case "$BACKEND" in
                 apt-get update
                 apt-get install -y --no-install-recommends live-build
                 lb clean --purge || true
-                lb config
+                lb config --architectures "$ARCH"
                 lb build
             '
         ;;
 esac
+
+# Per-arch package list substitutions inside the live tree. live-build picks
+# up config/package-lists; we swap arch-specific package names via markers in
+# installer.list.chroot (see the file's comments).
+echo "=== adjusting package lists for $ARCH ==="
+PKG_LIST="$LIVE_DIR/config/package-lists/installer.list.chroot"
+if [[ "$ARCH" == arm64 ]]; then
+    # arm64: no amd64-microcode; kernel metapackage and grubEFI binaries differ.
+    sed -i 's/^amd64-microcode/#amd64-microcode (not on arm64)/' "$PKG_LIST"
+    sed -i 's/^linux-image-amd64/linux-image-arm64/' "$PKG_LIST"
+    sed -i 's/grub-efi-amd64-bin/grub-efi-arm64-bin/' "$PKG_LIST"
+    sed -i 's/grub-efi-amd64-signed/grub-efi-arm64-signed/' "$PKG_LIST"
+else
+    # amd64: restore the upstream names in case an arm64 build ran before.
+    sed -i 's/^#amd64-microcode (not on arm64)/amd64-microcode/' "$PKG_LIST"
+    sed -i 's/^linux-image-arm64/linux-image-amd64/' "$PKG_LIST"
+    sed -i 's/grub-efi-arm64-bin/grub-efi-amd64-bin/' "$PKG_LIST"
+    sed -i 's/grub-efi-arm64-signed/grub-efi-amd64-signed/' "$PKG_LIST"
+fi
 
 echo "=== copying artifacts to $BOOT_OUT ==="
 # live-build netboot outputs: kernel+initrd in tftpboot/live/, squashfs in binary/live/

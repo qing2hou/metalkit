@@ -1,3 +1,7 @@
+> 架构提示：镜像按目标 CPU 架构区分（amd64 / arm64）。上传时文件名含
+> amd64/x86_64/arm64/aarch64 标记会自动识别架构；请在下载镜像时选择与目标服务器
+> CPU 匹配的架构（如 Ubuntu cloud image 的 arm64 变体）。
+
 # MetalKit 基础镜像预制指南
 
 MetalKit 用 cloud image (qcow2) 装机。某些发行版的 cloud image 在物理服务器上会缺关键内核驱动 / 启动配置不对，导致装完进不了系统。本指南描述如何预制"MetalKit 友好"的镜像，让装机一次成功。

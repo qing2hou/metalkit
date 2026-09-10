@@ -3,22 +3,35 @@
  * 后端 internal/images/detect.go 是权威实现，这里做同款客户端预填。
  */
 
-export interface FamilyGuess {
+export interface DetectResult {
   family: string
   version?: string
+  /** 目标架构："amd64" | "arm64"，无法识别为空 */
+  arch?: string
 }
 
-export function detectFromFilename(filename: string): FamilyGuess | null {
+const ARCH_RE = /(^|[-_.])(amd64|x86[_-]?64|arm64|aarch64)([-_.]|$)/i
+
+/** 从文件名识别目标架构：x86_64/amd64 → amd64；arm64/aarch64 → arm64。 */
+export function detectArchFromFilename(filename: string): string {
+  const m = ARCH_RE.exec(filename)
+  if (!m) return ''
+  const token = m[2].toLowerCase()
+  if (token === 'amd64' || token.startsWith('x86')) return 'amd64'
+  return 'arm64'
+}
+
+export function detectFromFilename(filename: string): DetectResult | null {
   const f = filename.toLowerCase()
-  if (/ubuntu/.test(f)) return { family: 'ubuntu' }
-  if (/centos/.test(f)) return { family: 'centos' }
-  if (/rocky/.test(f)) return { family: 'rocky' }
-  if (/almalinux/.test(f)) return { family: 'almalinux' }
-  if (/debian/.test(f)) return { family: 'debian' }
-  if (/kylin/.test(f)) return { family: 'kylin' }
-  if (/openeuler|open-euler/.test(f)) return { family: 'openeuler' }
-  if (/opensuse/.test(f)) return { family: 'opensuse' }
-  if (/rhel/.test(f)) return { family: 'rhel' }
+  if (/ubuntu/.test(f)) return { family: 'ubuntu', arch: detectArchFromFilename(filename) }
+  if (/centos/.test(f)) return { family: 'centos', arch: detectArchFromFilename(filename) }
+  if (/rocky/.test(f)) return { family: 'rocky', arch: detectArchFromFilename(filename) }
+  if (/almalinux/.test(f)) return { family: 'almalinux', arch: detectArchFromFilename(filename) }
+  if (/debian/.test(f)) return { family: 'debian', arch: detectArchFromFilename(filename) }
+  if (/kylin/.test(f)) return { family: 'kylin', arch: detectArchFromFilename(filename) }
+  if (/openeuler|open-euler/.test(f)) return { family: 'openeuler', arch: detectArchFromFilename(filename) }
+  if (/opensuse/.test(f)) return { family: 'opensuse', arch: detectArchFromFilename(filename) }
+  if (/rhel/.test(f)) return { family: 'rhel', arch: detectArchFromFilename(filename) }
   return null
 }
 

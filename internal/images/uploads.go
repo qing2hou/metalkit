@@ -237,6 +237,7 @@ func (s *Store) FinalizeUpload(ctx context.Context, sessionID string, extractor 
 		Name:         sess.Name,
 		Version:      sess.Version,
 		Family:       sess.Family,
+		Arch:         sess.Arch,
 		Notes:        sess.Notes,
 		Format:       format,
 		SizeBytes:    totalBytes,

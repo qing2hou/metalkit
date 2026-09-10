@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -372,9 +373,15 @@ func (s *Server) handleIPXE(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	body, err := renderIPXE(s.cfg.ServerIP, s.httpAddr)
+	// The chain-loaded iPXE tells us its build in the User-Agent (e.g.
+	// "iPXE/arm64-efi"). The DHCP layer already picked the matching
+	// bootfile (arm64-snponly.efi vs snponly.efi), so the UA is the
+	// reliable per-request arch signal here. Explicit ?arch= wins (tests,
+	// manual curl), legacy UAs fall back to amd64.
+	arch := clientArch(r)
+	body, err := renderIPXE(s.cfg.ServerIP, s.httpAddr, arch)
 	if err != nil {
-		s.cfg.Logger.Error("ipxe render failed", "err", err)
+		s.cfg.Logger.Error("ipxe render failed", "err", arch)
 		http.Error(w, "ipxe render failed", http.StatusInternalServerError)
 		return
 	}
@@ -383,15 +390,40 @@ func (s *Server) handleIPXE(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(body))
 }
 
+// clientArch reports the requesting machine's CPU arch: explicit ?arch=
+// first (tests / curl), then the iPXE User-Agent ("iPXE/arm64-efi" etc.),
+// then amd64 (back-compat — pre-multi-arch clients are x86 by definition).
+func clientArch(r *http.Request) string {
+	if a := strings.TrimSpace(r.URL.Query().Get("arch")); a == "amd64" || a == "arm64" {
+		return a
+	}
+	ua := strings.ToLower(r.UserAgent())
+	if strings.Contains(ua, "arm64") || strings.Contains(ua, "aarch64") {
+		return "arm64"
+	}
+	return "amd64"
+}
+
 // bootFile returns a handler that serves a single named file from BootDir.
 // Uses http.ServeFile so Range/If-Modified-Since/etc. just work.
+//
+// The file is picked from boot/<arch>/ where arch comes from ?arch= or the
+// iPXE User-Agent (see clientArch). For back-compat with single-arch
+// deployments the flat layout (BootDir/<name> directly) is used when the
+// arch subdirectory has no such file: an operator who unpacked an amd64-only
+// tarball keeps working without moving files.
 func (s *Server) bootFile(name string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		path := filepath.Join(s.cfg.BootDir, name)
+		arch := clientArch(r)
+		path := filepath.Join(s.cfg.BootDir, arch, name)
+		if _, err := os.Stat(path); err != nil {
+			// Fall back to the flat single-arch layout.
+			path = filepath.Join(s.cfg.BootDir, name)
+		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		http.ServeFile(w, r, path)
 	}

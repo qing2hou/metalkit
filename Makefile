@@ -1,13 +1,17 @@
 GO ?= go
 VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo dev)
 
-.PHONY: help frontend build agent test tidy ipxe live run clean
+.PHONY: help frontend build agent agent-arm64 test tidy ipxe live run clean
+ARCH ?= amd64
+
+GOARCH ?= amd64
 
 help:
 	@echo "Targets:"
-	@echo "  build    - build controller binary into bin/ (embeds prebuilt webui assets)"
-	@echo "  frontend - build Vue webui from frontend/ into internal/webui/assets (requires node)"
-	@echo "  agent    - build inventory agent binary into bin/agent (Linux/amd64, static)"
+	@echo "  build      - build controller binary into bin/ (embeds prebuilt webui assets)"
+	@echo "  frontend   - build Vue webui from frontend/ into internal/webui/assets (requires node)"
+	@echo "  agent      - build inventory agent into bin/agent-$(GOARCH) (default amd64; GOARCH=arm64 to cross-compile)"
+	@echo "  agent-arm64 - convenience: build arm64 agent (same as 'make agent GOARCH=arm64')"
 	@echo "  test     - run go tests"
 	@echo "  tidy     - go mod tidy"
 	@echo "  ipxe     - fetch iPXE binaries via scripts/fetch-ipxe.sh"
@@ -24,10 +28,18 @@ frontend:
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags='-s -w' -o bin/controller ./cmd/controller
 
+# bin/agent (no suffix) stays amd64 for back-compat; arch-suffixed copies
+# feed build-live.sh --arch.
 agent:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath \
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) $(GO) build -trimpath \
 	  -ldflags='-s -w -X main.agentVersion=$(VERSION)' \
-	  -o bin/agent ./cmd/agent
+	  -o bin/agent-$(GOARCH) ./cmd/agent
+	ln -sf agent-$(GOARCH) bin/agent
+
+agent-arm64:
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath \
+	  -ldflags='-s -w -X main.agentVersion=$(VERSION)' \
+	  -o bin/agent-arm64 ./cmd/agent
 
 test:
 	$(GO) test ./cmd/... ./internal/...
@@ -40,8 +52,9 @@ ipxe:
 	./scripts/fetch-ipxe.sh
 
 # live image embeds the agent binary, so the agent target must run first.
+# ARCH=amd64 (default) or arm64; the agent is cross-compiled to match.
 live: agent
-	./scripts/build-live.sh
+	./scripts/build-live.sh --arch $(ARCH)
 
 run:
 	sudo ./bin/controller -config config.example.yaml

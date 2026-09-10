@@ -78,3 +78,36 @@ func TestMergeDetected_PartialBackfill(t *testing.T) {
 		t.Fatalf("partial backfill: family kept as ubuntu, version filled from det: got family=%q version=%q", out.Family, out.Version)
 	}
 }
+
+func TestDetectArchFromFilename(t *testing.T) {
+	cases := map[string]string{
+		"jammy-server-cloudimg-amd64.img":        ArchAmd64,
+		"Rocky-9-aarch64.qcow2":                  ArchArm64,
+		"debian-12-genericcloud_AMD64.qcow2":     ArchAmd64,
+		"ubuntu-22.04-server-cloudimg-arm64.img": ArchArm64,
+		"centos-7-x86_64-GenericCloud.qcow2":     ArchAmd64,
+		"mydisk.qcow2":                           "",     // unknown → empty
+		"somex64thing.raw":                       "",     // x64 without separators → no match
+		"kylin-v10-aarch64.img":                  ArchArm64,
+	}
+	for name, want := range cases {
+		got := DetectFromFilename(name).Arch
+		if got != want {
+			t.Errorf("arch(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestMergeDetectedFillsArch(t *testing.T) {
+	in := CreateUploadInput{Name: "x.qcow2"} // operator blank
+	got := MergeDetected(in, DetectionResult{Family: "ubuntu", Arch: ArchArm64})
+	if got.Arch != ArchArm64 {
+		t.Errorf("backfill arch = %q, want arm64", got.Arch)
+	}
+	// Operator value wins over detection.
+	in2 := CreateUploadInput{Name: "x-arm64.qcow2", Arch: ArchAmd64}
+	got2 := MergeDetected(in2, DetectionResult{Arch: ArchArm64})
+	if got2.Arch != ArchAmd64 {
+		t.Errorf("operator arch overridden: %q", got2.Arch)
+	}
+}

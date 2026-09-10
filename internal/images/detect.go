@@ -16,6 +16,7 @@ import (
 type DetectionResult struct {
 	Family  string // "ubuntu" / "debian" / "rhel" / "rhel7" / "kylin" / "openeuler" / "opensuse" / "" (unknown)
 	Version string // distro version, e.g. "22.04", "12", "9", "7"
+	Arch    string // "amd64" / "arm64" / "" (unknown)
 }
 
 // reKnown maps a substring/regex against canonical filenames published by
@@ -138,12 +139,12 @@ var detectionRules = []struct {
 // the LTS series and a handful of recent non-LTS releases that show up in
 // production fleets.
 var ubuntuCodenameToVersion = map[string]string{
-	"noble":   "24.04",
-	"jammy":   "22.04",
-	"focal":   "20.04",
-	"bionic":  "18.04",
-	"xenial":  "16.04",
-	"trusty":  "14.04",
+	"noble":  "24.04",
+	"jammy":  "22.04",
+	"focal":  "20.04",
+	"bionic": "18.04",
+	"xenial": "16.04",
+	"trusty": "14.04",
 }
 
 // debianCodenameToVersion translates common Debian codenames to numeric.
@@ -155,20 +156,38 @@ var debianCodenameToVersion = map[string]string{
 	"stretch":  "9",
 }
 
+// archRE matches the arch tokens upstream image vendors put in filenames:
+// jammy-server-cloudimg-ARM64.img, Rocky-9-aarch64.qcow2, debian-12-AMD64....
+var archRE = regexp.MustCompile(`(?i)(^|[-_.])(amd64|x86[_-]?64|arm64|aarch64)([-_.]|$)`)
+
+// archTokenToCanon maps the matched token to the canonical vocabulary.
+var archTokenToCanon = map[string]string{
+	"amd64":   ArchAmd64,
+	"x86_64":  ArchAmd64,
+	"x86-64":  ArchAmd64,
+	"arm64":   ArchArm64,
+	"aarch64": ArchArm64,
+}
+
 // DetectFromFilename inspects a filename (just the name, no path) and returns
-// what we can infer about family + version. An empty result means we could
-// not match any pattern, which is fine — the operator can fill it in.
+// what we can infer about family + version + arch. An empty result means we
+// could not match any pattern, which is fine — the operator can fill it in.
 func DetectFromFilename(name string) DetectionResult {
 	if name == "" {
 		return DetectionResult{}
 	}
 	lower := strings.ToLower(name)
 
+	arch := ""
+	if m := archRE.FindStringSubmatch(lower); m != nil {
+		arch = archTokenToCanon[strings.ToLower(m[2])]
+	}
+
 	for _, rule := range detectionRules {
 		if !rule.pattern.MatchString(lower) {
 			continue
 		}
-		res := DetectionResult{Family: rule.family}
+		res := DetectionResult{Family: rule.family, Arch: arch}
 		if rule.versionRE != nil {
 			if m := rule.versionRE.FindStringSubmatch(lower); m != nil {
 				// Last sub-match: version capture is the final group.
@@ -199,11 +218,16 @@ func DetectFromFilename(name string) DetectionResult {
 		return res
 	}
 
-	return DetectionResult{}
+	return DetectionResult{Arch: arch}
 }
 
-// MergeDetected returns a copy of in with empty Family/Version filled from det.
-// Operator-supplied values always win; this is a best-effort backfill.
+// MergeDetected returns a copy of in with empty Family/Version/Arch filled
+// from det. Operator-supplied values always win; this is a best-effort
+// backfill.
+func MergeDetached(in CreateUploadInput, det DetectionResult) CreateUploadInput {
+	return in
+}
+
 func MergeDetected(in CreateUploadInput, det DetectionResult) CreateUploadInput {
 	out := in
 	if out.Family == "" && det.Family != "" {
@@ -211,6 +235,9 @@ func MergeDetected(in CreateUploadInput, det DetectionResult) CreateUploadInput 
 	}
 	if out.Version == "" && det.Version != "" {
 		out.Version = det.Version
+	}
+	if out.Arch == "" && det.Arch != "" {
+		out.Arch = det.Arch
 	}
 	return out
 }

@@ -187,6 +187,7 @@ function viewHistoryItem(meta: ReportMeta): void {
                 <span v-else class="mk-subtle">未上报</span>
               </dd>
             </div>
+            <div class="mk-kv"><dt>CPU 架构</dt><dd>{{ report?.cpu?.arch || '—' }}</dd></div>
             <div class="mk-kv"><dt>固件</dt><dd>{{ biosVersion || '—' }}</dd></div>
             <div class="mk-kv"><dt>Live 版本</dt><dd>{{ (report?.system as any)?.live_image_version || '—' }}</dd></div>
           </dl>
@@ -297,6 +298,12 @@ function viewHistoryItem(meta: ReportMeta): void {
 
           <el-collapse-item title="CPU" name="cpu">
             <dl class="mk-kv-grid">
+              <div class="mk-kv"><dt>架构</dt><dd>
+                <el-tag v-if="report?.cpu?.arch" :type="report?.cpu?.arch === 'arm64' ? 'warning' : 'info'" size="small" disable-transitions>
+                  {{ report?.cpu?.arch }}
+                </el-tag>
+                <span v-else class="mk-subtle">未上报</span>
+              </dd></div>
               <div class="mk-kv"><dt>插槽数</dt><dd>{{ report?.cpu?.sockets ?? '—' }}</dd></div>
               <div class="mk-kv"><dt>物理核</dt><dd>{{ report?.cpu?.total_cores ?? '—' }}</dd></div>
               <div class="mk-kv"><dt>逻辑核</dt><dd>{{ report?.cpu?.total_threads ?? '—' }}</dd></div>

@@ -17,25 +17,39 @@ import (
 //
 // metalkit.url= is consumed by the in-live inventory agent (cmd/agent). It
 // is the controller base URL the agent POSTs reports/heartbeats to.
+// The fetch= URLs carry an ?arch= suffix so the /boot/* file server picks
+// the right tree (boot/<arch>/...). The console argument differs by arch:
+// x86 serial-over-LAN is ttyS0 (8250); arm64 servers' BMCs expose a PL011
+// UART (ttyAMA0). The ttyS0 rationale comment above still applies on arm64
+// — we keep the same serial-only strategy, just the right device.
 const ipxeTemplate = `#!ipxe
-kernel http://{{.ServerIP}}{{.HTTPAddr}}/boot/vmlinuz initrd=initrd.img boot=live fetch=http://{{.ServerIP}}{{.HTTPAddr}}/boot/filesystem.squashfs ip=dhcp console=ttyS0,115200 metalkit.url=http://{{.ServerIP}}{{.HTTPAddr}}
-initrd http://{{.ServerIP}}{{.HTTPAddr}}/boot/initrd.img
+kernel http://{{.ServerIP}}{{.HTTPAddr}}/boot/vmlinuz?arch={{.Arch}} initrd=initrd.img boot=live fetch=http://{{.ServerIP}}{{.HTTPAddr}}/boot/filesystem.squashfs?arch={{.Arch}} ip=dhcp console={{.Console}},115200 metalkit.url=http://{{.ServerIP}}{{.HTTPAddr}}
+initrd http://{{.ServerIP}}{{.HTTPAddr}}/boot/initrd.img?arch={{.Arch}}
 boot
 `
 
 type ipxeVars struct {
 	ServerIP string
 	HTTPAddr string // ":PORT"
+	Arch     string // "amd64" | "arm64"
+	Console  string // serial console device matching the arch
 }
 
 // renderIPXE returns the rendered iPXE script body.
-func renderIPXE(serverIP, httpAddr string) (string, error) {
+func renderIPXE(serverIP, httpAddr, arch string) (string, error) {
+	if arch == "" {
+		arch = "amd64"
+	}
+	console := "ttyS0"
+	if arch == "arm64" {
+		console = "ttyAMA0"
+	}
 	tpl, err := template.New("ipxe").Parse(ipxeTemplate)
 	if err != nil {
 		return "", err
 	}
 	var buf bytes.Buffer
-	if err := tpl.Execute(&buf, ipxeVars{ServerIP: serverIP, HTTPAddr: httpAddr}); err != nil {
+	if err := tpl.Execute(&buf, ipxeVars{ServerIP: serverIP, HTTPAddr: httpAddr, Arch: arch, Console: console}); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
