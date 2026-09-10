@@ -2,12 +2,13 @@
 import { Plus, UploadFilled } from '@element-plus/icons-vue'
 import type { UploadFile } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, toRef } from 'vue'
 
 import { apiPutRaw } from '@/api/client'
 import { imagesApi } from '@/api'
 import type { Image } from '@/api/types'
 import AppShell from '@/components/AppShell.vue'
+import { useQuerySync } from '@/composables/useQuerySync'
 import { detectArchFromFilename, detectFromFilename } from '@/lib/filename'
 import { fmtAbsolute, fmtBytes } from '@/lib/format'
 import { asRow } from '@/lib/typed'
@@ -34,6 +35,30 @@ const uploadError = ref('')
 /** 失败后保留的会话（续传）：uploaded_chunks 是后端已收块数。 */
 const resumeInfo = ref<{ sessionId: string; uploadedChunks: number; totalChunks: number } | null>(null)
 let abortUpload = false
+
+// 架构过滤器（与 URL query 同步，便于分享/收藏视图）。
+// useQuerySync 接收 reactive 对象；内部用 ref 包一层保持同一代理。
+const filters = reactive({ arch: '' as '' | 'amd64' | 'arm64' | 'unknown' })
+const archFilter = toRef(filters, 'arch')
+
+useQuerySync(
+  filters,
+  (st): Record<string, string> => ({ ...(st.arch ? { arch: String(st.arch) } : {}) }),
+  (q) => ({ arch: (q.arch as typeof filters.arch) ?? '' }),
+)
+
+const filtered = computed(() => {
+  if (!archFilter.value) return list.value
+  if (archFilter.value === 'unknown') return list.value.filter((i) => !i.arch)
+  return list.value.filter((i) => i.arch === archFilter.value)
+})
+
+const archCounts = computed(() => ({
+  all: list.value.length,
+  amd64: list.value.filter((i) => i.arch === 'amd64').length,
+  arm64: list.value.filter((i) => i.arch === 'arm64').length,
+  unknown: list.value.filter((i) => !i.arch).length,
+}))
 
 const knownFamilies = [
   'ubuntu',
@@ -257,7 +282,15 @@ async function remove(row: Image): Promise<void> {
       </header>
 
       <el-card class="mk-card">
-        <el-table v-loading="loading" :data="list" stripe>
+        <div class="mk-filters">
+          <el-radio-group v-model="archFilter">
+            <el-radio-button value="">全部 ({{ archCounts.all }})</el-radio-button>
+            <el-radio-button value="amd64">x86_64 ({{ archCounts.amd64 }})</el-radio-button>
+            <el-radio-button value="arm64">ARM64 ({{ archCounts.arm64 }})</el-radio-button>
+            <el-radio-button value="unknown">未知 ({{ archCounts.unknown }})</el-radio-button>
+          </el-radio-group>
+        </div>
+        <el-table v-loading="loading" :data="filtered" stripe>
           <el-table-column prop="name" label="名称" min-width="180" />
           <el-table-column prop="version" label="版本" width="110" />
           <el-table-column prop="family" label="OS 家族" width="110" />
@@ -268,27 +301,84 @@ async function remove(row: Image): Promise<void> {
               </el-tag>
               <span v-else class="mk-subtle">未知</span>
             </template>
+
+<style scoped>
+.mk-filters {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+</style>
           </el-table-column>
           <el-table-column prop="format" label="格式" width="90" />
           <el-table-column label="大小" width="100">
             <template #default="{ row }">{{ fmtBytes(row.size_bytes) }}</template>
+
+<style scoped>
+.mk-filters {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+</style>
           </el-table-column>
           <el-table-column label="SHA-256" min-width="180">
             <template #default="{ row }">
               <span class="mono mk-subtle">{{ row.sha256 ? `${row.sha256.slice(0, 16)}…` : '—' }}</span>
             </template>
+
+<style scoped>
+.mk-filters {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+</style>
           </el-table-column>
           <el-table-column label="上传时间" width="150">
             <template #default="{ row }">{{ fmtAbsolute(row.uploaded_at) }}</template>
+
+<style scoped>
+.mk-filters {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+</style>
           </el-table-column>
           <el-table-column label="操作" width="90" fixed="right">
             <template #default="{ row }">
               <el-button text size="small" type="danger" @click="remove(asRow<Image>(row))">删除</el-button>
             </template>
+
+<style scoped>
+.mk-filters {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+</style>
           </el-table-column>
           <template #empty>
-            <el-empty description="还没有镜像，点右上角上传" :image-size="72" />
+            <el-empty
+              :description="archFilter ? '该架构下暂无镜像' : '还没有镜像，点右上角上传'"
+              :image-size="72"
+            />
           </template>
+
+<style scoped>
+.mk-filters {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+</style>
         </el-table>
       </el-card>
 
@@ -343,6 +433,15 @@ async function remove(row: Image): Promise<void> {
           </el-form-item>
           <el-alert v-if="uploadError" type="error" show-icon :closable="false">
             <template #title>{{ uploadError }}</template>
+
+<style scoped>
+.mk-filters {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+</style>
             <div v-if="resumeInfo" class="mk-subtle" style="margin-top: 4px">
               服务器已保留 {{ resumeInfo.uploadedChunks }}/{{ resumeInfo.totalChunks }} 块
               （未改动表单时点击「开始上传」将从下一块续传）
@@ -362,7 +461,25 @@ async function remove(row: Image): Promise<void> {
             {{ uploadPhase === 'uploading' ? `上传中 ${uploadProgress}%` : '开始上传' }}
           </el-button>
         </template>
+
+<style scoped>
+.mk-filters {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+</style>
       </el-dialog>
     </div>
   </AppShell>
 </template>
+
+<style scoped>
+.mk-filters {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+</style>
