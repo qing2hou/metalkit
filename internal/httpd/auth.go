@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"metalkit/internal/sessions"
+	"metalkit/internal/util"
 )
 
 // sessionCookieName matches authapi.CookieName. Duplicated here to avoid an
@@ -32,14 +33,22 @@ const sessionTTL = 7 * 24 * time.Hour
 // UI uses cookies (minted by /api/v1/auth/login); curl / agents / CI keep
 // Basic Auth working.
 //
+// Credential sources (first match wins):
+//  1. session cookie
+//  2. legacy AdminUser/AdminPass basic-auth pair (constant-time compare)
+//  3. any cfg.Users entry — username constant-time, password verified
+//     against the sha512crypt hash via util.VerifyCryptSHA512 (forks
+//     mkpasswd; login/basic-auth is a cold path so one fork per attempt
+//     is acceptable).
+//
 // When auth is required but missing:
 //   - HTML requests under /ui/*  → 302 to /ui/login?next=<orig>
 //   - everything else            → 401 JSON {"error":"unauthorized"}, no
 //     WWW-Authenticate header (we don't want the browser popup any more).
 //
-// If adminPass is empty the wrapper is open (same as before).
-func sessionOrBasicAuth(adminUser, adminPass string, sessStore *sessions.Store, logger *slog.Logger, next http.Handler) http.Handler {
-	if adminPass == "" {
+// If adminPass is empty AND no users are configured the wrapper is open.
+func sessionOrBasicAuth(adminUser, adminPass string, users []OperatorUser, sessStore *sessions.Store, logger *slog.Logger, next http.Handler) http.Handler {
+	if adminPass == "" && len(users) == 0 {
 		return next
 	}
 	userB := []byte(adminUser)
@@ -65,15 +74,35 @@ func sessionOrBasicAuth(adminUser, adminPass string, sessStore *sessions.Store, 
 			// ErrNotFound / ErrExpired → fall through.
 		}
 
-		// 2. Basic Auth (curl, CI, agents-with-creds, legacy clients).
-		if u, p, ok := r.BasicAuth(); ok &&
-			subtle.ConstantTimeCompare([]byte(u), userB) == 1 &&
-			subtle.ConstantTimeCompare([]byte(p), passB) == 1 {
-			next.ServeHTTP(w, r.WithContext(sessions.WithUser(r.Context(), adminUser)))
-			return
+		// 2 & 3. Basic Auth (curl, CI, agents-with-creds, legacy clients).
+		if u, p, ok := r.BasicAuth(); ok {
+			if adminPass != "" &&
+				subtle.ConstantTimeCompare([]byte(u), userB) == 1 &&
+				subtle.ConstantTimeCompare([]byte(p), passB) == 1 {
+				next.ServeHTTP(w, r.WithContext(sessions.WithUser(r.Context(), adminUser)))
+				return
+			}
+			// Named operator accounts. Username is compared constant-time;
+			// the password check forks mkpasswd so it's kept out of the
+			// constant-time path — timing doesn't leak anything the hash
+			// comparison doesn't already.
+			for _, ou := range users {
+				if subtle.ConstantTimeCompare([]byte(u), []byte(ou.Username)) == 1 {
+					ok, err := util.VerifyCryptSHA512(r.Context(), p, ou.PassHash)
+					if err != nil {
+						logger.Error("verify operator password", "user", ou.Username, "err", err)
+					}
+					if ok {
+						next.ServeHTTP(w, r.WithContext(sessions.WithUser(r.Context(), ou.Username)))
+						return
+					}
+					// Wrong password for a known user, or verifier error → reject.
+					break
+				}
+			}
 		}
 
-		// 3. Reject. HTML top-level navigations get a friendly redirect to the
+		// 4. Reject. HTML top-level navigations get a friendly redirect to the
 		// login page; everything else gets a JSON 401 with NO WWW-Authenticate
 		// header — we don't want the browser's native Basic Auth popup any
 		// more now that we own a login page.
@@ -161,6 +190,10 @@ func needsAuth(path string) bool {
 		return true
 	case path == "/api/v1/settings", strings.HasPrefix(path, "/api/v1/settings/"):
 		return true
+	case path == "/api/v1/subnets", strings.HasPrefix(path, "/api/v1/subnets/"):
+		return true
+	case path == "/api/v1/audit":
+		return true
 	}
 	return false
 }
@@ -170,5 +203,5 @@ func needsAuth(path string) bool {
 // store reduces this wrapper to "Basic Auth only", which is what the legacy
 // tests assume.
 func basicAuth(adminUser, adminPass string, next http.Handler) http.Handler {
-	return sessionOrBasicAuth(adminUser, adminPass, nil, nil, next)
+	return sessionOrBasicAuth(adminUser, adminPass, nil, nil, nil, next)
 }

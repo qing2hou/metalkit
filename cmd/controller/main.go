@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"metalkit/internal/audit"
 	"metalkit/internal/authapi"
 	"metalkit/internal/bindings"
 	"metalkit/internal/bmc"
@@ -257,6 +258,13 @@ func run() int {
 	// DHCP pool / leases store are constructed below — changes saved in
 	// the UI then take effect on the next restart without anyone touching
 	// config.yaml.
+	auditStore, err := audit.NewStore(ctx, db, logger.With("component", "audit"))
+	if err != nil {
+		logger.Error("audit open", "err", err)
+		return 1
+	}
+	auditAPI := audit.NewAPI(auditStore, logger.With("component", "audit-api"))
+
 	settingsStore, err := settings.NewStore(ctx, db, logger.With("component", "settings"))
 	if err != nil {
 		logger.Error("settings open", "err", err)
@@ -441,7 +449,8 @@ func run() int {
 		return 1
 	}
 	imgAPI.SetBindingDeleter(bindStore)
-	bindAPI := bindings.NewAPI(bindStore, logger.With("component", "bindings-api"))
+	bindAPI := bindings.NewAPI(bindStore, logger.With("component", "bindings-api")).
+		WithAudit(auditStore)
 
 	// Refuse subnet DELETE when any binding still points at it (until we
 	// promote the FK to ON DELETE RESTRICT proper).
@@ -521,12 +530,33 @@ func run() int {
 	}
 	go sessStore.GCLoop(runCtx, time.Hour)
 
+	// Named operator accounts from config.yaml `users:`. Converted to the
+	// httpd/authapi local types (config→httpd import would be a cycle).
+	opUsers := make([]httpd.OperatorUser, 0, len(cfg.Users))
+	authUsers := make([]authapi.Operator, 0, len(cfg.Users))
+	for _, u := range cfg.Users {
+		opUsers = append(opUsers, httpd.OperatorUser{Username: u.Username, PassHash: u.PassHash, Role: u.Role})
+		authUsers = append(authUsers, authapi.Operator{Username: u.Username, PassHash: u.PassHash, Role: u.Role})
+	}
+
+	// HTTPS: config stack (static files or auto self-signed) → httpd.
+	var httpsCfg *httpd.HTTPSConfig
+	if cfg.HTTPS != nil {
+		httpsCfg = &httpd.HTTPSConfig{
+			CertFile:    cfg.HTTPS.CertFile,
+			KeyFile:     cfg.HTTPS.KeyFile,
+			StateDir:    cfg.HTTPS.StateDir,
+			AutoDNSName: cfg.HTTPS.AutoDNSName,
+		}
+	}
+
 	authAPI := &authapi.API{
 		Sessions:   sessStore,
 		AdminUser:  cfg.AdminUser,
 		AdminPass:  cfg.AdminPass,
+		Users:      authUsers,
 		CookieTTL:  7 * 24 * time.Hour,
-		SecureFlag: false, // M2 runs over plain HTTP on the internal net.
+		SecureFlag: cfg.HTTPS != nil, // Secure cookie once TLS is on.
 		Logger:     logger.With("component", "auth-api"),
 	}
 
@@ -557,11 +587,14 @@ func run() int {
 		AgentJobs:        agentJobsAPI,
 		Util:             utilAPI,
 		Settings:         settingsAPI,
+		Audit:            auditAPI,
 		Sessions:         sessStore,
 		Auth:             authAPI,
 		UI:               uiHandler,
 		AdminUser:        cfg.AdminUser,
 		AdminPass:        cfg.AdminPass,
+		Users:            opUsers,
+		HTTPS:            httpsCfg,
 	})
 	if err != nil {
 		logger.Error("httpd init", "err", err)

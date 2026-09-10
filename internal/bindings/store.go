@@ -918,4 +918,3 @@ func isBroadcast(ip net.IP, ipnet *net.IPNet) bool {
 	}
 	return ip.Equal(broadcast)
 }
-

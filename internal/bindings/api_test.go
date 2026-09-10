@@ -92,7 +92,7 @@ func TestAPIUpsertUnknownImage(t *testing.T) {
 	mu := f.seedMachine(t, '1')
 	pr := f.seedProfile(t, "p2", "dhcp")
 	resp, _ := doRequest(t, http.MethodPut, ts.URL+"/api/v1/bindings/"+mu, map[string]any{
-		"image_id": "00000000000000000000000000000000",
+		"image_id":   "00000000000000000000000000000000",
 		"profile_id": pr, "desired_state": "install",
 	})
 	if resp.StatusCode != http.StatusUnprocessableEntity {

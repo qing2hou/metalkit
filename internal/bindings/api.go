@@ -6,6 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"metalkit/internal/audit"
+	"metalkit/internal/sessions"
 )
 
 // API surface (all behind Basic Auth):
@@ -24,6 +27,15 @@ import (
 type API struct {
 	store  *Store
 	logger *slog.Logger
+	// audit, when set, receives high-value events (password viewed) that
+	// deserve richer records than the generic HTTP-level trail.
+	audit *audit.Store
+}
+
+// WithAudit wires an audit store for high-value event records.
+func (a *API) WithAudit(as *audit.Store) *API {
+	a.audit = as
+	return a
 }
 
 // NewAPI constructs an API.
@@ -138,8 +150,15 @@ func (a *API) getPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "fetch failed")
 		return
 	}
+	actor := sessions.UserFromContext(r.Context())
+	if actor == "" {
+		actor = basicAuthUser(r)
+	}
 	a.logger.Info("binding password viewed",
-		"machine_uuid", uuid, "actor", basicAuthUser(r))
+		"machine_uuid", uuid, "actor", actor)
+	if a.audit != nil {
+		a.audit.Record(r.Context(), actor, "binding.password_view", uuid, "ok", nil)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"password": pt})
 }
 

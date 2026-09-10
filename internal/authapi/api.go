@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"metalkit/internal/sessions"
+	"metalkit/internal/util"
 )
 
 // CookieName is the browser session cookie name. The auth middleware in
@@ -25,16 +26,26 @@ const CookieName = "metalkit_session"
 // 4 KB limit kills accidental floods without rejecting any legitimate input.
 const maxLoginBody = 4 * 1024
 
-// API mounts the auth endpoints. AdminUser/AdminPass are the single static
-// credential pair the controller compares against; SecureFlag toggles the
-// cookie's Secure attribute (off on plain HTTP, on once we serve HTTPS).
+// API mounts the auth endpoints. AdminUser/AdminPass are the legacy static
+// credential pair; Users are named operator accounts (username + sha512crypt
+// hash). At least one credential source must be configured for login to be
+// enabled. SecureFlag toggles the cookie's Secure attribute (off on plain
+// HTTP, on when serving HTTPS).
 type API struct {
 	Sessions   *sessions.Store
 	AdminUser  string
 	AdminPass  string
+	Users      []Operator
 	CookieTTL  time.Duration
 	SecureFlag bool
 	Logger     *slog.Logger
+}
+
+// Operator is one named operator account accepted by login / basic auth.
+type Operator struct {
+	Username string
+	PassHash string // $6$ sha512crypt
+	Role     string // admin | operator
 }
 
 // RegisterRoutes attaches the auth endpoints to mux.
@@ -54,11 +65,11 @@ type loginResponse struct {
 }
 
 func (a *API) login(w http.ResponseWriter, r *http.Request) {
-	if a.AdminPass == "" {
-		// No password configured → no login flow. The middleware's "open mode"
-		// already lets unauthenticated requests through, so a cookie buys
-		// nothing. Surface the misconfiguration loudly rather than silently
-		// minting useless sessions.
+	if a.AdminPass == "" && len(a.Users) == 0 {
+		// No credentials configured → no login flow. The middleware's "open
+		// mode" already lets unauthenticated requests through, so a cookie
+		// buys nothing. Surface the misconfiguration loudly rather than
+		// silently minting useless sessions.
 		writeError(w, http.StatusServiceUnavailable, "auth disabled")
 		return
 	}
@@ -76,19 +87,40 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	username := strings.TrimSpace(in.Username)
 	password := in.Password
 
-	// Compare both fields unconditionally and combine — branching on the
-	// first mismatch would leak which field was wrong via timing. We still
-	// short-circuit the "empty field" case with the same 401 so the client
-	// can't tell empty from wrong either.
-	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(a.AdminUser))
-	passOK := subtle.ConstantTimeCompare([]byte(password), []byte(a.AdminPass))
-	if username == "" || password == "" || userOK != 1 || passOK != 1 {
+	authenticated := ""
+	// Legacy static pair: compare both fields unconditionally and combine.
+	if a.AdminPass != "" {
+		userOK := subtle.ConstantTimeCompare([]byte(username), []byte(a.AdminUser))
+		passOK := subtle.ConstantTimeCompare([]byte(password), []byte(a.AdminPass))
+		if username != "" && password != "" && userOK == 1 && passOK == 1 {
+			authenticated = a.AdminUser
+		}
+	}
+	// Named operator accounts: sha512crypt verification (forks mkpasswd;
+	// login is a cold path).
+	if authenticated == "" {
+		for _, u := range a.Users {
+			if subtle.ConstantTimeCompare([]byte(username), []byte(u.Username)) != 1 {
+				continue
+			}
+			ok, err := util.VerifyCryptSHA512(r.Context(), password, u.PassHash)
+			if err != nil && a.Logger != nil {
+				a.Logger.Error("auth login: verify", "user", u.Username, "err", err)
+			}
+			if ok {
+				authenticated = u.Username
+			}
+			break // a username matches at most one account; wrong pass → reject
+		}
+	}
+
+	if authenticated == "" {
 		a.logFailure(username)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 
-	sess, err := a.Sessions.Create(r.Context(), a.AdminUser, a.CookieTTL)
+	sess, err := a.Sessions.Create(r.Context(), authenticated, a.CookieTTL)
 	if err != nil {
 		if a.Logger != nil {
 			a.Logger.Error("auth login: session create failed", "err", err)
@@ -110,12 +142,12 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	if a.Logger != nil {
 		// session_id_prefix is enough to correlate with the audit log without
 		// leaking the full token (which is bearer-equivalent).
-		a.Logger.Info("auth login ok", "username", a.AdminUser, "session_id_prefix", sess.ID[:8])
+		a.Logger.Info("auth login ok", "username", authenticated, "session_id_prefix", sess.ID[:8])
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(loginResponse{Username: a.AdminUser})
+	_ = json.NewEncoder(w).Encode(loginResponse{Username: authenticated})
 }
 
 func (a *API) logout(w http.ResponseWriter, r *http.Request) {

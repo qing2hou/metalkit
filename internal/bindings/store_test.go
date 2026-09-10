@@ -229,7 +229,7 @@ func TestUpsertDHCPRejectsAddress(t *testing.T) {
 	pr := f.seedProfile(t, "p-dhcp-2", "dhcp")
 
 	_, err := f.bindings.Upsert(context.Background(), UpsertInput{
-		MachineUUID:   mu, ImageID: im, ProfileID: pr,
+		MachineUUID: mu, ImageID: im, ProfileID: pr,
 		DesiredState:  "install",
 		StaticAddress: "10.0.0.5",
 		UpdatedBy:     "admin",

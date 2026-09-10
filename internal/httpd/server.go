@@ -2,6 +2,7 @@ package httpd
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"metalkit/internal/audit"
 	"metalkit/internal/authapi"
 	"metalkit/internal/bindings"
 	"metalkit/internal/bmc"
@@ -75,6 +77,10 @@ type Config struct {
 	// config.yaml on disk.
 	Settings *settings.API
 
+	// Optional audit API. When set, mounts GET /api/v1/audit for the
+	// operator UI's audit page (who did what when).
+	Audit *audit.API
+
 	// Optional sessions store. When set, the auth middleware will accept
 	// a metalkit_session cookie in addition to Basic Auth. Required for the
 	// browser login flow; nil keeps Basic-Auth-only behavior (back-compat).
@@ -89,6 +95,22 @@ type Config struct {
 	// Basic Auth credentials. Empty AdminPass disables auth (open mode).
 	AdminUser string
 	AdminPass string
+
+	// HTTPS, when non-nil, serves the listener over TLS. See HTTPSConfig.
+	HTTPS *HTTPSConfig
+
+	// Users are operator accounts (username + sha512crypt hash + role).
+	// When non-empty the auth middleware accepts them in addition to the
+	// legacy AdminUser/AdminPass basic-auth pair. Each has its own audit
+	// identity.
+	Users []OperatorUser
+}
+
+// OperatorUser is one operator account for the UI/API.
+type OperatorUser struct {
+	Username string
+	PassHash string // $6$ sha512crypt, verified by util.VerifyCrypt
+	Role     string // "admin" | "operator"
 }
 
 // Server serves the iPXE chain script and boot artifacts.
@@ -96,6 +118,7 @@ type Server struct {
 	cfg      Config
 	httpAddr string // ":PORT" form used inside iPXE URLs
 	srv      *http.Server
+	audit    *audit.Store
 }
 
 // New validates cfg and constructs a Server. ServerIP must be an IPv4 literal
@@ -119,7 +142,11 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("httpd: %w", err)
 	}
 
-	return &Server{cfg: cfg, httpAddr: httpAddr}, nil
+	var auditStore *audit.Store
+	if cfg.Audit != nil {
+		auditStore = cfg.Audit.Store()
+	}
+	return &Server{cfg: cfg, httpAddr: httpAddr, audit: auditStore}, nil
 }
 
 // derivePortSuffix returns ":PORT" from either ":PORT" or "HOST:PORT".
@@ -136,23 +163,54 @@ func derivePortSuffix(addr string) (string, error) {
 
 // Start runs the HTTP server until ctx is cancelled. It returns nil on a
 // clean shutdown; non-context errors are returned as-is.
+//
+// When cfg.HTTPS is set the listener speaks TLS (static operator-provided
+// keypair, or a self-signed certificate auto-generated on first boot).
+// PXE/iPXE clients keep working: the iPXE binaries shipped with metalkit
+// are built with TLS support and trust is not enforced on the boot path
+// (see handleIPXE) — operators requiring strict TLS on /boot/* should put
+// a real certificate in place.
 func (s *Server) Start(ctx context.Context) error {
 	mux := s.routes()
-	handler := sessionOrBasicAuth(s.cfg.AdminUser, s.cfg.AdminPass, s.cfg.Sessions, s.cfg.Logger, mux)
+	// Order matters for the audit trail: auth outermost, then logging.
+	// The auth middleware attaches the operator identity to the REQUEST
+	// context it passes inward (r.WithContext), so the logging layer must
+	// sit inside auth to see that identity — otherwise every audited call
+	// would be attributed to "anonymous".
+	handler := s.logMiddleware(sessionOrBasicAuth(s.cfg.AdminUser, s.cfg.AdminPass, s.cfg.Users, s.cfg.Sessions, s.cfg.Logger, s.auditMiddleware(mux)))
 	s.srv = &http.Server{
 		Addr:              s.cfg.ListenAddr,
-		Handler:           s.logMiddleware(handler),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		// WriteTimeout intentionally 0: boot file downloads can be slow.
 	}
 
+	useTLS := s.cfg.HTTPS != nil
+	if useTLS {
+		h := *s.cfg.HTTPS
+		cert, err := ensureTLSMaterial(h, s.cfg.ServerIP, h.AutoDNSName, s.cfg.Logger)
+		if err != nil {
+			return err
+		}
+		s.srv.TLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
-		s.cfg.Logger.Info("httpd listening", "addr", s.cfg.ListenAddr, "server_ip", s.cfg.ServerIP, "boot_dir", s.cfg.BootDir)
-		if s.cfg.AdminPass == "" {
-			s.cfg.Logger.Warn("httpd auth disabled: adminPass empty — UI and /api/v1/machines* are open to the network")
+		s.cfg.Logger.Info("httpd listening", "addr", s.cfg.ListenAddr, "server_ip", s.cfg.ServerIP, "boot_dir", s.cfg.BootDir, "tls", useTLS)
+		if s.cfg.AdminPass == "" && len(s.cfg.Users) == 0 {
+			s.cfg.Logger.Warn("httpd auth disabled: no adminPass and no users — UI and /api/v1/* are open to the network")
 		}
-		err := s.srv.ListenAndServe()
+		var err error
+		if useTLS {
+			// Certificates come from TLSConfig; the file args stay empty.
+			err = s.srv.ListenAndServeTLS("", "")
+		} else {
+			err = s.srv.ListenAndServe()
+		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
@@ -215,6 +273,9 @@ func (s *Server) routes() *http.ServeMux {
 	}
 	if s.cfg.Settings != nil {
 		s.cfg.Settings.RegisterRoutes(mux)
+	}
+	if s.cfg.Audit != nil {
+		s.cfg.Audit.RegisterRoutes(mux)
 	}
 	if s.cfg.Auth != nil {
 		s.cfg.Auth.RegisterRoutes(mux)
@@ -321,5 +382,49 @@ func (s *Server) logMiddleware(h http.Handler) http.Handler {
 			"bytes", rec.bytes,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
+
+		// Mutating operator API calls are audited by the inner
+		// auditMiddleware (mounted inside the auth middleware so it sees
+		// the authenticated actor); this outer layer only writes the
+		// access log above.
 	})
+}
+
+// auditMiddleware wraps the mux and records every mutating operator API
+// call into the audit store. It sits INSIDE the auth middleware so
+// r.Context() carries the authenticated username (sessions.WithUser),
+// which is exactly what the audit trail needs to attribute actions.
+func (s *Server) auditMiddleware(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.audit == nil || r.Method == http.MethodGet || r.Method == http.MethodHead ||
+			!strings.HasPrefix(r.URL.Path, "/api/v1/") ||
+			strings.HasPrefix(r.URL.Path, "/api/v1/agent/") ||
+			strings.HasPrefix(r.URL.Path, "/api/v1/report") {
+			h.ServeHTTP(w, r)
+			return
+		}
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		h.ServeHTTP(rec, r)
+		outcome := "ok"
+		if rec.status >= 400 {
+			outcome = "failed"
+		}
+		actor := sessions.UserFromContext(r.Context())
+		if actor == "" {
+			actor = "anonymous" // e.g. failed login attempt itself
+		}
+		s.audit.Record(r.Context(), actor, r.Method+" "+r.URL.Path, "", outcome, map[string]any{
+			"status": rec.status,
+			"remote": remoteIP(r),
+		})
+	})
+}
+
+// remoteIP strips the port from RemoteAddr for audit records.
+func remoteIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }

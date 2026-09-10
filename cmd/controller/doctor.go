@@ -202,8 +202,8 @@ func checkBootDir(cfg *config.Config) checkResult {
 func checkDataDirs(cfg *config.Config) []checkResult {
 	out := []checkResult{}
 	for _, c := range []struct {
-		name string
-		path string
+		name   string
+		path   string
 		isFile bool
 	}{
 		{"db path", cfg.DBPath, true},
@@ -292,9 +292,9 @@ func checkAdminAuth(cfg *config.Config) checkResult {
 // any one of them disables a feature but doesn't kill the controller.
 func checkExternalTools() []checkResult {
 	tools := []struct {
-		name     string
-		bin      string
-		feature  string
+		name    string
+		bin     string
+		feature string
 	}{
 		{"ipmitool", "ipmitool", "BMC power / boot-device control"},
 		{"mkpasswd", "mkpasswd", "POST /api/v1/util/crypt-sha512 (UI password helper)"},

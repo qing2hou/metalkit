@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -69,6 +70,42 @@ type Config struct {
 	// Hashed once at controller startup; the hash is what hits SQLite. Default
 	// "metalkit" — change in config.yaml per-environment.
 	DefaultRootPassword string `yaml:"defaultRootPassword"`
+
+	// HTTPS serves the HTTP port over TLS. Users holds the operator
+	// accounts for the Web UI (replaces the single adminUser/adminPass pair
+	// when non-empty; the legacy pair remains as fallback for back-compat).
+	HTTPS *HTTPSConfig `yaml:"https"`
+	Users []User       `yaml:"users"`
+}
+
+// HTTPSConfig enables TLS on the HTTP listener. Two modes:
+//
+//   - Static: certFile + keyFile point at operator-provided PEM files.
+//     Both must be set together.
+//   - Auto: certFile/keyFile empty → a self-signed certificate is generated
+//     on first boot into HTTPSStateDir (default under the data dir), with
+//     SANs for ServerIP, localhost and the interface IP. Suitable for
+//     management-network deployments where the controller is the TLS root
+//     of its own browsing population (operators accept the browser warning
+//     or distribute the cert).
+type HTTPSConfig struct {
+	CertFile    string `yaml:"certFile"`
+	KeyFile     string `yaml:"keyFile"`
+	StateDir    string `yaml:"stateDir"`    // where the auto cert/key live; defaults to <dbdir>/tls
+	AutoDNSName string `yaml:"autoDNSName"` // extra SAN (e.g. metalkit.internal)
+}
+
+// User is an operator account for the Web UI / API. Password is verified
+// against the bcrypt-style hash produced by `mkpasswd -m sha-512` at
+// account-creation time (same primitive util.CryptSHA512 uses).
+type User struct {
+	Username string `yaml:"username"`
+	// PassHash is a $6$ sha512crypt hash. Generate with:
+	//   mkpasswd -m sha-512
+	PassHash string `yaml:"passHash"`
+	// Role: "admin" (default) can do everything including user management;
+	// "operator" can operate but not manage users or read passwords.
+	Role string `yaml:"role"`
 }
 
 // DHCPPool is the lease range and per-subnet metadata for full DHCP mode.
@@ -132,6 +169,30 @@ func Load(path string) (*Config, error) {
 	}
 	if c.DefaultRootPassword == "" {
 		c.DefaultRootPassword = "metalkit"
+	}
+
+	// HTTPS cert pairs must be complete when the static mode is used.
+	if c.HTTPS != nil {
+		h := c.HTTPS
+		if (h.CertFile == "") != (h.KeyFile == "") {
+			return nil, fmt.Errorf("https: certFile and keyFile must be set together")
+		}
+		if h.StateDir == "" {
+			h.StateDir = filepath.Join(filepath.Dir(c.DBPath), "tls")
+		}
+	}
+
+	// User roles normalize to a closed set; empty Role means admin for
+	// back-compat with hand-written configs.
+	for i := range c.Users {
+		switch r := strings.ToLower(strings.TrimSpace(c.Users[i].Role)); r {
+		case "":
+			c.Users[i].Role = "admin"
+		case "admin", "operator":
+			c.Users[i].Role = r
+		default:
+			return nil, fmt.Errorf("users[%d]: role %q must be admin or operator", i, c.Users[i].Role)
+		}
 	}
 
 	// Normalize DHCP mode. Unset and unknown values fall back to proxy so
