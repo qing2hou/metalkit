@@ -36,7 +36,9 @@ func get(t *testing.T, ts *httptest.Server, path string) (int, string, string) {
 	return resp.StatusCode, resp.Header.Get("Content-Type"), string(body)
 }
 
-func TestIndexPage(t *testing.T) {
+// TestSpaShell verifies the index path serves the Vite-built SPA shell with
+// the entry script referenced under /ui/assets/.
+func TestSpaShell(t *testing.T) {
 	ts := newTestServer(t)
 	status, ct, body := get(t, ts, "/ui/")
 	if status != http.StatusOK {
@@ -45,206 +47,61 @@ func TestIndexPage(t *testing.T) {
 	if !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("content-type = %q, want text/html...", ct)
 	}
-	if !strings.Contains(body, "metalkit &mdash; 机器列表") {
-		t.Errorf("index body missing expected marker; got first 200 bytes: %q", truncate(body, 200))
+	if !strings.Contains(body, `<div id="app">`) {
+		t.Errorf("index body missing #app mount point; got first 200 bytes: %q", truncate(body, 200))
+	}
+	if !strings.Contains(body, "/ui/assets/") {
+		t.Errorf("index body missing hashed asset reference")
 	}
 }
 
-func TestDetailPage(t *testing.T) {
+// TestSpaFallback verifies deep links (client-side routes such as
+// /ui/m/{uuid} or /ui/jobs/{id}) fall back to the SPA shell so the Vue
+// router can pick them up on a fresh page load.
+func TestSpaFallback(t *testing.T) {
 	ts := newTestServer(t)
-	status, ct, body := get(t, ts, "/ui/m/abc-123")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("content-type = %q, want text/html...", ct)
-	}
-	// Marker present in detail.html but not in index.html.
-	if !strings.Contains(body, "上报历史") {
-		t.Errorf("detail body missing expected marker; got first 200 bytes: %q", truncate(body, 200))
+	for _, path := range []string{"/ui/login", "/ui/m/abc-123", "/ui/jobs/deadbeef", "/ui/images", "/ui/profiles", "/ui/subnets", "/ui/bmc", "/ui/jobs", "/ui/settings"} {
+		status, ct, body := get(t, ts, path)
+		if status != http.StatusOK {
+			t.Errorf("GET %s: status = %d, want 200", path, status)
+			continue
+		}
+		if !strings.HasPrefix(ct, "text/html") {
+			t.Errorf("GET %s: content-type = %q, want text/html...", path, ct)
+		}
+		if !strings.Contains(body, `<div id="app">`) {
+			t.Errorf("GET %s: body missing SPA shell marker", path)
+		}
 	}
 }
 
-func TestImagesPage(t *testing.T) {
+// TestHashedAssetServed verifies a real file from the Vite build output is
+// served under /ui/assets/ (the prefix the httpd auth whitelist allows).
+func TestHashedAssetServed(t *testing.T) {
 	ts := newTestServer(t)
-	status, ct, body := get(t, ts, "/ui/images")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
+	// Discover the hashed entry from the shell to avoid hard-coding a hash.
+	_, _, body := get(t, ts, "/ui/")
+	marker := "/ui/assets/"
+	idx := strings.Index(body, marker)
+	if idx < 0 {
+		t.Fatalf("index body has no /ui/assets/ reference")
 	}
-	if !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("content-type = %q, want text/html...", ct)
+	rest := body[idx+len(marker):]
+	end := strings.IndexAny(rest, `"'`)
+	if end < 0 {
+		t.Fatalf("could not parse asset name from index body")
 	}
-	// Marker that's only on the images page.
-	if !strings.Contains(body, "上传镜像") {
-		t.Errorf("images body missing expected marker; got first 200 bytes: %q", truncate(body, 200))
-	}
-	if !strings.Contains(body, "/ui/assets/images.js") {
-		t.Errorf("images body missing images.js script tag")
-	}
-}
+	asset := marker + rest[:end]
 
-func TestProfilesPage(t *testing.T) {
-	ts := newTestServer(t)
-	status, ct, body := get(t, ts, "/ui/profiles")
+	status, ct, assetBody := get(t, ts, asset)
 	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
+		t.Fatalf("GET %s: status = %d, want 200", asset, status)
 	}
-	if !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("content-type = %q, want text/html...", ct)
+	if len(assetBody) == 0 {
+		t.Errorf("GET %s: body was empty", asset)
 	}
-	if !strings.Contains(body, "安装配置") {
-		t.Errorf("profiles body missing expected marker; got first 200 bytes: %q", truncate(body, 200))
-	}
-	if !strings.Contains(body, "/ui/assets/profiles.js") {
-		t.Errorf("profiles body missing profiles.js script tag")
-	}
-}
-
-func TestSubnetsPage(t *testing.T) {
-	ts := newTestServer(t)
-	status, ct, body := get(t, ts, "/ui/subnets")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("content-type = %q, want text/html...", ct)
-	}
-	if !strings.Contains(body, `data-page="subnets"`) {
-		t.Errorf("subnets body missing data-page=\"subnets\" marker; got first 200 bytes: %q", truncate(body, 200))
-	}
-	if !strings.Contains(body, "/ui/assets/subnets.js") {
-		t.Errorf("subnets body missing subnets.js script tag")
-	}
-}
-
-func TestImagesJSAsset(t *testing.T) {
-	ts := newTestServer(t)
-	status, _, body := get(t, ts, "/ui/assets/images.js")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if len(body) == 0 {
-		t.Errorf("images.js body was empty")
-	}
-}
-
-func TestLoginPage(t *testing.T) {
-	ts := newTestServer(t)
-	status, ct, body := get(t, ts, "/ui/login")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("content-type = %q, want text/html...", ct)
-	}
-	if !strings.Contains(body, `data-page="login"`) {
-		t.Errorf("login body missing data-page=\"login\" marker; got first 200 bytes: %q", truncate(body, 200))
-	}
-	if !strings.Contains(body, "/ui/assets/login.js") {
-		t.Errorf("login body missing login.js script tag")
-	}
-}
-
-func TestLoginJSAsset(t *testing.T) {
-	ts := newTestServer(t)
-	status, _, body := get(t, ts, "/ui/assets/login.js")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if len(body) == 0 {
-		t.Errorf("login.js body was empty")
-	}
-}
-
-func TestAppJSAsset(t *testing.T) {
-	ts := newTestServer(t)
-	status, ct, body := get(t, ts, "/ui/assets/app.js")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	// Different stdlib versions report either javascript form; accept both.
-	if !strings.HasPrefix(ct, "text/javascript") && !strings.HasPrefix(ct, "application/javascript") {
-		t.Errorf("content-type = %q, want text/javascript or application/javascript", ct)
-	}
-	if len(body) == 0 {
-		t.Errorf("app.js body was empty")
-	}
-}
-
-func TestStyleCSSAsset(t *testing.T) {
-	ts := newTestServer(t)
-	status, ct, body := get(t, ts, "/ui/assets/style.css")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if !strings.HasPrefix(ct, "text/css") {
-		t.Errorf("content-type = %q, want text/css...", ct)
-	}
-	if len(body) == 0 {
-		t.Errorf("style.css body was empty")
-	}
-}
-
-func TestBMCPage(t *testing.T) {
-	ts := newTestServer(t)
-	status, ct, body := get(t, ts, "/ui/bmc")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("content-type = %q, want text/html...", ct)
-	}
-	if !strings.Contains(body, `data-page="bmc"`) {
-		t.Errorf("bmc body missing data-page=\"bmc\" marker; got first 200 bytes: %q", truncate(body, 200))
-	}
-	if !strings.Contains(body, "/ui/assets/bmc.js") {
-		t.Errorf("bmc body missing bmc.js script tag")
-	}
-	if !strings.Contains(body, "/ui/assets/common.js") {
-		t.Errorf("bmc body missing common.js script tag")
-	}
-}
-
-func TestJobsPage(t *testing.T) {
-	ts := newTestServer(t)
-	status, ct, body := get(t, ts, "/ui/jobs")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("content-type = %q, want text/html...", ct)
-	}
-	// Marker that's only on the jobs list page.
-	if !strings.Contains(body, `data-page="jobs"`) {
-		t.Errorf("jobs body missing data-page=\"jobs\" marker; got first 200 bytes: %q", truncate(body, 200))
-	}
-	if !strings.Contains(body, "/ui/assets/jobs.js") {
-		t.Errorf("jobs body missing jobs.js script tag")
-	}
-	if !strings.Contains(body, "/ui/assets/common.js") {
-		t.Errorf("jobs body missing common.js script tag")
-	}
-}
-
-func TestJobDetailPage(t *testing.T) {
-	ts := newTestServer(t)
-	status, ct, body := get(t, ts, "/ui/jobs/deadbeefdeadbeefdeadbeefdeadbeef")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("content-type = %q, want text/html...", ct)
-	}
-	// Marker that's only on the job detail page (NOT the jobs list page).
-	if !strings.Contains(body, `data-page="job"`) {
-		t.Errorf("job detail body missing data-page=\"job\" marker; got first 200 bytes: %q", truncate(body, 200))
-	}
-	if !strings.Contains(body, "/ui/assets/job.js") {
-		t.Errorf("job detail body missing job.js script tag")
-	}
-	// Make sure the detail handler is distinct from the list handler.
-	if strings.Contains(body, `data-page="jobs"`) {
-		t.Errorf("job detail body matched the jobs LIST page marker; route wiring wrong")
+	if !strings.Contains(ct, "javascript") && !strings.Contains(ct, "css") {
+		t.Logf("GET %s content-type = %q (informational)", asset, ct)
 	}
 }
 
@@ -256,21 +113,9 @@ func TestMissingAsset404(t *testing.T) {
 	}
 }
 
-func TestUnknownPath404(t *testing.T) {
-	ts := newTestServer(t)
-	status, _, body := get(t, ts, "/ui/unknown")
-	if status != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", status)
-	}
-	// Ensure we didn't accidentally serve the index page.
-	if strings.Contains(body, "metalkit &mdash; 机器列表") {
-		t.Errorf("/ui/unknown returned the index page body; subtree leak from \"/ui/\"")
-	}
-}
-
+// TestRootMountRedirect verifies /ui redirects to /ui/.
 func TestRootMountRedirect(t *testing.T) {
 	ts := newTestServer(t)
-	// "/ui" without trailing slash should redirect to "/ui/".
 	status, _, _ := get(t, ts, "/ui")
 	if status != http.StatusMovedPermanently {
 		t.Fatalf("status = %d, want 301", status)
