@@ -276,6 +276,18 @@ export interface DhcpSettings {
   [key: string]: unknown
 }
 
+// ---------- audit ----------
+
+export interface AuditEvent {
+  id: number
+  ts: string
+  actor: string
+  action: string
+  target?: string
+  outcome: 'ok' | 'failed'
+  details?: Record<string, unknown> | null
+}
+
 // ---------- auth / util ----------
 
 export interface AuthUser {

@@ -22,6 +22,7 @@ const router = createRouter({
     { path: '/jobs', name: 'jobs', component: () => import('@/views/JobsView.vue') },
     { path: '/jobs/:id', name: 'job-detail', component: () => import('@/views/JobDetailView.vue') },
     { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
+    { path: '/audit', name: 'audit', component: () => import('@/views/AuditView.vue') },
     { path: '/:pathMatch(.*)*', name: 'not-found', redirect: '/' },
   ],
 })

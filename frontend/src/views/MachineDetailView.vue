@@ -9,6 +9,7 @@ import type { Binding, Image, Job, Profile, Report, ReportMeta, Subnet } from '@
 import AppShell from '@/components/AppShell.vue'
 import CopyableText from '@/components/CopyableText.vue'
 import InstallDialog from '@/components/InstallDialog.vue'
+import { usePollHealth } from '@/composables/usePollHealth'
 import StatusTag from '@/components/StatusTag.vue'
 import { fmtAbsolute, fmtBytes, fmtRelative } from '@/lib/format'
 import { asRow } from '@/lib/typed'
@@ -36,6 +37,8 @@ const unbindBusy = ref(false)
 // 原始 JSON 展示
 const rawJsonVisible = ref(false)
 
+const health = usePollHealth()
+
 async function load(): Promise<void> {
   if (!uuid.value) return
   loading.value = true
@@ -60,8 +63,9 @@ async function load(): Promise<void> {
     subnets.value = subs
     recentJobs.value = jobs
     reportHistory.value = history.slice(0, 20)
+    health.noteOk()
   } catch {
-    // 401 已在 client 跳转；其余不打断
+    health.noteError()
   } finally {
     loading.value = false
   }
@@ -141,6 +145,14 @@ function viewHistoryItem(meta: ReportMeta): void {
 <template>
   <AppShell>
     <div v-loading="loading" class="mk-page">
+      <el-alert
+        v-if="health.unreachable.value"
+        title="无法连接 controller — 数据可能已过期，正在持续重试"
+        type="error"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 12px"
+      />
       <header class="mk-page-header">
         <h1 class="mk-page-title">机器详情</h1>
         <div class="mk-header-right">

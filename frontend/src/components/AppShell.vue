@@ -29,6 +29,7 @@ const navItems: NavItem[] = [
   { to: '/subnets', label: '子网' },
   { to: '/bmc', label: 'BMC' },
   { to: '/jobs', label: '作业' },
+  { to: '/audit', label: '审计' },
   { to: '/settings', label: '设置' },
 ]
 

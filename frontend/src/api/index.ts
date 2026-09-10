@@ -1,5 +1,6 @@
 import { apiGet, apiSend } from './client'
 import type {
+  AuditEvent,
   AuthUser,
   Binding,
   BmcActionResult,
@@ -131,6 +132,20 @@ export const jobsApi = {
 export const settingsApi = {
   getDhcp: () => apiGet<DhcpSettings>('/settings/dhcp'),
   putDhcp: (settings: DhcpSettings) => apiSend<DhcpSettings>('PUT', '/settings/dhcp', settings),
+}
+
+// ---------- audit ----------
+
+export const auditApi = {
+  list: (params: { actor?: string; action?: string; limit?: number; offset?: number } = {}) => {
+    const qs = new URLSearchParams()
+    if (params.actor) qs.set('actor', params.actor)
+    if (params.action) qs.set('action', params.action)
+    if (params.limit) qs.set('limit', String(params.limit))
+    if (params.offset) qs.set('offset', String(params.offset))
+    const q = qs.toString()
+    return apiGet<AuditEvent[]>(`/audit${q ? `?${q}` : ''}`)
+  },
 }
 
 // ---------- util ----------

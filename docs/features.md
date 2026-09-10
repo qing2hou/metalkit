@@ -223,6 +223,16 @@
 
 前端构建:改 `frontend/` 后运行 `make frontend`(node 环境构建并提交产物到 `internal/webui/assets/`);只有 Go 环境的机器可直接 `make build`。dev 模式 `cd frontend && npm run dev`(API 代理到 127.0.0.1:8080)。
 
+**生产强化(2026-09)**:
+
+| 能力 | 说明 |
+|---|---|
+| HTTPS | `https:` 配置块;自签证书自动生成(含 serverIP/localhost SANs)或静态证书文件;cookie 自动 Secure |
+| 多用户 | `users:` 配置命名账号(sha512crypt hash),登录/Basic-Auth 双轨;操作者身份进审计 |
+| 审计 | 变更类 API 全量记录(方法/路径/状态码/操作者/IP);装机密码查看单独记录;`/ui/audit` 页可按操作者/动作过滤 |
+| 镜像上传 | 8MiB 分块+断点续传(会话幂等续传)+逐块 SHA-256+扩展名预检 |
+| 轮询健康 | 机器/作业/详情页连续 2 次拉取失败显示常驻错误横幅(数据过期可见) |
+
 ---
 
 ## 12. 认证(M2.3-11)

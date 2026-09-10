@@ -9,6 +9,7 @@ import type { MachineSummary } from '@/api/types'
 import AppShell from '@/components/AppShell.vue'
 import CopyableText from '@/components/CopyableText.vue'
 import StatusTag from '@/components/StatusTag.vue'
+import { usePollHealth } from '@/composables/usePollHealth'
 import { useQuerySync } from '@/composables/useQuerySync'
 import { fmtRelative } from '@/lib/format'
 import { asRow } from '@/lib/typed'
@@ -59,12 +60,16 @@ useQuerySync(
   }),
 )
 
+const health = usePollHealth()
+
 async function load(): Promise<void> {
   loading.value = true
   try {
     list.value = await machinesApi.list()
+    health.noteOk()
   } catch {
-    // 错误已在 client 层处理（401 跳转）；其他错误不打断轮询
+    // 401 已在 client 层跳转；其余错误连续 2 次后显示常驻横幅
+    health.noteError()
   } finally {
     loading.value = false
   }
@@ -146,6 +151,14 @@ async function remove(row: MachineSummary): Promise<void> {
 <template>
   <AppShell>
     <div class="mk-page">
+      <el-alert
+        v-if="health.unreachable.value"
+        title="无法连接 controller — 数据可能已过期，正在持续重试"
+        type="error"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 12px"
+      />
       <header class="mk-page-header">
         <h1 class="mk-page-title">机器列表</h1>
         <div class="mk-header-right">

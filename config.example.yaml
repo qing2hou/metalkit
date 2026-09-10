@@ -21,3 +21,31 @@ masterKeyPath: /var/lib/metalkit/master.key
 # /api/v1/heartbeat/*) are always open — agents have no credential store.
 adminUser: admin
 adminPass: ""
+
+# Named operator accounts (recommended over adminPass for multi-operator
+# deployments). Each login/Basic-Auth attempt lands in the audit trail with
+# the acting username. Generate a passHash with:  mkpasswd -m sha-512
+# Role: admin (default) sees everything; operator cannot read install
+# passwords or manage users.
+# users:
+#   - username: alice
+#     passHash: "$6$rounds=...$..."
+#     role: admin
+#   - username: bob
+#     passHash: "$6$rounds=...$..."
+#     role: operator
+
+# Serve the HTTP listener over TLS. Two modes:
+#   auto (default when the block is present): a self-signed certificate is
+#     generated on first boot into <stateDir> (default: alongside the DB),
+#     with SANs for serverIP + localhost + all interface IPs (+ autoDNSName).
+#     Operators either accept the browser warning once or distribute the cert.
+#   static: give certFile + keyFile (PEM) to use your own certificate
+#     (e.g. signed by the org CA). Restart picks up rotated files.
+# Note: the login session cookie is automatically marked Secure when TLS
+# is enabled.
+# https:
+#   certFile: /etc/metalkit/tls/controller.crt
+#   keyFile:  /etc/metalkit/tls/controller.key
+#   # stateDir: /var/lib/metalkit/tls   # auto-cert storage (auto mode only)
+#   # autoDNSName: metalkit.internal     # extra SAN for auto mode

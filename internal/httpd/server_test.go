@@ -185,10 +185,10 @@ func TestStartShutdown(t *testing.T) {
 
 func TestDerivePortSuffix(t *testing.T) {
 	cases := map[string]string{
-		":8080":            ":8080",
-		"0.0.0.0:8080":     ":8080",
-		"127.0.0.1:1234":   ":1234",
-		"[::1]:9000":       ":9000",
+		":8080":          ":8080",
+		"0.0.0.0:8080":   ":8080",
+		"127.0.0.1:1234": ":1234",
+		"[::1]:9000":     ":9000",
 	}
 	for in, want := range cases {
 		got, err := derivePortSuffix(in)

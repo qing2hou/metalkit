@@ -8,6 +8,7 @@ import { jobsApi } from '@/api'
 import type { Job } from '@/api/types'
 import AppShell from '@/components/AppShell.vue'
 import StatusTag from '@/components/StatusTag.vue'
+import { usePollHealth } from '@/composables/usePollHealth'
 import { useQuerySync } from '@/composables/useQuerySync'
 import { fmtAbsolute, fmtRelative } from '@/lib/format'
 import { asRow } from '@/lib/typed'
@@ -47,12 +48,15 @@ useQuerySync(
   }),
 )
 
+const health = usePollHealth()
+
 async function load(): Promise<void> {
   loading.value = true
   try {
     list.value = await jobsApi.list({ limit: 200 })
+    health.noteOk()
   } catch {
-    // 401 已统一跳转
+    health.noteError()
   } finally {
     loading.value = false
   }
@@ -142,6 +146,14 @@ const runningCount = computed(() => list.value.filter((j) => j.status === 'runni
 <template>
   <AppShell>
     <div class="mk-page">
+      <el-alert
+        v-if="health.unreachable.value"
+        title="无法连接 controller — 数据可能已过期，正在持续重试"
+        type="error"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 12px"
+      />
       <header class="mk-page-header">
         <h1 class="mk-page-title">装机作业</h1>
         <div class="mk-header-right">
