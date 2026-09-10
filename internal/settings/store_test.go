@@ -303,3 +303,77 @@ func TestAPI_InterfaceFieldLifecycle(t *testing.T) {
 		t.Errorf("bad nic status = %d, want 400", resp4.StatusCode)
 	}
 }
+
+func TestAPI_PutProxyZeroesPoolFields(t *testing.T) {
+	s := newTestStore(t)
+	// First store a full-mode pool so there IS stale data to clear.
+	cfg := &config.Config{ServerIP: "192.168.10.120", Interface: "", DHCPMode: config.DHCPModeFull}
+	api := NewAPI(s, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	if err := s.SetMany(context.Background(), map[string]string{
+		KeyDHCPMode:       "full",
+		KeyDHCPStart:      "192.168.10.100",
+		KeyDHCPEnd:        "192.168.10.200",
+		KeyDHCPNetmask:    "255.255.255.0",
+		KeyDHCPGateway:    "192.168.10.1",
+		KeyDHCPDNS:        "8.8.8.8",
+		KeyDHCPLeaseHours: "48",
+		KeyDHCPExclude:    "192.168.10.9",
+	}, "test"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Switch to proxy WITH stale pool values still in the request body —
+	// they must be zeroed, not persisted.
+	body := `{
+		"mode": "proxy",
+		"start": "10.99.99.100",
+		"end": "10.99.99.200",
+		"netmask": "255.0.0.0",
+		"gateway": "10.99.99.1",
+		"dns": ["8.8.4.4"],
+		"lease_hours": 96,
+		"exclude": ["10.99.99.9"]
+	}`
+	req, _ := http.NewRequest("PUT", srv.URL+"/api/v1/settings/dhcp", strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, raw)
+	}
+
+	// Every pool key must now read blank/zero in the store — the stale
+	// seeded values AND the request's garbage values both gone.
+	for key, want := range map[string]string{
+		KeyDHCPStart: "", KeyDHCPEnd: "", KeyDHCPNetmask: "", KeyDHCPGateway: "",
+		KeyDHCPDNS: "", KeyDHCPLeaseHours: "0", KeyDHCPExclude: "",
+	} {
+		got, err := s.Get(context.Background(), key)
+		if err != nil {
+			t.Fatalf("Get %s: %v", key, err)
+		}
+		if got != want {
+			t.Errorf("%s = %q, want %q (pool leaked into proxy mode)", key, got, want)
+		}
+	}
+	if mode, _ := s.Get(context.Background(), KeyDHCPMode); mode != "proxy" {
+		t.Errorf("mode = %q, want proxy", mode)
+	}
+
+	// GET shows blank pool and empty interface (config had none).
+	resp2, _ := http.Get(srv.URL + "/api/v1/settings/dhcp")
+	defer resp2.Body.Close()
+	var got DHCPSettings
+	_ = json.NewDecoder(resp2.Body).Decode(&got)
+	if got.Start != "" || got.LeaseHours != 0 || len(got.DNS) != 0 {
+		t.Errorf("GET after proxy switch: %+v — pool should read blank", got)
+	}
+}

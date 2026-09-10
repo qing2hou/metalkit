@@ -176,6 +176,20 @@ async function save(): Promise<void> {
 }
 
 const formRef = ref<FormInstance>()
+
+// 模式切换：proxy 下池字段无意义，清空表单与后端"proxy 清零落库"语义一致，
+// 切回 full 时从干净状态开始，避免带着旧网段直接保存。
+function onModeChange(mode: 'proxy' | 'full'): void {
+  if (mode !== 'proxy') return
+  form.start = ''
+  form.end = ''
+  form.gateway = ''
+  form.netmask = '255.255.255.0'
+  form.lease_hours = 24
+  dnsText.value = ''
+  excludeText.value = ''
+  formRef.value?.clearValidate()
+}
 </script>
 
 <template>
@@ -194,7 +208,7 @@ const formRef = ref<FormInstance>()
           style="max-width: 760px"
         >
           <el-form-item label="模式" prop="mode">
-            <el-radio-group v-model="form.mode">
+            <el-radio-group v-model="form.mode" @change="onModeChange(form.mode)">
               <el-radio-button value="proxy">Proxy（旁路）</el-radio-button>
               <el-radio-button value="full">Full（全量）</el-radio-button>
             </el-radio-group>

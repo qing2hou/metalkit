@@ -407,9 +407,18 @@ func validateDHCPSettings(in *DHCPSettings, bootCfg *config.Config) error {
 	default:
 		return fmt.Errorf("mode %q: must be %q or %q", in.Mode, config.DHCPModeProxy, config.DHCPModeFull)
 	}
-	// In proxy mode pool fields are ignored — clear them so we don't store
-	// stale values that would surprise the operator on the next mode flip.
+	// In proxy mode pool fields are ignored — zero them out so the PUT
+	// handler stores blanks instead of the caller's stale pool. Switching
+	// back to full then starts from a clean form rather than resurrecting
+	// an old subnet by muscle memory.
 	if in.Mode == config.DHCPModeProxy {
+		in.Start = ""
+		in.End = ""
+		in.Netmask = ""
+		in.Gateway = ""
+		in.DNS = nil
+		in.LeaseHours = 0
+		in.Exclude = nil
 		return nil
 	}
 
