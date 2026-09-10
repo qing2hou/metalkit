@@ -2,7 +2,7 @@
 import { ElMessage } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 
-import { bindingsApi, utilApi } from '@/api'
+import { bindingsApi } from '@/api'
 import type { Binding, Image, Profile, Report, Subnet } from '@/api/types'
 import { generatePassword } from '@/lib/filename'
 import { hostInSubnet, isValidIPv4 } from '@/lib/net'
@@ -40,7 +40,7 @@ const form = reactive({
   rootPassword: '',
   usePasswordOverride: false,
   // 目标盘（三态，来自 profile 默认值，可覆盖）
-  diskMode: 'smallest' as 'smallest' | 'by-wwn' | 'by-path',
+  diskMode: 'smallest' as 'smallest' | 'by-wwn' | 'by-path' | 'by-model',
   diskValue: '',
   // NIC
   nicMode: 'auto' as 'auto' | 'mac',
@@ -65,10 +65,10 @@ const selectedProfile = computed(() => props.profiles.find((p) => p.id === form.
 watch(selectedProfile, (p) => {
   if (!p) return
   if (p.target_disk) {
-    form.diskMode = (['smallest', 'by-wwn', 'by-path'] as const).includes(
+    form.diskMode = (['smallest', 'by-wwn', 'by-path', 'by-model'] as const).includes(
       p.target_disk.mode as 'smallest',
     )
-      ? (p.target_disk.mode as 'smallest' | 'by-wwn' | 'by-path')
+      ? (p.target_disk.mode as 'smallest' | 'by-wwn' | 'by-path' | 'by-model')
       : 'smallest'
     form.diskValue = p.target_disk.value ?? ''
   }
@@ -154,12 +154,9 @@ async function submit(): Promise<void> {
   }
   saving.value = true
   try {
-    // 密码覆盖：明文先换 crypt-sha512 hash，明文不出表单
-    let passwordHash: string | undefined
-    if (form.usePasswordOverride && form.rootPassword) {
-      const res = await utilApi.cryptSha512(form.rootPassword)
-      passwordHash = res.hash
-    }
+    // 密码覆盖：binding.root_password 接收明文（8-128 字符），服务端 AES 加密
+    // 存储、装机时才转换为 $6$ hash 写入目标系统（见 jobs/agent_api.go）。
+    // 依赖 HTTPS 传输（server 已支持 TLS）。
 
     // binding 覆盖字段（三态语义见 bindings.UpsertInput）：
     //   target_disk / bond 键存在且为 "null" 字符串 = 清除；键不传 = 沿用 profile
@@ -171,7 +168,9 @@ async function submit(): Promise<void> {
       // subnet_id：留空选择时显式发 "" 清除，否则发所选子网
       subnet_id: form.subnetId || '',
       ...(form.ipMode === 'static' && form.staticIp ? { static_address: form.staticIp } : {}),
-      ...(passwordHash ? { root_password: passwordHash } : {}),
+      ...(form.usePasswordOverride && form.rootPassword
+        ? { root_password: form.rootPassword }
+        : {}),
       // target_disk：非 smallest 或带匹配值时才覆盖
       ...(form.diskMode !== 'smallest' || form.diskValue
         ? {
@@ -371,6 +370,7 @@ async function submit(): Promise<void> {
               <el-radio-button value="smallest">最小</el-radio-button>
               <el-radio-button value="by-wwn">WWN</el-radio-button>
               <el-radio-button value="by-path">路径</el-radio-button>
+              <el-radio-button value="by-model">型号</el-radio-button>
             </el-radio-group>
           </el-form-item>
         </el-col>
@@ -392,7 +392,7 @@ async function submit(): Promise<void> {
               />
             </el-select>
             <el-select
-              v-else
+              v-else-if="form.diskMode === 'by-path'"
               v-model="form.diskValue"
               filterable
               style="width: 100%"
@@ -403,6 +403,22 @@ async function submit(): Promise<void> {
                 :key="d.path"
                 :label="`${d.path} · ${fmtBytes(d.size_bytes)}`"
                 :value="d.path"
+              />
+            </el-select>
+            <el-select
+              v-else
+              v-model="form.diskValue"
+              filterable
+              allow-create
+              style="width: 100%"
+              placeholder="选择或输入磁盘型号"
+            >
+              <el-option
+                v-for="d in disks"
+                :key="d.model ?? d.kname"
+                :label="`${d.model || '(无型号)'} · ${fmtBytes(d.size_bytes)}`"
+                :value="d.model ?? ''"
+                :disabled="!d.model"
               />
             </el-select>
           </el-form-item>
@@ -422,7 +438,7 @@ async function submit(): Promise<void> {
           <el-input v-model="form.rootPassword" class="mono" placeholder="留空 = 沿用 profile" readonly />
           <el-button @click="randomizePassword">🎲 随机</el-button>
         </div>
-        <div class="mk-subtle">仅用于本次装机，提交时转为 crypt hash 存储；明文不再回传</div>
+        <div class="mk-subtle">仅用于本次装机；加密存储在服务端，装机时转换为 shadow hash</div>
       </el-form-item>
       <el-form-item v-else-if="binding" label=" ">
         <el-button text size="small" @click="fetchManagedPassword">查看当前绑定密码</el-button>

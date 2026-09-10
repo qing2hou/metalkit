@@ -30,6 +30,8 @@ const form = reactive({
 const uploadProgress = ref(0)
 const uploadPhase = ref<'idle' | 'uploading' | 'finalizing' | 'done'>('idle')
 const uploadError = ref('')
+/** 失败后保留的会话（续传）：uploaded_chunks 是后端已收块数。 */
+const resumeInfo = ref<{ sessionId: string; uploadedChunks: number; totalChunks: number } | null>(null)
 let abortUpload = false
 
 const knownFamilies = [
@@ -60,6 +62,10 @@ async function load(): Promise<void> {
 function onFileChange(uploadFile: UploadFile): void {
   file.value = uploadFile.raw ?? null
   if (file.value) {
+    if (resumeInfo.value) {
+      const total = Math.max(1, Math.ceil(file.value.size / CHUNK_SIZE))
+      if (resumeInfo.value.totalChunks !== total) resumeInfo.value = null
+    }
     if (!form.name) form.name = file.value.name.replace(/\.[^.]+$/, '')
     const guess = detectFromFilename(file.value.name)
     if (guess && !form.family) form.family = guess.family
@@ -74,43 +80,79 @@ const canSubmit = computed(
     form.family.trim() !== '',
 )
 
+const KNOWN_EXTS = ['.qcow2', '.img', '.raw', '.vmdk', '.qcow', '.vhd', '.vhdx', '.xz', '.gz', '.zst']
+
+/** 文件名扩展名预检：写盘失败发现格式错就太晚了，这里先拦一道。 */
+function extWarning(filename: string): string {
+  const lower = filename.toLowerCase()
+  if (KNOWN_EXTS.some((e) => lower.endsWith(e))) return ''
+  return '文件扩展名不在常见磁盘镜像格式中（qcow2/img/raw/vmdk 等），请确认它是可写盘的镜像文件'
+}
+
+/** 逐块 SHA-256：后端 X-Chunk-Sha256 头校验，尽早发现传输损坏。 */
+async function sha256Hex(buf: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', buf)
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
 async function startUpload(): Promise<void> {
   if (!file.value || !canSubmit.value) return
+  const warn = extWarning(file.value.name)
+  if (warn) {
+    try {
+      await ElMessageBox.confirm(warn + '。仍要继续上传吗？', '格式确认', { type: 'warning' })
+    } catch {
+      return
+    }
+  }
   abortUpload = false
   uploadPhase.value = 'uploading'
   uploadProgress.value = 0
   uploadError.value = ''
 
   let sessionId = ''
+  let startChunk = 1
   try {
-    // 1. 建会话
-    const session = await imagesApi.initUpload({
-      name: form.name.trim(),
-      version: form.version.trim(),
-      family: form.family.trim(),
-      notes: form.notes.trim() || undefined,
-      expected_sha256: form.expectedSha256.trim() || undefined,
-      total_size: file.value.size,
-      chunk_size: CHUNK_SIZE,
-    })
-    sessionId = session.id
-
-    // 2. 分块 PUT
     const totalChunks = Math.max(1, Math.ceil(file.value.size / CHUNK_SIZE))
-    for (let n = 0; n < totalChunks; n++) {
+
+    // 1. 会话：失败续传时复用保留的会话（仅当文件大小一致）；否则新建。
+    if (resumeInfo.value && resumeInfo.value.totalChunks === totalChunks && file.value.size) {
+      sessionId = resumeInfo.value.sessionId
+      startChunk = resumeInfo.value.uploadedChunks + 1
+      uploadProgress.value = Math.round((resumeInfo.value.uploadedChunks / totalChunks) * 100)
+      ElMessage.info(`从第 ${startChunk}/${totalChunks} 块续传`)
+    } else {
+      const session = await imagesApi.initUpload({
+        name: form.name.trim(),
+        version: form.version.trim(),
+        family: form.family.trim(),
+        notes: form.notes.trim() || undefined,
+        expected_sha256: form.expectedSha256.trim() || undefined,
+        total_size: file.value.size,
+        chunk_size: CHUNK_SIZE,
+      })
+      sessionId = session.id
+      resumeInfo.value = null
+    }
+
+    // 2. 分块 PUT（后端编号 1-based；WriteChunk 幂等，重复传同一块安全）。
+    //    逐块带 X-Chunk-Sha256，传输损坏当场报错而非等到 finalize。
+    for (let n = startChunk; n <= totalChunks; n++) {
       if (abortUpload) throw new Error('已中止')
-      const blob = file.value.slice(n * CHUNK_SIZE, (n + 1) * CHUNK_SIZE)
+      const blob = file.value.slice((n - 1) * CHUNK_SIZE, n * CHUNK_SIZE)
       const buf = await blob.arrayBuffer()
-      const resp = await apiPutRaw(
-        `/images/uploads/${sessionId}/chunks/${n}`,
-        buf,
-        { 'Content-Type': 'application/octet-stream' },
-      )
+      const chunkSha = await sha256Hex(buf)
+      const resp = await apiPutRaw(`/images/uploads/${sessionId}/chunks/${n}`, buf, {
+        'Content-Type': 'application/octet-stream',
+        'X-Chunk-Sha256': chunkSha,
+      })
       if (!resp.ok) {
         const text = await resp.text().catch(() => '')
-        throw new Error(`块 ${n} 上传失败: HTTP ${resp.status} ${text.slice(0, 200)}`)
+        throw new Error(`块 ${n}/${totalChunks} 上传失败: HTTP ${resp.status} ${text.slice(0, 200)}`)
       }
-      uploadProgress.value = Math.round(((n + 1) / totalChunks) * 100)
+      uploadProgress.value = Math.round((n / totalChunks) * 100)
     }
 
     // 3. finalize
@@ -124,18 +166,34 @@ async function startUpload(): Promise<void> {
   } catch (err) {
     uploadError.value = (err as Error).message
     uploadPhase.value = 'idle'
-    // 失败清理会话，避免服务器残留
+    // 网络失败保留会话：WriteChunk 幂等，重试同一文件时从 uploaded_chunks
+    // 之后继续（前端用文件大小+进度推算已传块数）。仅显式中止时删除会话。
     if (sessionId) {
-      try {
-        await imagesApi.abortUpload(sessionId)
-      } catch {
-        /* 清理失败只提示主错误 */
+      if (abortUpload) {
+        try {
+          await imagesApi.abortUpload(sessionId)
+          resumeInfo.value = null
+        } catch {
+          /* 清理失败只提示主错误 */
+        }
+      } else {
+        try {
+          const cur = await imagesApi.getUpload(sessionId)
+          resumeInfo.value = {
+            sessionId,
+            uploadedChunks: cur.uploaded_chunks,
+            totalChunks: cur.num_chunks,
+          }
+        } catch {
+          resumeInfo.value = null
+        }
       }
     }
   }
 }
 
 function resetForm(): void {
+  resumeInfo.value = null
   file.value = null
   form.name = ''
   form.version = ''
@@ -150,7 +208,11 @@ function resetForm(): void {
 async function cancelUpload(): Promise<void> {
   if (uploadPhase.value === 'uploading') {
     try {
-      await ElMessageBox.confirm('上传进行中，确定中止？', '中止上传', { type: 'warning' })
+      await ElMessageBox.confirm(
+        '上传进行中。中止后进度保留，重新选择同一文件可续传。确定中止？',
+        '中止上传',
+        { type: 'warning' },
+      )
     } catch {
       return
     }
@@ -258,7 +320,13 @@ async function remove(row: Image): Promise<void> {
               striped-flow
             />
           </el-form-item>
-          <el-alert v-if="uploadError" :title="uploadError" type="error" show-icon :closable="false" />
+          <el-alert v-if="uploadError" type="error" show-icon :closable="false">
+            <template #title>{{ uploadError }}</template>
+            <div v-if="resumeInfo" class="mk-subtle" style="margin-top: 4px">
+              服务器已保留 {{ resumeInfo.uploadedChunks }}/{{ resumeInfo.totalChunks }} 块
+              （未改动表单时点击「开始上传」将从下一块续传）
+            </div>
+          </el-alert>
         </el-form>
         <template #footer>
           <el-button :disabled="uploadPhase === 'uploading' || uploadPhase === 'finalizing'" @click="cancelUpload">

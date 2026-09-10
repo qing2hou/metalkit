@@ -108,13 +108,24 @@ const durationMs = computed(() => {
   return end - Date.parse(job.value.started_at)
 })
 
-// 阶段步骤条：stage 字符串 → 步骤序号（pending/download/install/done 之外按运行中处理）
-const STAGE_ORDER = ['pending', 'download', 'install', 'done']
+// 阶段步骤条：聚合后端 installer 的 9 个 stage（installer.go StageBootDetect…）
+// 为四大步；stage 缺失（pending 未领取）计 0。
+const STAGE_TO_STEP: Record<string, number> = {
+  'boot-detect': 1,
+  'disk-pick': 1,
+  download: 2,
+  write: 3,
+  grow: 3,
+  mount: 3,
+  seed: 3,
+  'grub-install': 4,
+  umount: 4,
+}
 const stepsActive = computed(() => {
   if (!job.value) return 0
   if (isTerminal.value) return job.value.status === 'succeeded' ? 4 : 3
-  const idx = STAGE_ORDER.indexOf(job.value.stage ?? 'pending')
-  return idx < 0 ? 1 : idx
+  const stage = job.value.stage ?? ''
+  return STAGE_TO_STEP[stage] ?? 0
 })
 
 // 用户手动滚动查看历史时自动暂停跟随
@@ -246,10 +257,10 @@ function exportLogs(): void {
           finish-status="success"
           :process-status="job.status === 'failed' ? 'error' : 'process'"
         >
-          <el-step title="等待" description="PXE / Agent 领取" />
+          <el-step title="准备" description="引导检测 / 选盘" />
           <el-step title="下载" description="拉取镜像" />
-          <el-step title="安装" description="写盘 / 配置" />
-          <el-step title="完成" :description="job.status" />
+          <el-step title="写盘" description="写入 / 扩容 / 种子 / 挂载" />
+          <el-step title="收尾" description="GRUB / 卸载" />
         </el-steps>
       </el-card>
 
