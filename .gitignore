@@ -25,5 +25,8 @@ config.host147.yaml
 config.smoke.yaml
 config.auto.yaml
 
+# Vue 前端（frontend/）构建缓存；构建产物 internal/webui/assets/ 提交进 git
+frontend/node_modules/
+
 # Claude Code
 .claude/

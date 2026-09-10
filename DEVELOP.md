@@ -83,9 +83,30 @@ go build -o bin/agent ./cmd/agent
 /usr/local/go/bin/go build -buildvcs=false -o bin/agent      ./cmd/agent
 ```
 
+> Web UI 说明：controller 内嵌的 Web UI 是 Vue 3 SPA，其 Vite 构建产物
+> （`internal/webui/assets/`）已提交进 git，因此**只改 Go 代码时不需要
+> Node 环境**，直接 `go build` 即可。只有修改 `frontend/` 下的前端源码时
+> 才需要执行 `make frontend`（要求 node ≥ 18 / npm ≥ 9），并把生成的
+> `internal/webui/assets/` 一并提交。
+
 ---
 
-### 3. 构建 live 镜像（首次或修改 agent 后）
+### 3. 前端开发（修改 Web UI 时）
+
+```bash
+cd frontend
+npm install          # 首次
+npm run dev          # Vite dev server（http://localhost:5173/ui/，API 代理到 127.0.0.1:8080）
+npm run test         # vitest 单元测试（纯逻辑：net/csv/filename/format）
+npm run build        # 产出 ../internal/webui/assets/（type-check + vite build）
+```
+
+开发循环：本地起一个 controller（`make run`），再起 `npm run dev`，
+浏览器访问 `http://localhost:5173/ui/` 即可热更新调试。
+
+---
+
+### 4. 构建 live 镜像（首次或修改 agent 后）
 
 ```bash
 # 使用 Docker（推荐，隔离环境）
@@ -107,7 +128,7 @@ sudo ./scripts/build-live.sh --native
 
 ---
 
-### 4. 运行测试
+### 5. 运行测试
 
 ```bash
 # 运行所有测试
