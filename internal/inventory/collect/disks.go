@@ -132,9 +132,9 @@ type smartctlOut struct {
 	} `json:"temperature"`
 	ATASmartAttributes struct {
 		Table []struct {
-			ID    int    `json:"id"`
-			Name  string `json:"name"`
-			Raw   struct {
+			ID   int    `json:"id"`
+			Name string `json:"name"`
+			Raw  struct {
 				Value uint64 `json:"value"`
 				Str   string `json:"string"`
 			} `json:"raw"`

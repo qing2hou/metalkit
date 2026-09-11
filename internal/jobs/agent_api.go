@@ -45,13 +45,13 @@ type SubnetFetcher interface {
 
 // AgentAPI exposes the agent-facing slice of the jobs state machine:
 //
-//   GET  /api/v1/agent/jobs/current?machine_uuid=<uuid>   poll for assigned job
-//   GET  /api/v1/agent/jobs/{id}/spec?machine_uuid=<uuid> fetch full InstallSpec
-//   POST /api/v1/agent/jobs/{id}/claim                    pending → running
-//   POST /api/v1/agent/jobs/{id}/stage                    update stage marker
-//   POST /api/v1/agent/jobs/{id}/logs                     append log line
-//   POST /api/v1/agent/jobs/{id}/succeed                  running → succeeded
-//   POST /api/v1/agent/jobs/{id}/fail                     {pending|running} → failed
+//	GET  /api/v1/agent/jobs/current?machine_uuid=<uuid>   poll for assigned job
+//	GET  /api/v1/agent/jobs/{id}/spec?machine_uuid=<uuid> fetch full InstallSpec
+//	POST /api/v1/agent/jobs/{id}/claim                    pending → running
+//	POST /api/v1/agent/jobs/{id}/stage                    update stage marker
+//	POST /api/v1/agent/jobs/{id}/logs                     append log line
+//	POST /api/v1/agent/jobs/{id}/succeed                  running → succeeded
+//	POST /api/v1/agent/jobs/{id}/fail                     {pending|running} → failed
 //
 // Auth model: none. Live-boot agents have no credential store, so these paths
 // are exempt from Basic Auth (same as /api/v1/report and /api/v1/heartbeat/*).

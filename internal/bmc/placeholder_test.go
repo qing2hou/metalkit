@@ -16,7 +16,7 @@ func TestPlaceholderUUID(t *testing.T) {
 		{"  10.0.0.1  ", "placeholder-10-0-0-1"},
 		{"not-an-ip", ""},
 		{"", ""},
-		{"::1", ""},                  // IPv6 not supported
+		{"::1", ""}, // IPv6 not supported
 		{"2001:db8::1", ""},
 	}
 	for _, c := range cases {

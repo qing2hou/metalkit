@@ -241,8 +241,8 @@ type MachineSummary struct {
 	LastSeen     time.Time `json:"last_seen"`
 	Status       string    `json:"status"`
 	LatestReport int64     `json:"latest_report"`
-	BMCIP        string    `json:"bmc_ip"`       // agent-reported BMC IP, parsed from latest report's JSON body
-	BMCManaged   bool      `json:"bmc_managed"`  // true if bmc_credentials row exists for this machine
+	BMCIP        string    `json:"bmc_ip"`      // agent-reported BMC IP, parsed from latest report's JSON body
+	BMCManaged   bool      `json:"bmc_managed"` // true if bmc_credentials row exists for this machine
 }
 
 // ListMachines returns all machines, most-recently-seen first.

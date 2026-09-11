@@ -30,11 +30,11 @@ func (f *fakeBMC) GetWithPassword(_ context.Context, m string) (BMCCredential, e
 
 // fakeIPMI records calls and lets tests inject failures.
 type fakeIPMI struct {
-	mu             sync.Mutex
-	bootForPXE     []string // machine_uuid+ip per call
-	finalize       []string
-	bootForPXEErr  error
-	finalizeErr    error
+	mu            sync.Mutex
+	bootForPXE    []string // machine_uuid+ip per call
+	finalize      []string
+	bootForPXEErr error
+	finalizeErr   error
 }
 
 func (f *fakeIPMI) BootForPXE(_ context.Context, cred BMCCredential) error {

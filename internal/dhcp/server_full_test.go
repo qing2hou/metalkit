@@ -338,4 +338,3 @@ func TestReload_RejectsInvalidConfig(t *testing.T) {
 		t.Fatalf("post-failed-reload DISCOVER broken: err=%v reply=%v", err, reply)
 	}
 }
-

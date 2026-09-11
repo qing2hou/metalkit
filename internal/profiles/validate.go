@@ -17,7 +17,7 @@ var (
 	// subnetIDRE mirrors the bindings package: 32 lowercase hex chars.
 	// Existence in the subnets catalog is NOT checked here — that's a
 	// follow-up at install time / by the install modal UI.
-	subnetIDRE    = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	subnetIDRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 	// hostnameTemplateRE accepts RFC-1123 label characters plus the placeholder
 	// syntax `{serial}`, `{uuid8}`, `{mac}`. Each label between dots must start
@@ -112,13 +112,13 @@ type TargetDisk struct {
 // onto a VLAN sub-interface (metalkit0.<vlan> or bond0.<vlan>) and the
 // underlying physical/bond device stays L2-only.
 type NetworkConfig struct {
-	Method      string      `json:"method"`                 // static | dhcp
+	Method      string      `json:"method"` // static | dhcp
 	PrefixLen   int         `json:"prefix_len,omitempty"`
-	Gateway     string      `json:"gateway,omitempty"`      // IPv4 literal
-	DNS         []string    `json:"dns,omitempty"`          // IPv4 literals
-	NICSelector string      `json:"nic_selector"`           // auto | by-mac:.. | by-name:..
-	VLAN        int         `json:"vlan,omitempty"`         // 0 = none; 1..4094
-	Bond        *BondConfig `json:"bond,omitempty"`         // when set, NICSelector ignored
+	Gateway     string      `json:"gateway,omitempty"` // IPv4 literal
+	DNS         []string    `json:"dns,omitempty"`     // IPv4 literals
+	NICSelector string      `json:"nic_selector"`      // auto | by-mac:.. | by-name:..
+	VLAN        int         `json:"vlan,omitempty"`    // 0 = none; 1..4094
+	Bond        *BondConfig `json:"bond,omitempty"`    // when set, NICSelector ignored
 }
 
 // BondConfig is the per-profile network bonding template. Two modes are

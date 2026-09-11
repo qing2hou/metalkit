@@ -31,7 +31,7 @@ func (f *fakeReporter) Log(_ context.Context, level, msg string) error {
 	f.entries = append(f.entries, logEntry{level: level, message: msg})
 	return nil
 }
-func (f *fakeReporter) Succeed(_ context.Context) error { return nil }
+func (f *fakeReporter) Succeed(_ context.Context) error        { return nil }
 func (f *fakeReporter) Fail(_ context.Context, _ string) error { return nil }
 
 func (f *fakeReporter) snapshot() []logEntry {

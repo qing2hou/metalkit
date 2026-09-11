@@ -4,11 +4,11 @@
 // Two read paths exist by design:
 //
 //   - Get(ctx, uuid)              — returns metadata only (no password). Used
-//                                   by the HTTP GET handler so passwords never
-//                                   leave the controller process.
+//     by the HTTP GET handler so passwords never
+//     leave the controller process.
 //   - GetWithPassword(ctx, uuid)  — returns metadata + decrypted password.
-//                                   Used in-process by the future ipmitool
-//                                   wrapper (M2.3-4).
+//     Used in-process by the future ipmitool
+//     wrapper (M2.3-4).
 //
 // Bindings does its own machine_uuid existence check before referencing this
 // table; we mirror that pattern (raw SQL against machines) so a delete of

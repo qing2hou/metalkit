@@ -31,12 +31,12 @@ import (
 )
 
 var (
-	ErrNotFound           = errors.New("jobs: not found")
-	ErrInFlight           = errors.New("jobs: machine already has a pending or running job")
-	ErrMachineUnknown     = errors.New("jobs: machine_uuid not in inventory")
-	ErrImageUnknown       = errors.New("jobs: image_id not in catalog")
-	ErrProfileUnknown     = errors.New("jobs: profile_id not in catalog")
-	ErrInvalidTransition  = errors.New("jobs: invalid state transition")
+	ErrNotFound          = errors.New("jobs: not found")
+	ErrInFlight          = errors.New("jobs: machine already has a pending or running job")
+	ErrMachineUnknown    = errors.New("jobs: machine_uuid not in inventory")
+	ErrImageUnknown      = errors.New("jobs: image_id not in catalog")
+	ErrProfileUnknown    = errors.New("jobs: profile_id not in catalog")
+	ErrInvalidTransition = errors.New("jobs: invalid state transition")
 )
 
 // Store reads and writes jobs and job_logs rows.
@@ -65,19 +65,19 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger) (*Store, err
 // Job is the JSON record. Times are unix-seconds-or-nil internally; the
 // struct exposes them as time.Time / *time.Time for JSON consumers.
 type Job struct {
-	ID            string     `json:"id"`
-	MachineUUID   string     `json:"machine_uuid"`
-	Type          string     `json:"type"`
-	ImageID       string     `json:"image_id"`
-	ProfileID     string     `json:"profile_id"`
-	Status        string     `json:"status"`
-	Stage         string     `json:"stage,omitempty"`
-	Error         string     `json:"error,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	StartedAt     *time.Time `json:"started_at,omitempty"`
-	FinishedAt    *time.Time `json:"finished_at,omitempty"`
-	CreatedBy     string     `json:"created_by"`
-	RetryOfJobID  string     `json:"retry_of_job_id,omitempty"`
+	ID           string     `json:"id"`
+	MachineUUID  string     `json:"machine_uuid"`
+	Type         string     `json:"type"`
+	ImageID      string     `json:"image_id"`
+	ProfileID    string     `json:"profile_id"`
+	Status       string     `json:"status"`
+	Stage        string     `json:"stage,omitempty"`
+	Error        string     `json:"error,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	StartedAt    *time.Time `json:"started_at,omitempty"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+	CreatedBy    string     `json:"created_by"`
+	RetryOfJobID string     `json:"retry_of_job_id,omitempty"`
 }
 
 // CreateInput is what the API / orchestrator passes.

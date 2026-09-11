@@ -34,7 +34,7 @@ type InstallSpec struct {
 	ImageID      string           `json:"image_id"`
 	ImageBlobURL string           `json:"image_blob_url"` // relative path; agent joins onto its baseURL
 	ImageSHA256  string           `json:"image_sha256"`
-	ImageFormat  string           `json:"image_format"` // "qcow2" or "raw"
+	ImageFormat  string           `json:"image_format"`         // "qcow2" or "raw"
 	ImageArch    string           `json:"image_arch,omitempty"` // "amd64" | "arm64"; "" on legacy images
 	Profile      profiles.Profile `json:"profile"`
 	Binding      bindings.Binding `json:"binding"`

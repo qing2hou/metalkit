@@ -147,9 +147,9 @@ func (a *API) upsert(w http.ResponseWriter, r *http.Request) {
 // not yet PXE'd and no SMBIOS UUID is known. The placeholder is later
 // reconciled by inventory.UpsertReport when the real machine reports in.
 //
-//   201  on create (returns the credential with the derived machine_uuid)
-//   409  if another BMC is already registered at the same IP
-//   400  on validation error
+//	201  on create (returns the credential with the derived machine_uuid)
+//	409  if another BMC is already registered at the same IP
+//	400  on validation error
 func (a *API) create(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
 	var in UpsertInput
@@ -173,7 +173,7 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 	// Refuse if an existing credential (real or placeholder) already owns this IP.
 	if existing, err := a.store.FindByIP(r.Context(), ip); err == nil && existing != "" {
 		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":               "BMC already registered at this IP",
+			"error":                 "BMC already registered at this IP",
 			"existing_machine_uuid": existing,
 		})
 		return
@@ -249,11 +249,12 @@ func (a *API) test(w http.ResponseWriter, r *http.Request) {
 // power runs `ipmitool chassis power <action>` against the stored credential.
 // Actions: on / off / cycle / soft / reset. Same response shape as /test —
 // success/failure both return 200 so the UI can render errors inline.
-//   200 {"ok":true, "action":"<action>"}
-//   200 {"ok":false, "error":"<msg>"}
-//   400 unknown action
-//   404 no BMC for this uuid
-//   503 controller has no ipmi tester wired
+//
+//	200 {"ok":true, "action":"<action>"}
+//	200 {"ok":false, "error":"<msg>"}
+//	400 unknown action
+//	404 no BMC for this uuid
+//	503 controller has no ipmi tester wired
 func (a *API) power(w http.ResponseWriter, r *http.Request) {
 	if a.tester == nil {
 		writeError(w, http.StatusServiceUnavailable, "ipmi not available on this controller")
@@ -314,10 +315,10 @@ func (a *API) power(w http.ResponseWriter, r *http.Request) {
 //
 // 响应同 /test 和 /power：ipmi 调用失败也返 200 + {ok:false,error:...}。
 //
-//   200 {"ok":true,  "action":"onboard"}     on a successful boot kick
-//   200 {"ok":false, "error":"<msg>"}        on ipmitool failure
-//   404                                      no BMC for this uuid
-//   503                                      controller has no ipmi tester wired
+//	200 {"ok":true,  "action":"onboard"}     on a successful boot kick
+//	200 {"ok":false, "error":"<msg>"}        on ipmitool failure
+//	404                                      no BMC for this uuid
+//	503                                      controller has no ipmi tester wired
 func (a *API) onboard(w http.ResponseWriter, r *http.Request) {
 	if a.tester == nil {
 		writeError(w, http.StatusServiceUnavailable, "ipmi not available on this controller")

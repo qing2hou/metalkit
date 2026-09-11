@@ -102,7 +102,7 @@ type Profile struct {
 	// in the target rootfs during install (used by chroot'd dnf to resolve
 	// distro mirrors for kernel-modules installation, etc.). Empty list
 	// means "use installer defaults" (223.5.5.5 + 114.114.114.114).
-	ChrootDNS []string `json:"chroot_dns,omitempty"`
+	ChrootDNS []string  `json:"chroot_dns,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	CreatedBy string    `json:"created_by"`
@@ -124,8 +124,8 @@ type CreateInput struct {
 	// ChrootDNS is a comma-or-whitespace-separated list of DNS server IPs
 	// to write into /etc/resolv.conf in the target rootfs during install.
 	// Empty = use installer defaults. Validated as IPv4/IPv6 literals.
-	ChrootDNS        string          `json:"chroot_dns,omitempty"`
-	CreatedBy        string          `json:"-"` // injected by handler
+	ChrootDNS string `json:"chroot_dns,omitempty"`
+	CreatedBy string `json:"-"` // injected by handler
 }
 
 // UpdateInput is what the update handler accepts. All fields are optional;
@@ -256,14 +256,14 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Profile, error) {
 // Get returns the profile with the given id, or ErrNotFound.
 func (s *Store) Get(ctx context.Context, id string) (*Profile, error) {
 	var (
-		p           Profile
-		description sql.NullString
-		tdBlob, ncBlob string
-		osFamily    sql.NullString
-		subnetID    sql.NullString
-		networkRenderer sql.NullString
-		bootloader  sql.NullString
-		chrootDNS   sql.NullString
+		p                    Profile
+		description          sql.NullString
+		tdBlob, ncBlob       string
+		osFamily             sql.NullString
+		subnetID             sql.NullString
+		networkRenderer      sql.NullString
+		bootloader           sql.NullString
+		chrootDNS            sql.NullString
 		createdAt, updatedAt int64
 	)
 	err := s.db.QueryRowContext(ctx, `
@@ -321,14 +321,14 @@ func (s *Store) List(ctx context.Context) ([]Profile, error) {
 	out := make([]Profile, 0)
 	for rows.Next() {
 		var (
-			p              Profile
-			description    sql.NullString
-			tdBlob, ncBlob string
-			osFamily       sql.NullString
-			subnetID       sql.NullString
-			networkRenderer sql.NullString
-			bootloader     sql.NullString
-			chrootDNS      sql.NullString
+			p                    Profile
+			description          sql.NullString
+			tdBlob, ncBlob       string
+			osFamily             sql.NullString
+			subnetID             sql.NullString
+			networkRenderer      sql.NullString
+			bootloader           sql.NullString
+			chrootDNS            sql.NullString
 			createdAt, updatedAt int64
 		)
 		if err := rows.Scan(&p.ID, &p.Name, &description, &p.HostnameTemplate, &p.RootPasswordHash,

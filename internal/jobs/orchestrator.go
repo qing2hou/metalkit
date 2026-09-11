@@ -59,13 +59,13 @@ type BindingUpdater interface {
 
 // OrchestratorConfig configures NewOrchestrator.
 type OrchestratorConfig struct {
-	Store          *Store
-	BMC            BMCFetcher
-	IPMI           IPMIClient
-	Bindings       BindingUpdater
-	Logger         *slog.Logger
-	TickInterval   time.Duration // default 5s
-	BMCActor       string        // who to record as updated_by on cleared bindings; default "orchestrator"
+	Store        *Store
+	BMC          BMCFetcher
+	IPMI         IPMIClient
+	Bindings     BindingUpdater
+	Logger       *slog.Logger
+	TickInterval time.Duration // default 5s
+	BMCActor     string        // who to record as updated_by on cleared bindings; default "orchestrator"
 }
 
 // Orchestrator runs the binding→job→BMC reconciliation loop.

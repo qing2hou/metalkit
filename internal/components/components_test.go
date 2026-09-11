@@ -18,8 +18,8 @@ func TestRenderersForOS(t *testing.T) {
 		{"openeuler", "network-manager", 3},
 		{"opensuse", "wicked", 3},
 		{"any", "netplan", 5},
-		{"unknown", "netplan", 5},  // falls back to "any"
-		{"", "netplan", 5},         // falls back to "any"
+		{"unknown", "netplan", 5}, // falls back to "any"
+		{"", "netplan", 5},        // falls back to "any"
 	}
 
 	for _, tt := range tests {
@@ -46,9 +46,9 @@ func TestRenderersForOS(t *testing.T) {
 
 func TestBootloadersForOS(t *testing.T) {
 	tests := []struct {
-		family       string
-		wantDefault  string
-		minBoot      int
+		family      string
+		wantDefault string
+		minBoot     int
 	}{
 		{"ubuntu", "grub-host-debian", 2},
 		{"debian", "grub-host-debian", 2},
