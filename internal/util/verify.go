@@ -2,6 +2,7 @@ package util
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -36,5 +37,8 @@ func VerifyCryptSHA512(ctx context.Context, password, hash string) (bool, error)
 	if err != nil {
 		return false, fmt.Errorf("mkpasswd: %w", err)
 	}
-	return strings.TrimSpace(string(out)) == hash, nil
+	// Constant-time compare: the strings happen to be equal-length here
+	// (same salt ⇒ same format), and the fork dominates timing anyway —
+	// this is defense in depth, not the main mitigation.
+	return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(string(out))), []byte(hash)) == 1, nil
 }

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue'
 import { onMounted, reactive, ref } from 'vue'
-import type { Ref } from 'vue'
 
 import { auditApi } from '@/api'
 import type { AuditEvent } from '@/api/types'

@@ -93,12 +93,17 @@ func ensureTLSMaterial(cfg HTTPSConfig, serverIP, autoDNSName string, logger *sl
 			CommonName:   "metalkit-controller",
 			Organization: []string{"metalkit"},
 		},
-		NotBefore:             time.Now().Add(-5 * time.Minute),
-		NotAfter:              time.Now().AddDate(10, 0, 0),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,
+		NotBefore: time.Now().Add(-5 * time.Minute),
+		NotAfter:  time.Now().AddDate(10, 0, 0),
+		// Server-leaf profile, deliberately NOT a CA: operators are told to
+		// distribute this cert (config.example.yaml); if it were also a CA
+		// (KeyUsageCertSign + IsCA), a leaked key would let an attacker mint
+		// certificates for ANY name the trusting hosts accept, not just this
+		// controller.
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		IsCA:                  true,
+		IsCA:                  false,
 	}
 
 	// SANs: every name/IP the operators might type into a browser.

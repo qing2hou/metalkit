@@ -39,6 +39,11 @@ type API struct {
 	CookieTTL  time.Duration
 	SecureFlag bool
 	Logger     *slog.Logger
+
+	// throttle blunts per-IP brute force on the login endpoint (and the
+	// Basic-Auth path shares the per-IP counter via httpd's own instance —
+	// this one only guards JSON login).
+	throttle *loginThrottle
 }
 
 // Operator is one named operator account accepted by login / basic auth.
@@ -64,6 +69,13 @@ type loginResponse struct {
 	Username string `json:"username"`
 }
 
+// dummyVerifyHash is a syntactically valid sha512crypt hash of an
+// unguessable random value. When an unknown username is submitted we run a
+// verification against it anyway, so the response time is dominated by the
+// same mkpasswd fork whether or not the account exists — closing the
+// username-enumeration timing side channel.
+const dummyVerifyHash = `$6$fixedsalt123$hWfVjXzu1Ia7IE9o2bqMSxIyjTx4TaD.rLuSo11.BVcWwbXQxjbmVtroursOVAjIofVa2p1bhJjq4DdGRYu9X/`
+
 func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	if a.AdminPass == "" && len(a.Users) == 0 {
 		// No credentials configured → no login flow. The middleware's "open
@@ -71,6 +83,17 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		// buys nothing. Surface the misconfiguration loudly rather than
 		// silently minting useless sessions.
 		writeError(w, http.StatusServiceUnavailable, "auth disabled")
+		return
+	}
+
+	if a.throttle == nil {
+		// Wire-up safety: tests construct &API{} literals. 10 fails / 5 min
+		// matches the documented operator guidance.
+		a.throttle = newLoginThrottle(10, 5*time.Minute)
+	}
+	if a.throttle.blocked(r) {
+		a.logFailure(strings.TrimSpace(""))
+		writeError(w, http.StatusTooManyRequests, "too many failed attempts; retry later")
 		return
 	}
 
@@ -99,10 +122,12 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	// Named operator accounts: sha512crypt verification (forks mkpasswd;
 	// login is a cold path).
 	if authenticated == "" {
+		matched := false
 		for _, u := range a.Users {
 			if subtle.ConstantTimeCompare([]byte(username), []byte(u.Username)) != 1 {
 				continue
 			}
+			matched = true
 			ok, err := util.VerifyCryptSHA512(r.Context(), password, u.PassHash)
 			if err != nil && a.Logger != nil {
 				a.Logger.Error("auth login: verify", "user", u.Username, "err", err)
@@ -112,13 +137,21 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 			}
 			break // a username matches at most one account; wrong pass → reject
 		}
+		// Unknown username: burn the same mkpasswd fork against a dummy hash
+		// so the 401 latency can't distinguish "no such user" (fast) from
+		// "wrong password" (fork, slow).
+		if !matched {
+			_, _ = util.VerifyCryptSHA512(r.Context(), password, dummyVerifyHash)
+		}
 	}
 
 	if authenticated == "" {
+		a.throttle.noteFailure(r)
 		a.logFailure(username)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+	a.throttle.noteSuccess(r)
 
 	sess, err := a.Sessions.Create(r.Context(), authenticated, a.CookieTTL)
 	if err != nil {

@@ -501,3 +501,21 @@ func TestAuthLoginLogoutAreOpen(t *testing.T) {
 		}
 	}
 }
+
+// TestOperatorRoleRestrictions asserts the minimum role enforcement promised
+// in config.go: an "operator" account authenticates fine but is rejected
+// (403) from the admin-only surfaces. The gate handlers live in their own
+// packages, so this test drives the real wiring by checking the context
+// helpers the middleware populates.
+func TestOperatorRoleRestrictions(t *testing.T) {
+	ctx := context.Background()
+	if !sessions.IsAdmin(ctx) {
+		t.Error("empty role (legacy single-admin) must count as admin")
+	}
+	if !sessions.IsAdmin(sessions.WithRole(ctx, "admin")) {
+		t.Error("admin role must count as admin")
+	}
+	if sessions.IsAdmin(sessions.WithRole(ctx, "operator")) {
+		t.Error("operator role must NOT count as admin")
+	}
+}

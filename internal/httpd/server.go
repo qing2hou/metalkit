@@ -381,7 +381,7 @@ func (s *Server) handleIPXE(w http.ResponseWriter, r *http.Request) {
 	arch := clientArch(r)
 	body, err := renderIPXE(s.cfg.ServerIP, s.httpAddr, arch)
 	if err != nil {
-		s.cfg.Logger.Error("ipxe render failed", "err", arch)
+		s.cfg.Logger.Error("ipxe render failed", "err", err)
 		http.Error(w, "ipxe render failed", http.StatusInternalServerError)
 		return
 	}

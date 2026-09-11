@@ -25,8 +25,9 @@ adminPass: ""
 # Named operator accounts (recommended over adminPass for multi-operator
 # deployments). Each login/Basic-Auth attempt lands in the audit trail with
 # the acting username. Generate a passHash with:  mkpasswd -m sha-512
-# Role: admin (default) sees everything; operator cannot read install
-# passwords or manage users.
+# Role: admin (default) sees everything; operator can run day-to-day fleet
+# operations but is rejected (403) from reading install passwords, reading
+# the audit trail, and other admin-only surfaces.
 # users:
 #   - username: alice
 #     passHash: "$6$rounds=...$..."

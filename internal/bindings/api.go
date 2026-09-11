@@ -135,6 +135,12 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 // pulled which password. Returns 404 if the binding has no password set
 // (the operator should rely on the profile default in that case).
 func (a *API) getPassword(w http.ResponseWriter, r *http.Request) {
+	// Password readback is admin-only: operator machines a fleet but must
+	// not be able to pull every machine's install password.
+	if !sessions.IsAdmin(r.Context()) {
+		writeError(w, http.StatusForbidden, "reading install passwords requires the admin role")
+		return
+	}
 	uuid := strings.ToLower(strings.TrimSpace(r.PathValue("uuid")))
 	pt, err := a.store.GetPassword(r.Context(), uuid)
 	if errors.Is(err, ErrNotFound) {

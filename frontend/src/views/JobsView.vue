@@ -2,7 +2,6 @@
 import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import type { Ref } from 'vue'
 
 import { jobsApi } from '@/api'
 import type { Job } from '@/api/types'

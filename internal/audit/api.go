@@ -32,6 +32,13 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (a *API) list(w http.ResponseWriter, r *http.Request) {
+	// The audit trail itself is admin-only: it records who performed every
+	// mutation, so letting operators read it is fine in principle, but the
+	// admin page also surfaces password_view events; keep it admin.
+	if !sessions.IsAdmin(r.Context()) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "reading the audit trail requires the admin role"})
+		return
+	}
 	actor := sessions.UserFromContext(r.Context())
 
 	opts := ListOptions{

@@ -158,6 +158,7 @@ async function startUpload(): Promise<void> {
         name: form.name.trim(),
         version: form.version.trim(),
         family: form.family.trim(),
+        arch: form.arch,
         notes: form.notes.trim() || undefined,
         expected_sha256: form.expectedSha256.trim() || undefined,
         total_size: file.value.size,
@@ -302,67 +303,27 @@ async function remove(row: Image): Promise<void> {
               <span v-else class="mk-subtle">未知</span>
             </template>
 
-<style scoped>
-.mk-filters {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-</style>
           </el-table-column>
           <el-table-column prop="format" label="格式" width="90" />
           <el-table-column label="大小" width="100">
             <template #default="{ row }">{{ fmtBytes(row.size_bytes) }}</template>
 
-<style scoped>
-.mk-filters {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-</style>
           </el-table-column>
           <el-table-column label="SHA-256" min-width="180">
             <template #default="{ row }">
               <span class="mono mk-subtle">{{ row.sha256 ? `${row.sha256.slice(0, 16)}…` : '—' }}</span>
             </template>
 
-<style scoped>
-.mk-filters {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-</style>
           </el-table-column>
           <el-table-column label="上传时间" width="150">
             <template #default="{ row }">{{ fmtAbsolute(row.uploaded_at) }}</template>
 
-<style scoped>
-.mk-filters {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-</style>
           </el-table-column>
           <el-table-column label="操作" width="90" fixed="right">
             <template #default="{ row }">
               <el-button text size="small" type="danger" @click="remove(asRow<Image>(row))">删除</el-button>
             </template>
 
-<style scoped>
-.mk-filters {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-</style>
           </el-table-column>
           <template #empty>
             <el-empty
@@ -371,14 +332,6 @@ async function remove(row: Image): Promise<void> {
             />
           </template>
 
-<style scoped>
-.mk-filters {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-</style>
         </el-table>
       </el-card>
 
@@ -434,14 +387,6 @@ async function remove(row: Image): Promise<void> {
           <el-alert v-if="uploadError" type="error" show-icon :closable="false">
             <template #title>{{ uploadError }}</template>
 
-<style scoped>
-.mk-filters {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-</style>
             <div v-if="resumeInfo" class="mk-subtle" style="margin-top: 4px">
               服务器已保留 {{ resumeInfo.uploadedChunks }}/{{ resumeInfo.totalChunks }} 块
               （未改动表单时点击「开始上传」将从下一块续传）
@@ -462,14 +407,6 @@ async function remove(row: Image): Promise<void> {
           </el-button>
         </template>
 
-<style scoped>
-.mk-filters {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-</style>
       </el-dialog>
     </div>
   </AppShell>

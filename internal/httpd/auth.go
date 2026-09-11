@@ -68,7 +68,15 @@ func sessionOrBasicAuth(adminUser, adminPass string, users []OperatorUser, sessS
 				// Best-effort touch; ignore errors — the request is valid
 				// regardless of whether the sliding-renewal write succeeded.
 				_, _ = sessStore.Touch(r.Context(), sess.ID, sessionTouchInterval, sessionTTL)
-				next.ServeHTTP(w, r.WithContext(sessions.WithUser(r.Context(), sess.Username)))
+				role := "admin"
+				for _, ou := range users {
+					if ou.Username == sess.Username {
+						role = ou.Role
+						break
+					}
+				}
+				ctx := sessions.WithRole(sessions.WithUser(r.Context(), sess.Username), role)
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 			// ErrNotFound / ErrExpired → fall through.
@@ -79,7 +87,7 @@ func sessionOrBasicAuth(adminUser, adminPass string, users []OperatorUser, sessS
 			if adminPass != "" &&
 				subtle.ConstantTimeCompare([]byte(u), userB) == 1 &&
 				subtle.ConstantTimeCompare([]byte(p), passB) == 1 {
-				next.ServeHTTP(w, r.WithContext(sessions.WithUser(r.Context(), adminUser)))
+				next.ServeHTTP(w, r.WithContext(sessions.WithRole(sessions.WithUser(r.Context(), adminUser), "admin")))
 				return
 			}
 			// Named operator accounts. Username is compared constant-time;
@@ -93,7 +101,8 @@ func sessionOrBasicAuth(adminUser, adminPass string, users []OperatorUser, sessS
 						logger.Error("verify operator password", "user", ou.Username, "err", err)
 					}
 					if ok {
-						next.ServeHTTP(w, r.WithContext(sessions.WithUser(r.Context(), ou.Username)))
+						ctx := sessions.WithRole(sessions.WithUser(r.Context(), ou.Username), ou.Role)
+						next.ServeHTTP(w, r.WithContext(ctx))
 						return
 					}
 					// Wrong password for a known user, or verifier error → reject.

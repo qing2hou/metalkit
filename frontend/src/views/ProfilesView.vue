@@ -47,7 +47,7 @@ const rules: FormRules = {
   ],
   osFamily: [{ required: true, message: '请输入 OS 家族', trigger: 'blur' }],
   hostnameTemplate: [
-    { pattern: /^[a-zA-Z0-9{}.._-]*$/, message: '仅字母数字与 {var} 占位符', trigger: 'blur' },
+    { pattern: /^[a-zA-Z0-9{}._-]*$/, message: '仅字母数字、. _ - 与 {var} 占位符', trigger: 'blur' },
   ],
 }
 
