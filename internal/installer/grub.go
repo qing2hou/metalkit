@@ -114,7 +114,7 @@ func installGRUBChrootRHEL(ctx context.Context, deps Deps, spec jobs.InstallSpec
 		// UEFI: try using the image's pre-baked, signed EFI tree first.
 		// If the image doesn't ship EFI files (some openEuler images),
 		// fall back to grub-install which creates them.
-		if err := registerEFIBootEntryRHEL(ctx, deps, mntRoot, devPath, bootID, arch.EFIType, arch.Loaders); err != nil {
+		if err := registerEFIBootEntryRHEL(ctx, deps, mntRoot, devPath, bootID, arch.Loaders); err != nil {
 			if deps.Logger != nil {
 				deps.Logger.Warn("EFI boot entry registration failed, falling back to grub2-install", "err", err)
 			}
@@ -308,7 +308,7 @@ func installGRUBChrootRHEL(ctx context.Context, deps Deps, spec jobs.InstallSpec
 //
 // Idempotency: if an entry with the same label and loader already exists
 // (BootOrder + Boot####), we don't add a duplicate.
-func registerEFIBootEntryRHEL(ctx context.Context, deps Deps, mntRoot, devPath, bootID, efiType string, loaders []string) error {
+func registerEFIBootEntryRHEL(ctx context.Context, deps Deps, mntRoot, devPath, bootID string, loaders []string) error {
 	// Find the EFI directory for this bootloader ID on the ESP. The ESP
 	// mount point varies: /boot/efi (most distros) or /boot (openEuler).
 	espDir := ""
@@ -1882,16 +1882,14 @@ func fixRHELGrubCmdline(ctx context.Context, deps Deps, mntRoot string, serialCo
 		}
 		val := strings.TrimPrefix(t, "GRUB_CMDLINE_LINUX_DEFAULT=")
 		val = strings.Trim(val, `"'`)
-		// Replace serial console with local console + nomodeset. Both the
-		// x86 (ttyS0) and arm64 (ttyAMA0) serial variants are rewritten so
-		// the local console shows boot output regardless of target arch.
-		val = strings.ReplaceAll(val, "console=ttyS0,115200n8", "console=tty0 nomodeset")
-		val = strings.ReplaceAll(val, "console=ttyAMA0,115200n8", "console=tty0 nomodeset")
-		// Also handle the case where only console=ttyS0/ttyAMA0 appears
-		// without the baud spec, and ensure nomodeset is present.
-		val = strings.ReplaceAll(val, "console=ttyS0", "console=tty0")
-		val = strings.ReplaceAll(val, "console=ttyAMA0", "console=tty0")
-		_ = serialConsoles
+		// Replace serial console with local console + nomodeset. The serial
+		// device names come from the arch profile (ttyS0 on x86, ttyAMA0 on
+		// arm64); both bare and ,115200n8 forms are rewritten so the local
+		// console shows boot output regardless of target arch.
+		for _, dev := range serialConsoles {
+			val = strings.ReplaceAll(val, "console="+dev+",115200n8", "console=tty0 nomodeset")
+			val = strings.ReplaceAll(val, "console="+dev, "console=tty0")
+		}
 		if !strings.Contains(val, "nomodeset") {
 			val = "nomodeset " + val
 		}

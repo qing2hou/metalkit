@@ -265,7 +265,10 @@ func TestAPI_InterfaceFieldLifecycle(t *testing.T) {
 	}
 
 	// GET reflects the override.
-	resp2, _ := http.Get(srv.URL + "/api/v1/settings/dhcp")
+	resp2, err := http.Get(srv.URL + "/api/v1/settings/dhcp")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
 	defer resp2.Body.Close()
 	var got2 DHCPSettings
 	_ = json.NewDecoder(resp2.Body).Decode(&got2)
@@ -274,7 +277,10 @@ func TestAPI_InterfaceFieldLifecycle(t *testing.T) {
 	}
 
 	// Interfaces list marks the current one.
-	resp3, _ := http.Get(srv.URL + "/api/v1/settings/interfaces")
+	resp3, err := http.Get(srv.URL + "/api/v1/settings/interfaces")
+	if err != nil {
+		t.Fatalf("GET interfaces: %v", err)
+	}
 	defer resp3.Body.Close()
 	var ifaces []InterfaceInfo
 	_ = json.NewDecoder(resp3.Body).Decode(&ifaces)
@@ -369,7 +375,10 @@ func TestAPI_PutProxyZeroesPoolFields(t *testing.T) {
 	}
 
 	// GET shows blank pool and empty interface (config had none).
-	resp2, _ := http.Get(srv.URL + "/api/v1/settings/dhcp")
+	resp2, err := http.Get(srv.URL + "/api/v1/settings/dhcp")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
 	defer resp2.Body.Close()
 	var got DHCPSettings
 	_ = json.NewDecoder(resp2.Body).Decode(&got)

@@ -86,8 +86,8 @@ func TestDetectArchFromFilename(t *testing.T) {
 		"debian-12-genericcloud_AMD64.qcow2":     ArchAmd64,
 		"ubuntu-22.04-server-cloudimg-arm64.img": ArchArm64,
 		"centos-7-x86_64-GenericCloud.qcow2":     ArchAmd64,
-		"mydisk.qcow2":                           "",     // unknown → empty
-		"somex64thing.raw":                       "",     // x64 without separators → no match
+		"mydisk.qcow2":                           "", // unknown → empty
+		"somex64thing.raw":                       "", // x64 without separators → no match
 		"kylin-v10-aarch64.img":                  ArchArm64,
 	}
 	for name, want := range cases {

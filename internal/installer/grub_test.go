@@ -676,7 +676,7 @@ func TestRegisterEFIBootEntryRHEL_OpenEuler_BootMountPoint(t *testing.T) {
 	fs.files["/proc/mounts"] = []byte("/dev/sda1 /mnt/root/boot vfat rw 0 0\n")
 	deps := Deps{Exec: exec, FS: fs}
 
-	err := registerEFIBootEntryRHEL(context.Background(), deps, "/mnt/root", "/dev/sda", "openEuler", "x86_64-efi", []string{"shimx64.efi", "shim.efi", "grubx64.efi"})
+	err := registerEFIBootEntryRHEL(context.Background(), deps, "/mnt/root", "/dev/sda", "openEuler", []string{"shimx64.efi", "shim.efi", "grubx64.efi"})
 	if err != nil {
 		t.Fatalf("expected EFI dir at /boot/EFI/openEuler to be found, got err: %v", err)
 	}
