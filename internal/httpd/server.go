@@ -296,6 +296,11 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/boot/vmlinuz", s.bootFile("vmlinuz"))
 	mux.HandleFunc("/boot/initrd.img", s.bootFile("initrd.img"))
 	mux.HandleFunc("/boot/filesystem.squashfs", s.bootFile("filesystem.squashfs"))
+	// Path-style arch URLs (/boot/<arch>/vmlinuz) used by the iPXE script.
+	// Query-style (?arch=) stays for tests / manual curl. bootFile resolves
+	// the arch from either signal via clientArch.
+	mux.HandleFunc("/boot/amd64/", s.bootArchHandler("amd64"))
+	mux.HandleFunc("/boot/arm64/", s.bootArchHandler("arm64"))
 
 	if s.cfg.Store != nil {
 		inventory.RegisterRoutes(mux, s.cfg.Store, s.cfg.Logger.With("component", "api"))
@@ -412,21 +417,42 @@ func clientArch(r *http.Request) string {
 // deployments the flat layout (BootDir/<name> directly) is used when the
 // arch subdirectory has no such file: an operator who unpacked an amd64-only
 // tarball keeps working without moving files.
+// bootArchHandler serves /boot/<arch>/<name> — the path-style arch URLs the
+// iPXE script emits (see ipxe.go for why fetch URLs must stay query-free).
+func (s *Server) bootArchHandler(arch string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/boot/"+arch+"/")
+		switch name {
+		case "vmlinuz", "initrd.img", "filesystem.squashfs":
+			s.serveBootFile(w, r, arch, name)
+		default:
+			http.NotFound(w, r)
+		}
+	}
+}
+
 func (s *Server) bootFile(name string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		arch := clientArch(r)
-		path := filepath.Join(s.cfg.BootDir, arch, name)
-		if _, err := os.Stat(path); err != nil {
-			// Fall back to the flat single-arch layout.
-			path = filepath.Join(s.cfg.BootDir, name)
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		http.ServeFile(w, r, path)
+		s.serveBootFile(w, r, clientArch(r), name)
 	}
+}
+
+func (s *Server) serveBootFile(w http.ResponseWriter, r *http.Request, arch, name string) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := filepath.Join(s.cfg.BootDir, arch, name)
+	if _, err := os.Stat(path); err != nil {
+		// Fall back to the flat single-arch layout.
+		path = filepath.Join(s.cfg.BootDir, name)
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeFile(w, r, path)
 }
 
 // statusRecorder wraps http.ResponseWriter to capture the status code and

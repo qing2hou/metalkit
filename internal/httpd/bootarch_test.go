@@ -41,16 +41,23 @@ func TestIPXEScriptPerArch(t *testing.T) {
 	if !strings.Contains(body, "console=ttyAMA0,115200") {
 		t.Errorf("arm64 script missing ttyAMA0: %s", body)
 	}
-	if !strings.Contains(body, "arch=arm64") {
-		t.Errorf("arm64 script missing arch param: %s", body)
+	if !strings.Contains(body, "/boot/arm64/vmlinuz") {
+		t.Errorf("arm64 script missing path-style kernel URL: %s", body)
+	}
+	// fetch URL must stay query-free: live-boot's initramfs derives the
+	// archive type from the extension suffix and ?arch= breaks the match.
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "fetch=") && strings.Contains(line, "?") {
+			t.Errorf("fetch URL carries a query string: %s", line)
+		}
 	}
 
 	bodyX, _ := renderIPXE("10.1.2.3", ":8080", "")
 	if !strings.Contains(bodyX, "console=ttyS0,115200") {
 		t.Errorf("default script missing ttyS0: %s", bodyX)
 	}
-	if !strings.Contains(bodyX, "arch=amd64") {
-		t.Errorf("default script missing arch param: %s", bodyX)
+	if !strings.Contains(bodyX, "/boot/amd64/filesystem.squashfs") {
+		t.Errorf("default script missing path-style squashfs URL: %s", bodyX)
 	}
 }
 
@@ -78,6 +85,32 @@ func TestBootFileArchFallback(t *testing.T) {
 	h(w2, r2)
 	if !strings.Contains(w2.Body.String(), "flat-kernel") {
 		t.Errorf("amd64 fallback body = %q", w2.Body.String())
+	}
+}
+
+func TestBootArchPathHandler(t *testing.T) {
+	dir := t.TempDir()
+	amdDir := filepath.Join(dir, "amd64")
+	armDir := filepath.Join(dir, "arm64")
+	_ = writeFile(t, filepath.Join(amdDir, "filesystem.squashfs"), "amd64-squashfs")
+	_ = writeFile(t, filepath.Join(armDir, "filesystem.squashfs"), "arm64-squashfs")
+
+	s := &Server{cfg: Config{BootDir: dir, Logger: testLogger()}}
+
+	// Path-style URL serves the arch tree without any query params.
+	r := httptest.NewRequest(http.MethodGet, "/boot/amd64/filesystem.squashfs", nil)
+	w := httptest.NewRecorder()
+	s.bootArchHandler("amd64")(w, r)
+	if !strings.Contains(w.Body.String(), "amd64-squashfs") {
+		t.Errorf("amd64 path body = %q", w.Body.String())
+	}
+
+	// Unknown files under /boot/<arch>/ are 404, not flat fallback.
+	r2 := httptest.NewRequest(http.MethodGet, "/boot/amd64/evil.sh", nil)
+	w2 := httptest.NewRecorder()
+	s.bootArchHandler("amd64")(w2, r2)
+	if w2.Code != http.StatusNotFound {
+		t.Errorf("evil path code = %d, want 404", w2.Code)
 	}
 }
 

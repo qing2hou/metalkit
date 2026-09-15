@@ -65,12 +65,18 @@ func TestIPXEScript(t *testing.T) {
 		"#!ipxe",
 		"kernel http://",
 		"boot=live",
-		"fetch=http://10.99.0.1:8080/boot/filesystem.squashfs",
+		"fetch=http://10.99.0.1:8080/boot/amd64/filesystem.squashfs",
 		"initrd http://",
 		"boot\n",
 	} {
 		if !strings.Contains(bs, want) {
 			t.Errorf("ipxe body missing %q\nfull body:\n%s", want, bs)
+		}
+	}
+	// fetch URL must be query-free for live-boot's extension sniffing.
+	if i := strings.Index(bs, "fetch="); i >= 0 {
+		if end := strings.IndexByte(bs[i:], ' '); end > 0 && strings.Contains(bs[i:i+end], "?") {
+			t.Errorf("fetch URL carries a query string: %s", bs[i:i+end])
 		}
 	}
 }

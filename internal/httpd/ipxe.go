@@ -17,14 +17,18 @@ import (
 //
 // metalkit.url= is consumed by the in-live inventory agent (cmd/agent). It
 // is the controller base URL the agent POSTs reports/heartbeats to.
-// The fetch= URLs carry an ?arch= suffix so the /boot/* file server picks
-// the right tree (boot/<arch>/...). The console argument differs by arch:
+// The /boot/* URLs are path-style (/boot/<arch>/<file>) rather than
+// query-style (?arch=) — live-boot's initramfs 9990-mount-http.sh derives the
+// fetch archive type from a sed on the extension suffix and the query string
+// leaks into it, breaking the `squashfs` case match. The path form keeps the
+// suffix clean AND carries arch; bootFile() resolves /boot/<arch>/<name>
+// directly. console argument differs by arch:
 // x86 serial-over-LAN is ttyS0 (8250); arm64 servers' BMCs expose a PL011
 // UART (ttyAMA0). The ttyS0 rationale comment above still applies on arm64
 // — we keep the same serial-only strategy, just the right device.
 const ipxeTemplate = `#!ipxe
-kernel http://{{.ServerIP}}{{.HTTPAddr}}/boot/vmlinuz?arch={{.Arch}} initrd=initrd.img boot=live fetch=http://{{.ServerIP}}{{.HTTPAddr}}/boot/filesystem.squashfs?arch={{.Arch}} ip=dhcp console={{.Console}},115200 metalkit.url=http://{{.ServerIP}}{{.HTTPAddr}}
-initrd http://{{.ServerIP}}{{.HTTPAddr}}/boot/initrd.img?arch={{.Arch}}
+kernel http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/vmlinuz initrd=initrd.img boot=live fetch=http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/filesystem.squashfs ip=dhcp console={{.Console}},115200 metalkit.url=http://{{.ServerIP}}{{.HTTPAddr}}
+initrd http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/initrd.img
 boot
 `
 
