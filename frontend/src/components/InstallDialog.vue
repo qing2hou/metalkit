@@ -64,6 +64,9 @@ const machineArch = computed(() => props.report?.cpu?.arch ?? '')
 
 const selectedProfile = computed(() => props.profiles.find((p) => p.id === form.profileId))
 
+// profile 的网络方式决定"自动/静态"的含义：static profile 下两者都走子网分配
+const profileUsesStatic = computed(() => selectedProfile.value?.network?.method === 'static')
+
 // profile → 联动默认值（对应旧版 profile→subnet 联动）
 watch(selectedProfile, (p) => {
   if (!p) return
@@ -302,13 +305,15 @@ async function submit(): Promise<void> {
           <el-form-item label=" ">
             <span class="mk-subtle">
               {{
-                form.ipMode === 'static'
+                profileUsesStatic
                   ? form.subnetId
-                    ? '留空则从所选子网挑选空闲 IP（先做 ARP 存活探测，避开已用地址）'
-                    : '留空需先选择子网，才能自动分配 IP'
+                    ? form.ipMode === 'static' && form.staticIp
+                      ? '使用指定地址'
+                      : '留空/自动均由所选子网分配空闲 IP（先做 ARP 存活探测，避开已用地址）'
+                    : 'profile 为静态方式，需选择子网才能自动分配 IP；也可直接填入地址'
                   : form.subnetId
-                    ? '按 profile 的 DHCP 方式联网（不占用静态地址）'
-                    : 'DHCP 获取地址'
+                    ? 'profile 为 DHCP 方式：本机由 DHCP 取址，子网仅提供网关/DNS/VLAN'
+                    : 'profile 为 DHCP 方式：由 DHCP 取址'
               }}
             </span>
           </el-form-item>
