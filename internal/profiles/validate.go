@@ -226,6 +226,13 @@ func validateNetwork(raw json.RawMessage, hasSubnet bool) (NetworkConfig, error)
 		return nc, fmt.Errorf("network: %w", err)
 	}
 	nc.Method = strings.ToLower(strings.TrimSpace(nc.Method))
+	// An empty method defaults to dhcp — the UI form starts there and the
+	// field is a two-way radio, so an omitted value is always a client bug
+	// rather than an intentional choice. Failing here (previous behaviour)
+	// made the default form unsubmittable.
+	if nc.Method == "" {
+		nc.Method = "dhcp"
+	}
 	switch nc.Method {
 	case "static":
 		if hasSubnet {
@@ -233,6 +240,16 @@ func validateNetwork(raw json.RawMessage, hasSubnet bool) (NetworkConfig, error)
 			nc.PrefixLen = 0
 			nc.Gateway = ""
 			nc.DNS = nil
+			break
+		}
+		// "Deferred static": the UI lets operators choose 静态 before any
+		// subnet exists and fill per-machine values at install time (the
+		// install dialog always requires a subnet for static installs, and
+		// the agent renders from that subnet). With no static fields sent
+		// there is nothing to validate — accept the placeholder. Any
+		// partially-filled static config still goes through the strict
+		// checks below.
+		if nc.PrefixLen == 0 && nc.Gateway == "" && len(nc.DNS) == 0 {
 			break
 		}
 		if nc.PrefixLen < 1 || nc.PrefixLen > 32 {
