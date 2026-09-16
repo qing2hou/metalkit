@@ -121,11 +121,22 @@ const staticIpError = computed(() => {
   return ''
 })
 
+// 装机密码：勾选覆盖后若填写则需 8-128 字符（后端 bindings.validatePassword 同规则）
+const passwordError = computed(() => {
+  if (!form.usePasswordOverride) return ''
+  const p = form.rootPassword
+  if (p === '') return '' // 留空 = 沿用 profile / 已存密码
+  if (p.length < 8) return '密码至少 8 个字符'
+  if (p.length > 128) return '密码最长 128 个字符'
+  return ''
+})
+
 const canSubmit = computed(
   () =>
     form.imageId !== '' &&
     form.profileId !== '' &&
     (form.ipMode !== 'static' || !staticIpError.value) &&
+    !passwordError.value &&
     (form.diskMode === 'smallest' || form.diskValue !== '') &&
     (form.nicMode === 'auto' || form.nicMac !== '') &&
     (!form.useBond || form.bondSlaves.length >= 2),
@@ -283,8 +294,23 @@ async function submit(): Promise<void> {
           </el-form-item>
         </el-col>
         <el-col v-if="form.ipMode === 'static'" :span="8">
-          <el-form-item label="静态 IP" :error="staticIpError || undefined" required>
-            <el-input v-model="form.staticIp" placeholder="192.168.1.50" class="mono" />
+          <el-form-item label="静态 IP" :error="staticIpError || undefined">
+            <el-input v-model="form.staticIp" placeholder="留空 = 自动分配" class="mono" />
+          </el-form-item>
+        </el-col>
+        <el-col :span="8">
+          <el-form-item label=" ">
+            <span class="mk-subtle">
+              {{
+                form.ipMode === 'static'
+                  ? form.subnetId
+                    ? '留空则从所选子网挑选空闲 IP（先做 ARP 存活探测，避开已用地址）'
+                    : '留空需先选择子网，才能自动分配 IP'
+                  : form.subnetId
+                    ? '按 profile 的 DHCP 方式联网（不占用静态地址）'
+                    : 'DHCP 获取地址'
+              }}
+            </span>
           </el-form-item>
         </el-col>
       </el-row>
@@ -444,12 +470,18 @@ async function submit(): Promise<void> {
           {{ selectedProfile ? '不勾选则使用 profile 内的密码 hash' : '' }}
         </span>
       </el-form-item>
-      <el-form-item v-if="form.usePasswordOverride" label="装机密码">
+      <el-form-item v-if="form.usePasswordOverride" label="装机密码" :error="passwordError || undefined">
         <div class="mk-password-row">
-          <el-input v-model="form.rootPassword" class="mono" placeholder="留空 = 沿用 profile" readonly />
+          <el-input
+            v-model="form.rootPassword"
+            class="mono"
+            type="password"
+            show-password
+            placeholder="输入自定义密码（8-128 字符；留空 = 沿用 profile）"
+          />
           <el-button @click="randomizePassword">🎲 随机</el-button>
         </div>
-        <div class="mk-subtle">仅用于本次装机；加密存储在服务端，装机时转换为 shadow hash</div>
+        <div class="mk-subtle">本次装机 root 密码；加密存储在服务端，装机时转换为 shadow hash</div>
       </el-form-item>
       <el-form-item v-else-if="binding" label=" ">
         <el-button text size="small" @click="fetchManagedPassword">查看当前绑定密码</el-button>

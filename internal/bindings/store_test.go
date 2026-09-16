@@ -61,6 +61,8 @@ func newFixture(t *testing.T) *testFixture {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
+	// Deterministic liveness probe: unit tests must not emit real ARP frames.
+	bindStore.WithProber(&fakeProber{})
 	return &testFixture{
 		db:       db,
 		machines: inv,

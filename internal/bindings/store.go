@@ -12,6 +12,7 @@
 package bindings
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -47,6 +48,7 @@ type Store struct {
 	db     *sql.DB
 	logger *slog.Logger
 	cipher *crypto.Cipher
+	prober IPProber // liveness probe used when auto-allocating static IPs
 }
 
 // NewStore applies the bindings schema and returns a Store. The schema must
@@ -76,7 +78,18 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger, cipher *cryp
 			}
 		}
 	}
-	return &Store{db: db, logger: logger, cipher: cipher}, nil
+	s := &Store{db: db, logger: logger, cipher: cipher, prober: &ARPProber{}}
+	return s, nil
+}
+
+// WithProber swaps the liveness prober used by IP auto-allocation. Returns
+// the store for chaining. Tests inject a deterministic fake; production keeps
+// the ARP prober installed by NewStore.
+func (s *Store) WithProber(p IPProber) *Store {
+	if p != nil {
+		s.prober = p
+	}
+	return s
 }
 
 // Binding is the JSON-friendly record.
@@ -899,67 +912,239 @@ func familyCompatible(profileFam, imageFam string) error {
 	return fmt.Errorf("%w: profile expects %q, image is %q", ErrFamilyMismatch, p, i)
 }
 
-// allocateIPFromSubnet finds an unused IP address within the subnet's CIDR range.
-// It excludes the network address, broadcast address, gateway, and any IPs already
-// assigned to other bindings. Returns the first available IP in the range.
+// allocateIPFromSubnet picks an unused IPv4 address for machineUUID inside the
+// subnet's CIDR. Reservation sources, in order of authority:
+//
+//   - network / broadcast / gateway
+//   - other bindings' static_address
+//   - the controller host's own addresses (a controller may not lease itself)
+//   - non-expired DHCP leases (same SQLite DB; pool clients hold these)
+//   - the configured DHCP pool range when it overlaps this subnet — handing a
+//     pool address out statically would let the DHCP server promise it to
+//     somebody else later
+//
+// Surviving candidates are then probed for liveness on the local L2 segment
+// (see IPProber): a device that answers ARP owns the address even if it is
+// absent from every catalog. Probing is best-effort — when the controller has
+// no interface in the subnet (a VLAN it is not attached to) or raw sockets
+// are unavailable, allocation proceeds unprobed and says so in the log.
+//
+// The machine's own previously allocated address is kept ("sticky"): editing
+// a binding must not silently move the host to a different IP.
 func (s *Store) allocateIPFromSubnet(ctx context.Context, machineUUID, cidr, gateway string) (string, error) {
-	// Parse CIDR to get network range
 	_, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return "", fmt.Errorf("parse CIDR %q: %w", cidr, err)
 	}
+	network := ipnet.IP.Mask(ipnet.Mask)
 
-	// Get all IPs currently assigned in bindings (excluding this machine)
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT static_address FROM bindings WHERE static_address IS NOT NULL AND machine_uuid != ?`,
-		machineUUID)
-	if err != nil {
-		return "", fmt.Errorf("query existing IPs: %w", err)
-	}
-	defer rows.Close()
-
-	usedIPs := make(map[string]bool)
-	for rows.Next() {
-		var ip string
-		if err := rows.Scan(&ip); err != nil {
-			return "", fmt.Errorf("scan IP: %w", err)
+	// Sticky: a re-PUT without an explicit address keeps the existing one when
+	// it is still inside this subnet and not a special address.
+	var own string
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(static_address, '') FROM bindings WHERE machine_uuid = ?`, machineUUID).
+		Scan(&own)
+	if own != "" {
+		if ip := net.ParseIP(own).To4(); ip != nil && ipnet.Contains(ip) &&
+			!ip.Equal(network) && !isBroadcast(ip, ipnet) {
+			s.logger.Info("ip allocation: keeping existing address",
+				"machine_uuid", machineUUID, "ip", own)
+			return own, nil
 		}
-		usedIPs[ip] = true
 	}
-	if err := rows.Err(); err != nil {
+
+	used, err := s.reservedIPs(ctx, machineUUID, ipnet, gateway)
+	if err != nil {
 		return "", err
 	}
 
-	// Mark gateway as used
-	usedIPs[gateway] = true
-
-	// Iterate through the subnet range to find first available IP
-	ip := ipnet.IP.Mask(ipnet.Mask)
-	for ipnet.Contains(ip) {
-		candidate := ip.String()
-
-		// Skip network address (first IP)
-		if ip.Equal(ipnet.IP) {
-			ip = nextIP(ip)
-			continue
-		}
-
-		// Skip broadcast address (last IP)
+	candidates := make([]net.IP, 0, 64)
+	for ip := nextIP(network); ipnet.Contains(ip); ip = nextIP(ip) {
 		if isBroadcast(ip, ipnet) {
 			break
 		}
-
-		// Skip if already used
-		if usedIPs[candidate] {
-			ip = nextIP(ip)
+		c := ip.String()
+		if used[c] {
 			continue
 		}
-
-		// Found an available IP
-		return candidate, nil
+		candidates = append(candidates, append(net.IP(nil), ip...))
+		if len(candidates) >= maxAllocCandidates {
+			break
+		}
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no available IP addresses in %s (all %d scanned addresses reserved)",
+			cidr, maxAllocCandidates)
 	}
 
-	return "", errors.New("no available IP addresses in subnet range")
+	// Probe in batches; the first candidate that stays silent is ours.
+	if s.prober != nil {
+		probed, skipped := 0, 0
+		for i := 0; i < len(candidates) && probed < maxProbeCandidates; i += probeBatchSize {
+			end := i + probeBatchSize
+			if end > len(candidates) {
+				end = len(candidates)
+			}
+			if end-i > maxProbeCandidates-probed {
+				end = i + (maxProbeCandidates - probed)
+			}
+			batch := candidates[i:end]
+			probed += len(batch)
+			live, perr := s.prober.InUseBatch(ctx, batch)
+			if perr != nil {
+				s.logger.Warn("ip allocation: liveness probe unavailable, assigning without probe",
+					"subnet", cidr, "err", perr)
+				return batch[0].String(), nil
+			}
+			for _, c := range batch {
+				if !live[c.String()] {
+					if skipped > 0 {
+						s.logger.Info("ip allocation: skipped live addresses",
+							"subnet", cidr, "skipped", skipped, "allocated", c.String())
+					}
+					return c.String(), nil
+				}
+				skipped++
+			}
+		}
+		if probed >= maxProbeCandidates {
+			return "", fmt.Errorf(
+				"no free address found in %s after probing %d candidates (all answered ARP); set a static address manually",
+				cidr, probed)
+		}
+		return "", fmt.Errorf("no available IP addresses in %s (every candidate answered ARP)", cidr)
+	}
+	return candidates[0].String(), nil
+}
+
+// Bounds for a single allocation run: candidates to enumerate and how many
+// share one probe window. A /24 exhausts far below these; they only matter
+// for very large CIDRs where scanning everything would stall the request.
+const (
+	// maxAllocCandidates bounds how many addresses a single allocation may
+	// enumerate (a /24 exhausts far below this; it only matters for large CIDRs).
+	maxAllocCandidates = 512
+	// probeBatchSize is how many candidates share one ARP window; each window
+	// costs ~0.9s, so bigger batches keep worst-case latency down.
+	probeBatchSize = 16
+	// maxProbeCandidates caps liveness probing. Beyond it the allocator errors
+	// out (with the count) instead of stalling: an operator who needs an
+	// address in a dense range can set it by hand.
+	maxProbeCandidates = 128
+)
+
+// reservedIPs collects every address that must not be handed out: gateway,
+// other bindings' static addresses, the controller's own addresses, live
+// leases, and the DHCP pool range when it overlaps ipnet.
+func (s *Store) reservedIPs(ctx context.Context, machineUUID string, ipnet *net.IPNet, gateway string) (map[string]bool, error) {
+	used := make(map[string]bool)
+	if gateway != "" {
+		used[gateway] = true
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT static_address FROM bindings
+          WHERE static_address IS NOT NULL AND static_address != '' AND machine_uuid != ?`,
+		machineUUID)
+	if err != nil {
+		return nil, fmt.Errorf("query existing IPs: %w", err)
+	}
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan IP: %w", err)
+		}
+		used[ip] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	// The controller's own addresses (serverIP, DHCP/TFTP listener host).
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok {
+				if v4 := n.IP.To4(); v4 != nil {
+					used[v4.String()] = true
+				}
+			}
+		}
+	}
+
+	// Leases still in force. Rows live in the same DB (shared connection) so
+	// this is a plain read; a missing table (DHCP never ran) is not an error.
+	leaseRows, err := s.db.QueryContext(ctx,
+		`SELECT ip FROM leases WHERE expires_at > ?`, time.Now().Unix())
+	if err != nil {
+		if !strings.Contains(err.Error(), "no such table") {
+			return nil, fmt.Errorf("query leases: %w", err)
+		}
+	} else {
+		for leaseRows.Next() {
+			var ip string
+			if err := leaseRows.Scan(&ip); err != nil {
+				leaseRows.Close()
+				return nil, err
+			}
+			used[ip] = true
+		}
+		if err := leaseRows.Err(); err != nil {
+			leaseRows.Close()
+			return nil, err
+		}
+		leaseRows.Close()
+	}
+
+	// Dynamic pool: skip it when configured on this subnet. Keys match
+	// settings.KeyDHCPStart/End — read directly to keep the bindings package
+	// free of a settings dependency (values are plain text rows).
+	var mode, start, end string
+	poolRows, err := s.db.QueryContext(ctx,
+		`SELECT key, value FROM settings WHERE key IN ('dhcp.mode', 'dhcp.pool.start', 'dhcp.pool.end')`)
+	if err != nil {
+		if !strings.Contains(err.Error(), "no such table") {
+			return nil, fmt.Errorf("query settings: %w", err)
+		}
+	} else {
+		for poolRows.Next() {
+			var k, v string
+			if err := poolRows.Scan(&k, &v); err != nil {
+				poolRows.Close()
+				return nil, err
+			}
+			switch k {
+			case "dhcp.mode":
+				mode = v
+			case "dhcp.pool.start":
+				start = v
+			case "dhcp.pool.end":
+				end = v
+			}
+		}
+		if err := poolRows.Err(); err != nil {
+			poolRows.Close()
+			return nil, err
+		}
+		poolRows.Close()
+	}
+	if mode == "full" {
+		if sip, eip := net.ParseIP(start).To4(), net.ParseIP(end).To4(); sip != nil && eip != nil {
+			if ipnet.Contains(sip) {
+				for ip := sip; ipnet.Contains(ip) && !ipGT(ip, eip); ip = nextIP(ip) {
+					used[ip.String()] = true
+				}
+			}
+		}
+	}
+	return used, nil
+}
+
+// ipGT reports whether a > b for two IPv4 addresses.
+func ipGT(a, b net.IP) bool {
+	return bytes.Compare(a.To4(), b.To4()) > 0
 }
 
 // nextIP returns the next IP address
@@ -977,6 +1162,9 @@ func nextIP(ip net.IP) net.IP {
 
 // isBroadcast checks if an IP is the broadcast address for the given network
 func isBroadcast(ip net.IP, ipnet *net.IPNet) bool {
+	if ip = ip.To4(); ip == nil {
+		return false
+	}
 	broadcast := make(net.IP, len(ip))
 	for i := range ip {
 		broadcast[i] = ip[i] | ^ipnet.Mask[i]
