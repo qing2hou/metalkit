@@ -1,6 +1,7 @@
 package bindings
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -181,5 +182,17 @@ func hostInSubnet(host, cidr, gateway string) error {
 // existing override) which the caller checks beforehand.
 func isClearJSON(raw []byte) bool {
 	s := strings.TrimSpace(string(raw))
-	return s == "" || s == "null" || s == "{}"
+	if s == "" || s == "null" || s == "{}" {
+		return true
+	}
+	// Tolerate the stringified sentinel: a JS caller writing `bond: 'null'`
+	// produces the six-byte JSON string "null", which means the same thing.
+	// (Metalkit's own UI did exactly that and every save failed with a type
+	// error, so accepting both spellings is deliberate.)
+	var str string
+	if err := json.Unmarshal(raw, &str); err == nil {
+		v := strings.TrimSpace(str)
+		return v == "" || v == "null" || v == "{}"
+	}
+	return false
 }

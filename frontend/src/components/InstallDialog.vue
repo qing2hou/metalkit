@@ -64,12 +64,22 @@ const machineArch = computed(() => props.report?.cpu?.arch ?? '')
 
 const selectedProfile = computed(() => props.profiles.find((p) => p.id === form.profileId))
 
-// profile 的网络方式决定"自动/静态"的含义：static profile 下两者都走子网分配
+// profile 的网络方式决定地址分配口径：
+//   static → 静态（留空 = 从子网探测可用地址后自动分配）
+//   dhcp   → 由 DHCP 取址，绝不分配静态地址
 const profileUsesStatic = computed(() => selectedProfile.value?.network?.method === 'static')
 
 // profile → 联动默认值（对应旧版 profile→subnet 联动）
 watch(selectedProfile, (p) => {
   if (!p) return
+  // 地址方式跟随 profile：静态 profile 默认静态（留空自动分配），
+  // DHCP profile 固定 DHCP；切换 profile 时清掉不属于该方式的输入。
+  if (p.network?.method === 'dhcp') {
+    form.ipMode = 'auto'
+    form.staticIp = ''
+  } else {
+    form.ipMode = 'static'
+  }
   if (p.target_disk) {
     form.diskMode = (['smallest', 'by-wwn', 'by-path', 'by-model'] as const).includes(
       p.target_disk.mode as 'smallest',
@@ -92,6 +102,10 @@ watch(
     if (props.binding?.static_address) {
       form.ipMode = 'static'
       form.staticIp = props.binding.static_address
+    } else if (props.binding?.subnet_id && selectedProfile.value?.network?.method === 'static') {
+      // 静态 profile：留空即"自动分配"，交给后端探测挑地址
+      form.ipMode = 'static'
+      form.staticIp = ''
     } else {
       form.ipMode = 'auto'
       form.staticIp = ''
@@ -182,7 +196,8 @@ async function submit(): Promise<void> {
     // 依赖 HTTPS 传输（server 已支持 TLS）。
 
     // binding 覆盖字段（三态语义见 bindings.UpsertInput）：
-    //   target_disk / bond 键存在且为 "null" 字符串 = 清除；键不传 = 沿用 profile
+    //   target_disk / bond 发 JSON null（或 {}/""）= 清除；键不传 = 沿用 profile。
+    //   注意给的是 JSON null 而不是字符串 'null'：后者会被后端当成类型错误拒绝。
     //   注意此处发送的是 bindings 的顶层字段，非 profiles.network
     const payload: Record<string, unknown> = {
       image_id: form.imageId,
@@ -190,7 +205,13 @@ async function submit(): Promise<void> {
       desired_state: form.desiredState,
       // subnet_id：留空选择时显式发 "" 清除，否则发所选子网
       subnet_id: form.subnetId || '',
-      ...(form.ipMode === 'static' && form.staticIp ? { static_address: form.staticIp } : {}),
+      // 静态 + 填了 IP：用该地址；静态 + 留空：后端探测后自动分配。
+      // 非静态（DHCP）：显式清空，避免残留旧静态地址。
+      ...(form.ipMode === 'static'
+        ? form.staticIp
+          ? { static_address: form.staticIp }
+          : {}
+        : { static_address: '' }),
       ...(form.usePasswordOverride && form.rootPassword
         ? { root_password: form.rootPassword }
         : {}),
@@ -215,7 +236,7 @@ async function submit(): Promise<void> {
             ...(form.bondXmitHashPolicy ? { xmit_hash_policy: form.bondXmitHashPolicy } : {}),
             ...(form.bondPrimary ? { primary: form.bondPrimary } : {}),
           }
-        : 'null',
+        : null,
     }
 
     await bindingsApi.upsert(props.machineUuid, payload)
@@ -291,8 +312,10 @@ async function submit(): Promise<void> {
         <el-col :span="8">
           <el-form-item label="地址分配">
             <el-radio-group v-model="form.ipMode">
-              <el-radio-button value="auto">自动</el-radio-button>
-              <el-radio-button value="static">静态</el-radio-button>
+              <el-radio-button value="auto" :disabled="profileUsesStatic">DHCP</el-radio-button>
+              <el-radio-button value="static" :disabled="!profileUsesStatic && !!form.profileId">
+                静态
+              </el-radio-button>
             </el-radio-group>
           </el-form-item>
         </el-col>
@@ -305,15 +328,17 @@ async function submit(): Promise<void> {
           <el-form-item label=" ">
             <span class="mk-subtle">
               {{
-                profileUsesStatic
-                  ? form.subnetId
-                    ? form.ipMode === 'static' && form.staticIp
-                      ? '使用指定地址'
-                      : '留空/自动均由所选子网分配空闲 IP（先做 ARP 存活探测，避开已用地址）'
-                    : 'profile 为静态方式，需选择子网才能自动分配 IP；也可直接填入地址'
-                  : form.subnetId
-                    ? 'profile 为 DHCP 方式：本机由 DHCP 取址，子网仅提供网关/DNS/VLAN'
-                    : 'profile 为 DHCP 方式：由 DHCP 取址'
+                !form.profileId
+                  ? '先选择安装配置，地址方式随后自动匹配'
+                  : profileUsesStatic
+                    ? form.ipMode === 'static'
+                      ? form.staticIp
+                        ? '使用指定地址'
+                        : form.subnetId
+                          ? '留空：从所选子网探测空闲地址后自动分配'
+                          : '留空需先选择子网；也可直接填入地址'
+                      : ''
+                    : 'profile 为 DHCP 方式：本机由 DHCP 取址，不分配静态地址'
               }}
             </span>
           </el-form-item>

@@ -219,8 +219,8 @@ func TestUpsertStaticRequiresAddress(t *testing.T) {
 		DesiredState: "install",
 		UpdatedBy:    "admin",
 	})
-	if err == nil || !strings.Contains(err.Error(), "static_address") {
-		t.Fatalf("want static_address error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "静态方式需要指定 IP") {
+		t.Fatalf("want static-address-required error, got %v", err)
 	}
 }
 
@@ -846,11 +846,11 @@ func TestUpsertStaticEmptyAddressNoSubnet_Rejects(t *testing.T) {
 		DesiredState: "install",
 		UpdatedBy:    "admin",
 	})
-	if err == nil || !strings.Contains(err.Error(), "static_address") {
-		t.Fatalf("want static_address error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "静态方式需要指定 IP") {
+		t.Fatalf("want static-address-required error, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "subnet") {
-		t.Errorf("error should mention subnet hint, got %q", err.Error())
+	if !strings.Contains(err.Error(), "子网") {
+		t.Errorf("error should mention the subnet hint, got %q", err.Error())
 	}
 }
 

@@ -315,7 +315,7 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 	// from. validateStaticAddress used to error here; we deferred the check so
 	// the auto-allocate path above could run when a subnet IS bound.
 	if networkMethod == "static" && addr == "" {
-		return nil, errors.New("static_address: required when profile.network.method=static and no subnet is bound (bind a subnet to auto-allocate)")
+		return nil, errors.New("静态方式需要指定 IP，或先绑定子网以便自动分配空闲地址")
 	}
 
 	var vlanSQL any
