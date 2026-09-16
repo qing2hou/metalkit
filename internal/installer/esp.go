@@ -11,6 +11,10 @@ import (
 	"strings"
 )
 
+// espTypeGUID is the GPT partition-type GUID for an EFI System Partition
+// (sgdisk/sfdisk shorthand: EF00).
+const espTypeGUID = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+
 // createESPIfMissing checks whether an ESP exists on the same disk as
 // partDev. If not, and bootMode is "uefi", it creates a 512 MiB FAT32
 // partition at the end of the disk. Returns the ESP device path, or ""
@@ -171,8 +175,16 @@ func fixESPTypeIfWrong(ctx context.Context, deps Deps, diskDev, espDev string) e
 		// MBR: ESP must be 0xEF. Normalise to lowercase to match sfdisk output.
 		want = "ef"
 	case "gpt":
-		// GPT: ESP must be EF00. sfdisk prints this verbatim.
+		// GPT: ESP must be EF00. Depending on util-linux version,
+		// `sfdisk --part-type` prints either the short code (EF00) or the
+		// raw type GUID — normalise the well-known GUID so an already
+		// correct ESP isn't "fixed" (and needlessly rewritten) every
+		// install. Observed on the R630 test bed: C12A7328-F81F-11D2-BA4B-
+		// 00A0C93EC93B came back where EF00 was expected.
 		want = "EF00"
+		if strings.EqualFold(current, espTypeGUID) {
+			current = want
+		}
 	default:
 		return nil
 	}

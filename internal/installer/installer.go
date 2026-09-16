@@ -78,6 +78,13 @@ func Run(ctx context.Context, deps Deps, spec jobs.InstallSpec) (retErr error) {
 	_ = deps.Reporter.Log(ctx, "info", fmt.Sprintf("selected disk %s (%d bytes, %s)",
 		target.DevPath, target.SizeBytes, target.Transport))
 
+	// Release anything the live environment auto-activated on the target
+	// disk (old mounts, swap, LVM VGs, md arrays — the previous OS's
+	// leftovers). Without this, BLKRRPART after the write fails with EBUSY
+	// and the kernel keeps serving the OLD partition table, so the new
+	// image's partitions never appear (see release.go).
+	logRelease(ctx, deps, target.DevPath, "pre-write")
+
 	// Zap stale partition table signatures (GPT primary+backup, MBR boot
 	// sector) so the fresh image writes onto a clean slate. Without this,
 	// a disk that previously held a larger GPT install keeps a backup

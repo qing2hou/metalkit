@@ -79,7 +79,9 @@ func WriteImage(ctx context.Context, deps Deps, src io.Reader, devPath string) e
 
 	// partprobe is best-effort: on some kernels it returns non-zero even
 	// after re-reading correctly, and growpart will trigger a re-read
-	// anyway. Log and continue.
+	// anyway. Log and continue — but when it fails with EBUSY a holder on
+	// one of the OLD partitions is usually to blame (see release.go), so
+	// release and retry once before moving on.
 	if _, err := deps.Exec.Run(ctx, "partprobe", devPath); err != nil {
 		if deps.Reporter != nil {
 			_ = deps.Reporter.Log(ctx, "warn",
@@ -87,6 +89,13 @@ func WriteImage(ctx context.Context, deps Deps, src io.Reader, devPath string) e
 		}
 		if deps.Logger != nil {
 			deps.Logger.Warn("partprobe failed", "dev", devPath, "err", err)
+		}
+		logRelease(ctx, deps, devPath, "post-write retry")
+		if _, err2 := deps.Exec.Run(ctx, "partprobe", devPath); err2 == nil {
+			if deps.Reporter != nil {
+				_ = deps.Reporter.Log(ctx, "info",
+					fmt.Sprintf("partprobe %s succeeded after releasing holders", devPath))
+			}
 		}
 	}
 
@@ -101,6 +110,14 @@ func WriteImage(ctx context.Context, deps Deps, src io.Reader, devPath string) e
 	if _, err := deps.Exec.Run(ctx, "blockdev", "--rereadpt", devPath); err != nil {
 		if deps.Logger != nil {
 			deps.Logger.Warn("blockdev --rereadpt failed (continuing)", "dev", devPath, "err", err)
+		}
+		// Last resort: BLKPG-style add/update of individual partitions can
+		// succeed where a full BLKRRPART is refused for a partition that is
+		// still referenced.
+		if _, err := deps.Exec.Run(ctx, "partx", "-u", devPath); err != nil {
+			if deps.Logger != nil {
+				deps.Logger.Warn("partx -u failed (continuing)", "dev", devPath, "err", err)
+			}
 		}
 	}
 	return nil

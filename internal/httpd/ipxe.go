@@ -17,6 +17,17 @@ import (
 //
 // metalkit.url= is consumed by the in-live inventory agent (cmd/agent). It
 // is the controller base URL the agent POSTs reports/heartbeats to.
+//
+// systemd.mask=lvm2-pvscan@.service: the live image ships lvm2 (some images
+// need it) and udev otherwise auto-activates every VG it finds on the host's
+// disks. On a machine whose previous OS left an LVM PV behind, that holds the
+// target disk's partitions open, BLKRRPART then fails with EBUSY, the kernel
+// keeps serving the OLD partition table, and the install dies at "no rootfs
+// candidate partition" (Dell R630 incident 2026-09-16; the agent also
+// releases holders explicitly — see installer/release.go — this mask just
+// removes the most common source). Metalkit does not support LVM root images
+// (rootfs detection skips LVM2_member), so nothing in the install path needs
+// VG auto-activation.
 // The /boot/* URLs are path-style (/boot/<arch>/<file>) rather than
 // query-style (?arch=) — live-boot's initramfs 9990-mount-http.sh derives the
 // fetch archive type from a sed on the extension suffix and the query string
@@ -27,7 +38,7 @@ import (
 // UART (ttyAMA0). The ttyS0 rationale comment above still applies on arm64
 // — we keep the same serial-only strategy, just the right device.
 const ipxeTemplate = `#!ipxe
-kernel http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/vmlinuz initrd=initrd.img boot=live fetch=http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/filesystem.squashfs ip=dhcp console={{.Console}},115200 metalkit.url=http://{{.ServerIP}}{{.HTTPAddr}}
+kernel http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/vmlinuz initrd=initrd.img boot=live fetch=http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/filesystem.squashfs ip=dhcp console={{.Console}},115200 metalkit.url=http://{{.ServerIP}}{{.HTTPAddr}} systemd.mask=lvm2-pvscan@.service
 initrd http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/initrd.img
 boot
 `

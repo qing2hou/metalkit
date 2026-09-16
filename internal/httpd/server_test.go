@@ -66,6 +66,10 @@ func TestIPXEScript(t *testing.T) {
 		"kernel http://",
 		"boot=live",
 		"fetch=http://10.99.0.1:8080/boot/amd64/filesystem.squashfs",
+		// Keep LVM auto-activation out of the live boot: it holds the target
+		// disk's old partitions open and breaks the post-write partition
+		// table re-read (see installer/release.go).
+		"systemd.mask=lvm2-pvscan@.service",
 		"initrd http://",
 		"boot\n",
 	} {
