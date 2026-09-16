@@ -78,7 +78,12 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger, cipher *cryp
 			}
 		}
 	}
-	s := &Store{db: db, logger: logger, cipher: cipher, prober: &ARPProber{}}
+	// ARP first (authoritative on the local L2), ICMP layered on top for
+	// routed subnets and ARP-isolated segments — see CompositeProber.
+	s := &Store{
+		db: db, logger: logger, cipher: cipher,
+		prober: &CompositeProber{ARP: &ARPProber{}, ICMP: &ICMPProber{}, Logger: logger},
+	}
 	return s, nil
 }
 

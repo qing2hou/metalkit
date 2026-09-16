@@ -28,7 +28,7 @@ func main() {
 	dbPath := os.Args[1]
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	fmt.Println("=== 1. ARP liveness probe: known-live vs unused ===")
+	fmt.Println("=== 1a. ARP liveness probe: known-live vs unused ===")
 	prober := &bindings.ARPProber{Timeout: 900 * time.Millisecond}
 	// Note: the controller's own address (.11) is deliberately NOT here — a
 	// host never answers ARP for locally-originated requests (verified: arping
@@ -66,7 +66,34 @@ func main() {
 	}
 
 	fmt.Println()
-	fmt.Println("=== 2. Allocation path against a DB copy ===")
+	fmt.Println("=== 1b. ICMP liveness probe: known-live vs unused ===")
+	icmpProber := &bindings.ICMPProber{Timeout: 1200 * time.Millisecond}
+	igot, ierr := icmpProber.InUseBatch(context.Background(), ips)
+	if ierr != nil {
+		fmt.Printf("icmp probe error: %v\n", ierr)
+		fail = true
+	} else {
+		for _, s := range live {
+			alive := igot[s]
+			mark := "OK"
+			if !alive {
+				mark = "no ICMP reply (host may block ping — expected for some)"
+			}
+			fmt.Printf("  %-16s alive=%-5v  [%s]\n", s, alive, mark)
+		}
+		for _, s := range dead {
+			alive := igot[s]
+			mark := "OK"
+			if alive {
+				mark = "FALSE-POSITIVE (unexpected)"
+				fail = true
+			}
+			fmt.Printf("  %-16s alive=%-5v  [%s]\n", s, alive, mark)
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("=== 2. Allocation path against a DB copy (composite ARP+ICMP prober) ===")
 	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rw")
 	if err != nil {
 		fmt.Printf("open db: %v\n", err)
@@ -79,7 +106,7 @@ func main() {
 		fmt.Printf("bindings.NewStore: %v\n", err)
 		os.Exit(1)
 	}
-	store.WithProber(prober)
+	store.WithProber(&bindings.CompositeProber{ARP: prober, ICMP: icmpProber, Logger: logger})
 
 	// Pick the real machine (any row) — we only exercise allocation.
 	var machineUUID string
