@@ -2,7 +2,7 @@ d binary
 f binary/sha256sum.README
 d binary/live
 f binary/live/filesystem.packages-remove
-f binary/live/initrd.img-6.1.0-49-amd64
+f binary/live/initrd.img-6.1.0-53-amd64
 f binary/live/filesystem.packages
 f binary/live/filesystem.squashfs
 f binary/sha256sum.txt

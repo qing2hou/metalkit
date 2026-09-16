@@ -319,3 +319,12 @@ export interface AuthUser {
 export interface ApiError {
   error: string
 }
+
+export interface StorageSettings {
+  /** 镜像内容寻址存储目录（绝对路径）；变更后需重启 controller 生效 */
+  images_dir: string
+}
+
+export interface StorageSettingsResponse extends StorageSettings {
+  restart_required: boolean
+}

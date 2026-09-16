@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -93,6 +95,8 @@ func (a *API) WithReloader(r DHCPReloader) *API {
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/settings/dhcp", a.getDHCP)
 	mux.HandleFunc("PUT /api/v1/settings/dhcp", a.putDHCP)
+	mux.HandleFunc("GET /api/v1/settings/storage", a.getStorage)
+	mux.HandleFunc("PUT /api/v1/settings/storage", a.putStorage)
 	mux.HandleFunc("GET /api/v1/settings/interfaces", a.listInterfaces)
 }
 
@@ -326,12 +330,32 @@ func ApplyOverridesToConfig(ctx context.Context, store *Store, cfg *config.Confi
 	overrides, err := store.GetMany(ctx, []string{
 		KeyDHCPMode, KeyDHCPStart, KeyDHCPEnd, KeyDHCPNetmask, KeyDHCPGateway,
 		KeyDHCPDNS, KeyDHCPLeaseHours, KeyDHCPExclude, KeyDHCPInterface,
+		KeyStorageImagesDir,
 	})
 	if err != nil {
 		return err
 	}
 	if len(overrides) == 0 {
 		return nil
+	}
+	// Storage override: images.Store is constructed after this call, so a
+	// stored directory simply redirects it. The PUT handler already migrated
+	// files and validated writability at save time; belt-and-suspenders here:
+	// a missing/unwritable dir at boot falls back to the config path rather
+	// than crashing the controller.
+	if v, ok := overrides[KeyStorageImagesDir]; ok && strings.TrimSpace(v) != "" {
+		dir := strings.TrimSpace(v)
+		if filepath.IsAbs(dir) {
+			if err := os.MkdirAll(dir, 0o750); err == nil {
+				cfg.ImagesDir = dir
+				logger.Info("settings override: storage.images_dir applied", "dir", dir)
+			} else {
+				logger.Warn("settings override: storage.images_dir unusable, keeping config dir",
+					"dir", dir, "config_dir", cfg.ImagesDir, "err", err)
+			}
+		} else {
+			logger.Warn("settings override: storage.images_dir not absolute, ignored", "value", v)
+		}
 	}
 	if v, ok := overrides[KeyDHCPMode]; ok {
 		switch v {

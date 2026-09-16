@@ -17,6 +17,8 @@ import type {
   ProfileComponents,
   Report,
   ReportMeta,
+  StorageSettings,
+  StorageSettingsResponse,
   Subnet,
   UploadSession,
 } from './types'
@@ -136,6 +138,9 @@ export const settingsApi = {
   getDhcp: () => apiGet<DhcpSettingsResponse>('/settings/dhcp'),
   putDhcp: (settings: DhcpSettings) => apiSend<DhcpSettingsResponse>('PUT', '/settings/dhcp', settings),
   interfaces: () => apiGet<InterfaceInfo[]>('/settings/interfaces'),
+  getStorage: () => apiGet<StorageSettingsResponse>('/settings/storage'),
+  putStorage: (settings: StorageSettings) =>
+    apiSend<StorageSettingsResponse>('PUT', '/settings/storage', settings),
 }
 
 // ---------- audit ----------

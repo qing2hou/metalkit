@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 
 import { settingsApi } from '@/api'
-import type { DhcpSettings, InterfaceInfo } from '@/api/types'
+import type { DhcpSettings, InterfaceInfo, StorageSettings } from '@/api/types'
 import AppShell from '@/components/AppShell.vue'
 import { isValidIPv4, subnetRange } from '@/lib/net'
 
@@ -14,6 +14,44 @@ const restartRequired = ref(false)
 const savedOnce = ref(false)
 
 const interfaces = ref<InterfaceInfo[]>([])
+
+// ---------- 存储 ----------
+const storage = reactive<StorageSettings>({ images_dir: '' })
+const storageSaving = ref(false)
+const storageRestart = ref(false)
+const storageSaved = ref(false)
+
+async function loadStorage(): Promise<void> {
+  try {
+    const s = await settingsApi.getStorage()
+    storage.images_dir = s.images_dir
+  } catch {
+    /* 存储卡片加载失败不阻塞 DHCP 表单 */
+  }
+}
+
+async function saveStorage(): Promise<void> {
+  const dir = storage.images_dir.trim()
+  if (!dir || !dir.startsWith('/')) {
+    ElMessage.warning('请输入绝对路径（以 / 开头）')
+    return
+  }
+  storageSaving.value = true
+  try {
+    const resp = await settingsApi.putStorage({ images_dir: dir })
+    storageRestart.value = Boolean(resp?.restart_required)
+    storageSaved.value = true
+    ElMessage.success(
+      resp?.restart_required
+        ? '存储目录已保存，已有镜像已迁移；重启 controller 后新目录完全生效'
+        : '存储目录已保存',
+    )
+  } catch (err) {
+    ElMessage.error(`保存存储目录失败: ${(err as Error).message}`)
+  } finally {
+    storageSaving.value = false
+  }
+}
 
 const form = reactive<DhcpSettings>({
   mode: 'proxy',
@@ -116,7 +154,10 @@ function maskToPrefix(mask: string): number {
   return bin.lastIndexOf('1') + 1
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadStorage()
+})
 
 async function load(): Promise<void> {
   loading.value = true
@@ -297,6 +338,37 @@ function onModeChange(mode: 'proxy' | 'full'): void {
           <el-button type="primary" :loading="saving" @click="save">保存</el-button>
         </div>
       </el-card>
+
+      <!-- 存储：镜像目录自定义 -->
+      <el-card shadow="never" style="margin-top: 16px">
+        <template #header><b>镜像存储</b></template>
+        <el-form label-width="130px" @submit.prevent>
+          <el-form-item label="存储目录">
+            <el-input
+              v-model="storage.images_dir"
+              placeholder="/var/lib/metalkit/images"
+              class="mono"
+              :disabled="storageSaving"
+            />
+            <div class="mk-subtle">
+              镜像内容寻址文件的存放目录（绝对路径）。保存时已有镜像会自动迁移到新目录；
+              变更需重启 controller 后对上传完全生效。不能与当前目录相互嵌套。
+            </div>
+          </el-form-item>
+        </el-form>
+        <div style="margin-left: 130px">
+          <el-button type="primary" :loading="storageSaving" @click="saveStorage">保存存储目录</el-button>
+        </div>
+      </el-card>
+
+      <el-alert
+        v-if="storageRestart"
+        title="存储目录已变更并完成迁移，重启 controller 后新目录生效"
+        type="warning"
+        show-icon
+        :closable="true"
+        style="margin-top: 16px"
+      />
 
       <el-alert
         v-if="restartRequired"
