@@ -25,6 +25,9 @@ const ArchArm64 = "arm64"
 var migrations = []string{
 	"ALTER TABLE images ADD COLUMN arch TEXT NOT NULL DEFAULT ''",
 	"ALTER TABLE upload_sessions ADD COLUMN arch TEXT NOT NULL DEFAULT ''",
+	// filename: on-disk file name (sanitized upload name). Empty on legacy
+	// rows — the startup rewriter backfills it and renames sha-named files.
+	"ALTER TABLE images ADD COLUMN filename TEXT NOT NULL DEFAULT ''",
 }
 
 const schemaSQL = `
@@ -38,6 +41,7 @@ CREATE TABLE IF NOT EXISTS images (
     size_bytes    INTEGER NOT NULL,
     virtual_size  INTEGER,
     sha256        TEXT NOT NULL UNIQUE,
+    filename      TEXT NOT NULL DEFAULT '',
     uploaded_at   INTEGER NOT NULL,
     uploaded_by   TEXT NOT NULL,
     last_used_at  INTEGER,

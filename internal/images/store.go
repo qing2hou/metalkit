@@ -69,6 +69,8 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger, dir string) 
 	if err := s.ensureDirs(); err != nil {
 		return nil, err
 	}
+	// One-time: bring pre-filename-era rows/files onto the upload-name layout.
+	s.RewriteLegacyNames()
 	return s, nil
 }
 
@@ -83,6 +85,7 @@ type Image struct {
 	SizeBytes    int64      `json:"size_bytes"`
 	VirtualSize  int64      `json:"virtual_size,omitempty"`
 	SHA256       string     `json:"sha256"`
+	Filename     string     `json:"filename,omitempty"` // on-disk file name (sanitized upload name)
 	UploadedAt   time.Time  `json:"uploaded_at"`
 	UploadedBy   string     `json:"uploaded_by"`
 	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
@@ -292,11 +295,20 @@ type FinalizeInput struct {
 // FinalizeImage inserts the images row and deletes the session row in a single
 // transaction. Returns the populated Image. If the sha256 already exists in
 // the catalog the transaction rolls back and ErrDuplicate is returned.
+//
+// The on-disk filename is derived from the upload name (see sanitizeFilename);
+// if that name is already taken by a DIFFERENT sha in the catalog (two files
+// can legitimately share a name after re-upload of an edited image), a short
+// hash suffix is appended so both can coexist on disk.
 func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, error) {
 	if !sha256RE.MatchString(in.SHA256) {
 		return nil, errors.New("images: sha256 must be 64 lowercase hex chars")
 	}
 	id, err := newImageID()
+	if err != nil {
+		return nil, err
+	}
+	filename, err := s.uniqueFilename(ctx, in.Name, in.Format, in.SHA256)
 	if err != nil {
 		return nil, err
 	}
@@ -320,10 +332,10 @@ func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, er
 	if _, err := tx.ExecContext(ctx, `
         INSERT INTO images
             (id, name, version, family, arch, format, size_bytes, virtual_size,
-             sha256, uploaded_at, uploaded_by, notes, metadata_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             sha256, filename, uploaded_at, uploaded_by, notes, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, in.Name, in.Version, in.Family, in.Arch, in.Format, in.SizeBytes, in.VirtualSize,
-		in.SHA256, uploadedAt, in.UploadedBy, in.Notes, in.MetadataJSON,
+		in.SHA256, filename, uploadedAt, in.UploadedBy, in.Notes, in.MetadataJSON,
 	); err != nil {
 		return nil, fmt.Errorf("insert image: %w", err)
 	}
@@ -349,6 +361,7 @@ func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, er
 		SizeBytes:    in.SizeBytes,
 		VirtualSize:  in.VirtualSize,
 		SHA256:       in.SHA256,
+		Filename:     filename,
 		UploadedAt:   time.Unix(uploadedAt, 0).UTC(),
 		UploadedBy:   in.UploadedBy,
 		Notes:        in.Notes,
@@ -360,7 +373,8 @@ func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, er
 func (s *Store) ListImages(ctx context.Context) ([]Image, error) {
 	rows, err := s.db.QueryContext(ctx, `
         SELECT id, name, COALESCE(version,''), COALESCE(family,''), COALESCE(arch,''), format,
-               size_bytes, COALESCE(virtual_size, 0), sha256, uploaded_at,
+               size_bytes, COALESCE(virtual_size, 0), sha256,
+               COALESCE(filename,''), uploaded_at,
                uploaded_by, last_used_at, COALESCE(notes,''),
                COALESCE(metadata_json,'')
         FROM images
@@ -379,7 +393,7 @@ func (s *Store) ListImages(ctx context.Context) ([]Image, error) {
 			lastUsedAt sql.NullInt64
 		)
 		if err := rows.Scan(&img.ID, &img.Name, &img.Version, &img.Family, &img.Arch, &img.Format,
-			&img.SizeBytes, &img.VirtualSize, &img.SHA256, &uploadedAt,
+			&img.SizeBytes, &img.VirtualSize, &img.SHA256, &img.Filename, &uploadedAt,
 			&img.UploadedBy, &lastUsedAt, &img.Notes, &img.MetadataJSON); err != nil {
 			return nil, fmt.Errorf("scan image: %w", err)
 		}
@@ -405,12 +419,14 @@ func (s *Store) GetImage(ctx context.Context, id string) (*Image, error) {
 	)
 	err := s.db.QueryRowContext(ctx, `
         SELECT id, name, COALESCE(version,''), COALESCE(family,''), COALESCE(arch,''), format,
-               size_bytes, COALESCE(virtual_size, 0), sha256, uploaded_at,
+               size_bytes, COALESCE(virtual_size, 0), sha256,
+               COALESCE(filename,''), uploaded_at,
                uploaded_by, last_used_at, COALESCE(notes,''),
                COALESCE(metadata_json,'')
         FROM images WHERE id = ?`, id).Scan(
 		&img.ID, &img.Name, &img.Version, &img.Family, &img.Arch, &img.Format,
-		&img.SizeBytes, &img.VirtualSize, &img.SHA256, &uploadedAt,
+		&img.SizeBytes, &img.VirtualSize, &img.SHA256,
+		&img.Filename, &uploadedAt,
 		&img.UploadedBy, &lastUsedAt, &img.Notes, &img.MetadataJSON,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -337,7 +337,7 @@ func (a *API) getBlob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	http.ServeFile(w, r, a.store.FinalPath(img.SHA256, img.Format))
+	http.ServeFile(w, r, a.store.FinalPath(img.Filename, img.Format, img.SHA256))
 }
 
 func (a *API) deleteImage(w http.ResponseWriter, r *http.Request) {

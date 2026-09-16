@@ -86,7 +86,10 @@ func TestWriteChunkAndFinalize(t *testing.T) {
 	}
 
 	// File at content-addressed path with correct bytes.
-	final := s.FinalPath(in.ExpectedSHA256, "qcow2")
+	if res.Image.Filename != "ubuntu.qcow2" {
+		t.Errorf("Filename: got %q want %q", res.Image.Filename, "ubuntu.qcow2")
+	}
+	final := s.FinalPath(res.Image.Filename, "qcow2", res.Image.SHA256)
 	data, err := os.ReadFile(final)
 	if err != nil {
 		t.Fatalf("read final: %v", err)
@@ -236,7 +239,7 @@ func TestDeleteImageFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
-	final := s.FinalPath(res.Image.SHA256, res.Image.Format)
+	final := s.FinalPath(res.Image.Filename, res.Image.Format, res.Image.SHA256)
 	if _, err := os.Stat(final); err != nil {
 		t.Fatalf("final missing: %v", err)
 	}

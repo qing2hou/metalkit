@@ -3,6 +3,7 @@ package images
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -54,8 +56,17 @@ func (s *Store) chunkPath(sessionID string, n int) string {
 	return filepath.Join(s.uploadDir(sessionID), fmt.Sprintf("chunk-%06d", n))
 }
 
-// FinalPath returns where the image with the given sha256 + format should live.
-func (s *Store) FinalPath(sha, format string) string {
+// FinalPath returns the on-disk path for an image. The primary name is the
+// stored upload filename; verifyLegacyPath is the pre-filename sha256.format
+// name used as a fallback when the startup rewrite couldn't rename (e.g. the
+// file was moved by an operator): whichever exists wins, primary preferred.
+func (s *Store) FinalPath(filename, format, sha string) string {
+	primary := filepath.Join(s.dir, filename)
+	if filename != "" {
+		if _, err := os.Stat(primary); err == nil {
+			return primary
+		}
+	}
 	return filepath.Join(s.dir, sha+"."+format)
 }
 
@@ -227,7 +238,12 @@ func (s *Store) FinalizeUpload(ctx context.Context, sessionID string, extractor 
 		}
 	}
 
-	finalPath := s.FinalPath(got, format)
+	filename, err := s.uniqueFilename(ctx, sess.Name, format, got)
+	if err != nil {
+		_ = os.Remove(stage)
+		return nil, err
+	}
+	finalPath := filepath.Join(s.dir, filename)
 	if err := os.Rename(stage, finalPath); err != nil {
 		_ = os.Remove(stage)
 		return nil, fmt.Errorf("rename to final: %w", err)
@@ -302,7 +318,8 @@ func (s *Store) DeleteImageFile(ctx context.Context, id string) (*Image, error) 
 	if err != nil {
 		return nil, err
 	}
-	path := s.FinalPath(img.SHA256, img.Format)
+	path := s.FinalPath(img.Filename, img.Format, img.SHA256)
+	_ = os.Remove(filepath.Join(s.dir, img.SHA256+"."+img.Format)) // legacy name, if any
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		s.logger.Warn("remove image file", "path", path, "err", err)
 	}
@@ -369,5 +386,130 @@ func inferFormatFromName(name string) string {
 		return "qcow2"
 	default:
 		return "qcow2"
+	}
+}
+
+// sanitizeFilename turns an upload name into a safe on-disk file name:
+// path separators and NUL collapsed, shell/whitespace specials replaced with
+// '_', length capped. Keeps the extension so the file type stays visible.
+func sanitizeFilename(name string) string {
+	base := filepath.Base(strings.TrimSpace(name))
+	var b strings.Builder
+	for _, r := range base {
+		switch r {
+		case 0, '/', '\\', ':', '*', '?', '"', '<', '>', '|', ' ', '\t', '\n', ';', '&', '$', '\'', '`':
+			b.WriteByte('_')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	if out == "" || out == "." || out == ".." {
+		return "image"
+	}
+	if len(out) > 180 {
+		out = out[len(out)-180:] // keep the tail: extension survives
+	}
+	return out
+}
+
+// uniqueFilename derives the on-disk file name for a new image from its
+// upload name. Convention: the sanitized upload name keeps its extension;
+// if the name is empty or only an extension, fall back to "{sha12}.{format}".
+// When another catalog row (different sha) already claimed the exact name —
+// e.g. a re-upload of an edited image with the same file name — append
+// "-{sha8}" before the extension so both files can coexist.
+func (s *Store) uniqueFilename(ctx context.Context, uploadName, format, sha string) (string, error) {
+	base := sanitizeFilename(uploadName)
+	ext := filepath.Ext(base)
+	if ext == "" {
+		ext = "." + format
+		base += ext
+	}
+	// Only allow common image extensions; anything else (or no ext) gets
+	// normalized to .{format} so handlers/qemu-img see what the DB says.
+	switch ext {
+	case ".qcow2", ".raw", ".img":
+	default:
+		base = strings.TrimSuffix(base, ext) + "." + format
+		ext = "." + format
+	}
+	if base == ext { // name was empty/only extension
+		return sha[:12] + ext, nil
+	}
+	var owner string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT sha256 FROM images WHERE filename = ?`, base).Scan(&owner)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return base, nil
+	case err != nil:
+		return "", fmt.Errorf("filename check: %w", err)
+	case owner == sha:
+		return base, nil // same content re-finalized (dedup path), keep name
+	default:
+		stem := strings.TrimSuffix(base, ext)
+		return stem + "-" + sha[:8] + ext, nil
+	}
+}
+
+// RewriteLegacyNames renames content-addressed files (sha256.format, the
+// pre-filename-column layout) to their upload names and backfills the
+// filename column. Runs at store construction; idempotent — rows with a
+// filename set are skipped, missing files are logged and left alone (an
+// operator may have moved them; GetImage still reports the row).
+func (s *Store) RewriteLegacyNames() {
+	rows, err := s.db.Query(`SELECT id, name, sha256, format, COALESCE(filename,'') FROM images`)
+	if err != nil {
+		s.logger.Warn("legacy rename: query failed", "err", err)
+		return
+	}
+	type rec struct {
+		id, name, sha, format, filename string
+	}
+	var recs []rec
+	for rows.Next() {
+		var r rec
+		if err := rows.Scan(&r.id, &r.name, &r.sha, &r.format, &r.filename); err != nil {
+			s.logger.Warn("legacy rename: scan failed", "err", err)
+			rows.Close()
+			return
+		}
+		recs = append(recs, r)
+	}
+	rows.Close()
+
+	for _, r := range recs {
+		if r.filename != "" {
+			continue
+		}
+		legacy := filepath.Join(s.dir, r.sha+"."+r.format)
+		ctx := context.Background()
+		want, err := s.uniqueFilename(ctx, r.name, r.format, r.sha)
+		if err != nil {
+			s.logger.Warn("legacy rename: derive name", "id", r.id, "err", err)
+			continue
+		}
+		target := filepath.Join(s.dir, want)
+		if _, err := os.Stat(target); err == nil {
+			// Name already occupied on disk by someone else — derive a fresh
+			// unique one (adds -sha8 suffix).
+			want, _ = s.uniqueFilename(ctx, want, r.format, r.sha+"x") // force suffix path
+			// simplest: append sha8 manually
+			ext := filepath.Ext(want)
+			want = strings.TrimSuffix(want, ext) + "-" + r.sha[:8] + ext
+			target = filepath.Join(s.dir, want)
+		}
+		if _, err := os.Stat(legacy); err == nil {
+			if err := os.Rename(legacy, target); err != nil {
+				s.logger.Warn("legacy rename: rename failed", "from", legacy, "to", target, "err", err)
+				continue
+			}
+		}
+		if _, err := s.db.Exec(`UPDATE images SET filename = ? WHERE id = ?`, want, r.id); err != nil {
+			s.logger.Warn("legacy rename: update failed", "id", r.id, "err", err)
+			continue
+		}
+		s.logger.Info("renamed image file to upload name", "id", r.id, "file", want)
 	}
 }
