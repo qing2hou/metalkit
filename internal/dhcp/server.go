@@ -57,8 +57,7 @@ type LeaseStore interface {
 type AllocateInput struct {
 	MAC      string
 	Hostname string
-	Start    netip.Addr
-	End      netip.Addr
+	Ranges   []Range
 	Exclude  map[string]struct{}
 	LeaseDur time.Duration
 }
@@ -346,8 +345,7 @@ func (s *Server) buildOffer(ctx context.Context, req *dhcpv4.DHCPv4, pool *Pool,
 	in := AllocateInput{
 		MAC:      mac,
 		Hostname: req.HostName(),
-		Start:    pool.Start,
-		End:      pool.End,
+		Ranges:   pool.Ranges,
 		Exclude:  pool.Exclude,
 		LeaseDur: time.Duration(pool.LeaseSec) * time.Second,
 	}

@@ -10,6 +10,11 @@ import { fmtAbsolute } from '@/lib/format'
 import { isValidCIDR, isValidIPv4, subnetRange } from '@/lib/net'
 import { asRow } from '@/lib/typed'
 
+interface PoolSegForm {
+  start: string
+  end: string
+}
+
 interface SubnetForm {
   id?: string
   name: string
@@ -17,8 +22,7 @@ interface SubnetForm {
   gateway: string
   dns: string
   vlanId: number | undefined
-  poolStart: string
-  poolEnd: string
+  pools: PoolSegForm[]
 }
 
 const list = ref<Subnet[]>([])
@@ -26,7 +30,7 @@ const loading = ref(false)
 const dialogVisible = ref(false)
 const saving = ref(false)
 const formRef = ref<FormInstance>()
-const form = reactive<SubnetForm>({ name: '', cidr: '', gateway: '', dns: '', vlanId: undefined, poolStart: '', poolEnd: '' })
+const form = reactive<SubnetForm>({ name: '', cidr: '', gateway: '', dns: '', vlanId: undefined, pools: [{ start: '', end: '' }] })
 
 const rules: FormRules = {
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
@@ -58,36 +62,60 @@ const rules: FormRules = {
       trigger: 'blur',
     },
   ],
-  poolStart: [
-    {
-      validator: (_r, v: string, cb) => {
-        const a = v.trim(), b = form.poolEnd.trim()
-        if (!a && !b) return cb()
-        if (!a || !b) return cb(new Error('起始和结束需同时填写，或同时留空（不分配 DHCP）'))
-        if (!isValidIPv4(a)) return cb(new Error('起始不是合法 IPv4'))
-        const range = isValidCIDR(form.cidr) ? subnetRange(form.cidr) : null
-        if (range && (a === range.network || a === range.broadcast)) return cb(new Error('起始不能是网络/广播地址'))
-        cb()
-      },
-      trigger: 'blur',
-    },
-  ],
-  poolEnd: [
-    {
-      validator: (_r, v: string, cb) => {
-        const a = form.poolStart.trim(), b = v.trim()
-        if (!a || !b) return cb()
-        if (!isValidIPv4(b)) return cb(new Error('结束不是合法 IPv4'))
-        const range = isValidCIDR(form.cidr) ? subnetRange(form.cidr) : null
-        if (range && (b === range.network || b === range.broadcast)) return cb(new Error('结束不能是网络/广播地址'))
-        cb()
-      },
-      trigger: 'blur',
-    },
-  ],
 }
 
 onMounted(load)
+
+function addPool(): void {
+  form.pools.push({ start: '', end: '' })
+}
+
+function removePool(i: number): void {
+  form.pools.splice(i, 1)
+}
+
+// validatePools checks all segments together; called from save() before
+// submit (array fields don't map cleanly onto per-field el-form rules).
+function validatePools(): string | undefined {
+  const segs = form.pools.filter((p) => p.start.trim() || p.end.trim())
+  const range = isValidCIDR(form.cidr) ? subnetRange(form.cidr) : null
+  const seen: Array<[string, string]> = []
+  for (let i = 0; i < segs.length; i++) {
+    const a = segs[i].start.trim(), b = segs[i].end.trim()
+    if (!a || !b) return '地址池每段的起始和结束需同时填写，或同时清空'
+    if (!isValidIPv4(a)) return `池段 ${i + 1} 起始不是合法 IPv4`
+    if (!isValidIPv4(b)) return `池段 ${i + 1} 结束不是合法 IPv4`
+    if (range) {
+      if (a === range.network || a === range.broadcast) return `池段 ${i + 1} 起始不能是网络/广播地址`
+      if (b === range.network || b === range.broadcast) return `池段 ${i + 1} 结束不能是网络/广播地址`
+    }
+    const na = ipToNumber(a), nb = ipToNumber(b)
+    if (na !== null && nb !== null && na > nb) return `池段 ${i + 1} 起始大于结束`
+    for (const [ps, pe] of seen) {
+      const pse = ipToNumber(ps), pee = ipToNumber(pe)
+      if (na !== null && nb !== null && pse !== null && pee !== null && na <= pee && pse <= nb)
+        return `池段 ${i + 1} 与已有池段重叠`
+    }
+    seen.push([a, b])
+  }
+  return undefined
+}
+
+function formatPools(ranges: Array<{ start: string; end: string }>): string {
+  return ranges.map((r) => `${r.start}~${r.end}`).join('， ')
+}
+
+function ipToNumber(ip: string): number | null {
+  const parts = ip.split('.')
+  if (parts.length !== 4) return null
+  let n = 0
+  for (const p of parts) {
+    const v = Number(p)
+    if (!Number.isInteger(v) || v < 0 || v > 255) return null
+    n = n * 256 + v
+  }
+  return n
+}
 
 async function load(): Promise<void> {
   loading.value = true
@@ -101,7 +129,7 @@ async function load(): Promise<void> {
 }
 
 function openCreate(): void {
-  Object.assign(form, { id: undefined, name: '', cidr: '', gateway: '', dns: '', vlanId: undefined, poolStart: '', poolEnd: '' })
+  Object.assign(form, { id: undefined, name: '', cidr: '', gateway: '', dns: '', vlanId: undefined, pools: [{ start: '', end: '' }] })
   dialogVisible.value = true
 }
 
@@ -113,15 +141,20 @@ function openEdit(row: Subnet): void {
     gateway: row.gateway ?? '',
     dns: (row.dns ?? []).join(', '),
     vlanId: row.vlan_id,
-    poolStart: row.dhcp_pool_start ?? '',
-    poolEnd: row.dhcp_pool_end ?? '',
+    pools: (row.dhcp_ranges ?? []).map((r) => ({ start: r.start, end: r.end })),
   })
+  if (form.pools.length === 0) form.pools.push({ start: '', end: '' })
   dialogVisible.value = true
 }
 
 async function save(): Promise<void> {
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
+  const poolErr = validatePools()
+  if (poolErr) {
+    ElMessage.warning(poolErr)
+    return
+  }
   saving.value = true
   try {
     const payload = {
@@ -133,8 +166,9 @@ async function save(): Promise<void> {
         .map((s) => s.trim())
         .filter(Boolean),
       vlan_id: form.vlanId,
-      dhcp_pool_start: form.poolStart.trim() || undefined,
-      dhcp_pool_end: form.poolEnd.trim() || undefined,
+      dhcp_ranges: form.pools
+        .filter((p) => p.start.trim() && p.end.trim())
+        .map((p) => ({ start: p.start.trim(), end: p.end.trim() })),
     }
     if (form.id) {
       await subnetsApi.update(form.id, payload)
@@ -194,9 +228,11 @@ async function remove(row: Subnet): Promise<void> {
           <el-table-column prop="vlan_id" label="VLAN" width="80">
             <template #default="{ row }">{{ row.vlan_id ?? '—' }}</template>
           </el-table-column>
-          <el-table-column label="DHCP 池" min-width="190">
+          <el-table-column label="DHCP 池" min-width="230">
             <template #default="{ row }">
-              <span v-if="row.dhcp_pool_start" class="mono">{{ row.dhcp_pool_start }} ~ {{ row.dhcp_pool_end }}</span>
+              <span v-if="row.dhcp_ranges?.length" class="mono">
+                {{ formatPools(row.dhcp_ranges) }}
+              </span>
               <span v-else>—</span>
             </template>
           </el-table-column>
@@ -237,11 +273,26 @@ async function remove(row: Subnet): Promise<void> {
           <el-form-item label="VLAN">
             <el-input-number v-model="form.vlanId" :min="1" :max="4094" placeholder="可选" />
           </el-form-item>
-          <el-form-item label="池起始" prop="poolStart">
-            <el-input v-model="form.poolStart" placeholder="留空 = 不做 DHCP 分配" class="mono" />
+          <el-form-item
+            v-for="(seg, i) in form.pools"
+            :key="i"
+            :label="i === 0 ? '地址池' : ''"
+            :prop="'pools.' + i"
+          >
+            <div style="display: flex; gap: 8px; width: 100%">
+              <el-input v-model="seg.start" placeholder="起始，如 192.168.1.100" class="mono" style="flex: 1" />
+              <span style="align-self: center">~</span>
+              <el-input v-model="seg.end" placeholder="结束，如 192.168.1.150" class="mono" style="flex: 1" />
+              <el-button
+                v-if="form.pools.length > 1 || seg.start || seg.end"
+                text
+                type="danger"
+                @click="removePool(i)"
+              >删除</el-button>
+            </div>
           </el-form-item>
-          <el-form-item label="池结束" prop="poolEnd">
-            <el-input v-model="form.poolEnd" placeholder="与起始同时填写" class="mono" />
+          <el-form-item>
+            <el-button text type="primary" @click="addPool">+ 添加地址段</el-button>
           </el-form-item>
           <div style="margin: 0 0 12px 90px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5">
             填写 DHCP 池后，从其他网段经 DHCP 中继（giaddr）转发来的请求将分配该范围内的地址；

@@ -38,8 +38,13 @@ type SubnetPools struct {
 // the match key for relayed packets: a plain IPv4 address (the relay SVI,
 // e.g. "192.168.1.10") or an IPv4 CIDR covering every possible SVI on that
 // segment ("192.168.1.1/24"). Empty Selector means this is the local pool.
+// Pools lists one or more address ranges; the legacy single-range fields
+// (Start/End) are folded into Pools when Pools is empty.
 type SubnetPoolInput struct {
 	Selector string // "" | IPv4 | IPv4/prefix
+	Pools    []PoolRange
+	// Legacy single-range fields, used when Pools is empty (the local pool
+	// from settings carries exactly one range).
 	Start    string
 	End      string
 	Netmask  string
@@ -50,14 +55,18 @@ type SubnetPoolInput struct {
 }
 
 // NewSubnetPools validates and assembles a pool set. Applies the same
-// per-pool validation as NewPool plus the cross-pool rules above. Exactly
-// one input must carry an empty Selector.
+// per-pool validation as NewPoolRanges plus the cross-pool rules above.
+// Exactly one input must carry an empty Selector.
 func NewSubnetPools(in []SubnetPoolInput) (*SubnetPools, error) {
 	var local *Pool
 	var relay []*Pool
 	var sels []netip.Prefix
 	for _, i := range in {
-		pool, err := NewPool(i.Start, i.End, i.Netmask, i.Gateway, i.DNS, i.LeaseSec, i.Exclude)
+		ranges := i.Pools
+		if len(ranges) == 0 {
+			ranges = []PoolRange{{Start: i.Start, End: i.End}}
+		}
+		pool, err := NewPoolRanges(ranges, i.Netmask, i.Gateway, i.DNS, i.LeaseSec, i.Exclude)
 		if err != nil {
 			return nil, fmt.Errorf("selector %q: %w", i.Selector, err)
 		}
@@ -85,7 +94,7 @@ func NewSubnetPools(in []SubnetPoolInput) (*SubnetPools, error) {
 		// fire and the relayed VLAN silently falls back to the local pool —
 		// the original bug wearing a different hat.
 		if !pool.ContainsKey(sel.Addr()) {
-			return nil, fmt.Errorf("selector %q is outside the pool network %s..%s: the relay SVI address must fall inside the pool's subnet", i.Selector, i.Start, i.End)
+			return nil, fmt.Errorf("selector %q is outside the pool network %s: the relay SVI address must fall inside the pool's subnet", i.Selector, pool.RangesCompact())
 		}
 		pool.selectors = append(pool.selectors, sel)
 		relay = append(relay, pool)
@@ -159,7 +168,7 @@ func (sp *SubnetPools) RelaySummary() []string {
 		for _, s := range p.selectors {
 			sels = append(sels, s.String())
 		}
-		out = append(out, fmt.Sprintf("%s-%s[%s]", p.Start, p.End, joinComma(sels)))
+		out = append(out, fmt.Sprintf("%s[%s]", p.RangesCompact(), joinComma(sels)))
 	}
 	return out
 }

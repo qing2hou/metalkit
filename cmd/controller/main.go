@@ -115,11 +115,14 @@ func (a *bindingsDeleteAdapter) DeleteBindingForMachine(ctx context.Context, mac
 type leasesAdapter struct{ store *leases.Store }
 
 func (a *leasesAdapter) Allocate(ctx context.Context, in dhcp.AllocateInput) (string, error) {
+	ranges := make([]leases.Range, 0, len(in.Ranges))
+	for _, r := range in.Ranges {
+		ranges = append(ranges, leases.Range{Start: r.Start, End: r.End})
+	}
 	l, err := a.store.Allocate(ctx, leases.AllocateInput{
 		MAC:      in.MAC,
 		Hostname: in.Hostname,
-		Start:    in.Start,
-		End:      in.End,
+		Ranges:   ranges,
 		Exclude:  in.Exclude,
 		LeaseDur: in.LeaseDur,
 	})
@@ -155,21 +158,24 @@ type dhcpReloader struct {
 }
 
 // subnetsToPools assembles the full pool set: one local pool entry plus one
-// relay entry per subnet that declares a DHCP pool. Subnets without pool
-// bounds are skipped (statics-only VLANs); their relayed requests will find
-// no selector and be ignored — the logging in buildFullReplyWith surfaces
+// relay entry per subnet that declares DHCP ranges. Subnets without ranges
+// are skipped (statics-only VLANs); their relayed requests will find no
+// selector and be ignored — the logging in buildFullReplyWith surfaces
 // that per-packet if it happens.
 func subnetsToPools(local dhcp.SubnetPoolInput, subs []subnets.Subnet) (*dhcp.SubnetPools, error) {
 	in := []dhcp.SubnetPoolInput{local}
 	for i := range subs {
 		sn := &subs[i]
-		if sn.DHCPPoolStart == "" || sn.DHCPPoolEnd == "" {
+		if len(sn.DHCPRanges) == 0 {
 			continue
+		}
+		ranges := make([]dhcp.PoolRange, 0, len(sn.DHCPRanges))
+		for _, r := range sn.DHCPRanges {
+			ranges = append(ranges, dhcp.PoolRange{Start: r.Start, End: r.End})
 		}
 		in = append(in, dhcp.SubnetPoolInput{
 			Selector: sn.CIDR,
-			Start:    sn.DHCPPoolStart,
-			End:      sn.DHCPPoolEnd,
+			Pools:    ranges,
 			Netmask:  netmaskOf(sn.CIDR),
 			Gateway:  sn.Gateway,
 			DNS:      sn.DNS,
@@ -194,8 +200,8 @@ func (r *dhcpReloader) ReloadDHCP(ctx context.Context, s settings.DHCPSettings) 
 		return fmt.Errorf("rebuild local pool: %w", err)
 	}
 	input := dhcp.SubnetPoolInput{
-		Start: local.Start.String(), End: local.End.String(),
-		Netmask: local.Netmask.String(), Gateway: local.Gateway.String(),
+		Pools:    []dhcp.PoolRange{{Start: local.Start.String(), End: local.End.String()}},
+		Netmask:  local.Netmask.String(), Gateway: local.Gateway.String(),
 		LeaseSec: local.LeaseSec, Exclude: s.Exclude,
 	}
 	pools, err := r.buildPools(ctx, input)
@@ -220,7 +226,7 @@ func (r *dhcpReloader) reloadFromSubnets(ctx context.Context) error {
 		return nil
 	}
 	local, ok := r.localPoolFn()
-	if !ok || local.Start == "" {
+	if !ok || (len(local.Pools) == 0 && local.Start == "") {
 		return nil // settings not resolvable right now; skip silently
 	}
 	next, err := r.buildPools(ctx, local)
@@ -536,8 +542,8 @@ func run() int {
 	// and the subnets API triggers a refresh after catalog edits.
 	if cfg.DHCPMode == config.DHCPModeFull && dhcpPool != nil {
 		input := dhcp.SubnetPoolInput{
-			Start: dhcpPool.Start.String(), End: dhcpPool.End.String(),
-			Netmask: dhcpPool.Netmask.String(), Gateway: dhcpPool.Gateway.String(),
+			Pools:    []dhcp.PoolRange{{Start: dhcpPool.Start.String(), End: dhcpPool.End.String()}},
+			Netmask:  dhcpPool.Netmask.String(), Gateway: dhcpPool.Gateway.String(),
 			LeaseSec: dhcpPool.LeaseSec,
 		}
 		pools, err := subnetsToPools(input, mustListSubnets(runCtx, subnetStore, logger))
@@ -678,7 +684,8 @@ func run() int {
 				return dhcp.SubnetPoolInput{}, false
 			}
 			return dhcp.SubnetPoolInput{
-				Start: s.Start, End: s.End, Netmask: s.Netmask,
+				Pools:   []dhcp.PoolRange{{Start: s.Start, End: s.End}},
+				Netmask: s.Netmask,
 				Gateway: s.Gateway, DNS: s.DNS,
 				LeaseSec: uint32(s.LeaseHours) * 3600, Exclude: s.Exclude,
 			}, true

@@ -97,42 +97,63 @@ func validateVLAN(v int) error {
 	return nil
 }
 
-// validatePool checks an optional DHCP pool range: both ends empty = no DHCP
-// for this subnet; both set = valid in-range host addresses with start <=
-// end; one set without the other is a config error.
-func validatePool(start, end string, prefix netip.Prefix) error {
-	start, end = strings.TrimSpace(start), strings.TrimSpace(end)
-	if start == "" && end == "" {
-		return nil
-	}
-	if start == "" || end == "" {
-		return fmt.Errorf("dhcp pool: both start and end are required (or neither)")
-	}
-	sa, err := netip.ParseAddr(start)
-	if err != nil || !sa.Is4() {
-		return fmt.Errorf("dhcp pool start %q: must be IPv4", start)
-	}
-	ea, err := netip.ParseAddr(end)
-	if err != nil || !ea.Is4() {
-		return fmt.Errorf("dhcp pool end %q: must be IPv4", end)
-	}
-	for _, a := range []struct {
-		name string
-		ip   netip.Addr
-	}{
-		{"start", sa}, {"end", ea},
-	} {
-		if !prefix.Contains(a.ip) || a.ip == prefix.Addr() {
-			return fmt.Errorf("dhcp pool %s %q: not a host address inside cidr %s", a.name, a.ip, prefix)
+// normalizeRanges validates and canonicalises a subnet's DHCP pool list.
+// Legacy single-range inputs (poolStart/poolEnd) are folded in when ranges
+// is empty. Rules: zero ranges = no DHCP for this subnet; each range must
+// be valid host addresses inside the CIDR with start <= end; ranges must
+// not overlap (a silent overlap would double-count addresses across
+// segments).
+func normalizeRanges(ranges []DHCPRange, legacyStart, legacyEnd string, prefix netip.Prefix) ([]DHCPRange, error) {
+	legacyStart, legacyEnd = strings.TrimSpace(legacyStart), strings.TrimSpace(legacyEnd)
+	if len(ranges) == 0 {
+		if legacyStart == "" && legacyEnd == "" {
+			return nil, nil
 		}
-		if b := broadcastOf(prefix); b.IsValid() && a.ip == b {
-			return fmt.Errorf("dhcp pool %s %q: is the broadcast address", a.name, a.ip)
+		if legacyStart == "" || legacyEnd == "" {
+			return nil, fmt.Errorf("dhcp pool: both start and end are required (or neither)")
 		}
+		ranges = []DHCPRange{{Start: legacyStart, End: legacyEnd}}
 	}
-	if sa.Compare(ea) > 0 {
-		return fmt.Errorf("dhcp pool: start %s > end %s", sa, ea)
+	out := make([]DHCPRange, 0, len(ranges))
+	for i, r := range ranges {
+		r.Start, r.End = strings.TrimSpace(r.Start), strings.TrimSpace(r.End)
+		if r.Start == "" || r.End == "" {
+			return nil, fmt.Errorf("dhcp pool %d: both start and end are required", i)
+		}
+		sa, err := netip.ParseAddr(r.Start)
+		if err != nil || !sa.Is4() {
+			return nil, fmt.Errorf("dhcp pool %d start %q: must be IPv4", i, r.Start)
+		}
+		ea, err := netip.ParseAddr(r.End)
+		if err != nil || !ea.Is4() {
+			return nil, fmt.Errorf("dhcp pool %d end %q: must be IPv4", i, r.End)
+		}
+		for _, a := range []struct {
+			name string
+			ip   netip.Addr
+		}{
+			{"start", sa}, {"end", ea},
+		} {
+			if !prefix.Contains(a.ip) || a.ip == prefix.Addr() {
+				return nil, fmt.Errorf("dhcp pool %d %s %q: not a host address inside cidr %s", i, a.name, a.ip, prefix)
+			}
+			if b := broadcastOf(prefix); b.IsValid() && a.ip == b {
+				return nil, fmt.Errorf("dhcp pool %d %s %q: is the broadcast address", i, a.name, a.ip)
+			}
+		}
+		if sa.Compare(ea) > 0 {
+			return nil, fmt.Errorf("dhcp pool %d: start %s > end %s", i, sa, ea)
+		}
+		for _, prev := range out {
+			ps, _ := netip.ParseAddr(prev.Start)
+			pe, _ := netip.ParseAddr(prev.End)
+			if sa.Compare(pe) <= 0 && ps.Compare(ea) <= 0 {
+				return nil, fmt.Errorf("dhcp pool %d [%s..%s] overlaps [%s..%s]", i, sa, ea, prev.Start, prev.End)
+			}
+		}
+		out = append(out, DHCPRange{Start: sa.String(), End: ea.String()})
 	}
-	return nil
+	return out, nil
 }
 
 // HostInSubnet reports whether `ip` (IPv4 literal) is a valid host address

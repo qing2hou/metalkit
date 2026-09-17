@@ -95,3 +95,40 @@ func TestSubnetPoolsValidation(t *testing.T) {
 		t.Error("selector outside pool network accepted")
 	}
 }
+
+func TestSubnetPoolsMultiRange(t *testing.T) {
+	pools, err := NewSubnetPools([]SubnetPoolInput{
+		{Pools: []PoolRange{{Start: "192.168.10.150", End: "192.168.10.200"}}, Netmask: "255.255.255.0", Gateway: "192.168.10.1", LeaseSec: 3600},
+		{Selector: "192.168.1.0/24",
+			Pools: []PoolRange{
+				{Start: "192.168.1.100", End: "192.168.1.101"},
+				{Start: "192.168.1.180", End: "192.168.1.181"},
+			},
+			Netmask: "255.255.255.0", Gateway: "192.168.1.10", LeaseSec: 3600},
+	})
+	if err != nil {
+		t.Fatalf("NewSubnetPools: %v", err)
+	}
+	relay := pools.poolForRequest(netip.MustParseAddr("192.168.1.10"))
+	if relay == nil || len(relay.Ranges) != 2 {
+		t.Fatalf("relay pool ranges = %d, want 2", len(relay.Ranges))
+	}
+	// Contains honours both segments.
+	for ip, want := range map[string]bool{
+		"192.168.1.100": true, "192.168.1.101": true,
+		"192.168.1.102": false, // gap between segments
+		"192.168.1.180": true, "192.168.1.182": false,
+	} {
+		if got := relay.Contains(netip.MustParseAddr(ip)); got != want {
+			t.Errorf("Contains(%s) = %v, want %v", ip, got, want)
+		}
+	}
+	// Overlapping segments are rejected at construction.
+	if _, err := NewSubnetPools([]SubnetPoolInput{
+		{Pools: []PoolRange{{Start: "10.0.0.1", End: "10.0.0.10"}}, Netmask: "255.255.255.0", Gateway: "10.0.0.254"},
+		{Selector: "192.168.1.0/24", Netmask: "255.255.255.0", Gateway: "192.168.1.10",
+			Pools: []PoolRange{{Start: "192.168.1.10", End: "192.168.1.20"}, {Start: "192.168.1.15", End: "192.168.1.25"}}},
+	}); err == nil {
+		t.Error("overlapping ranges accepted")
+	}
+}

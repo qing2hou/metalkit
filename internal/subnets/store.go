@@ -49,22 +49,44 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger) (*Store, err
 			}
 		}
 	}
+	// One-time promotion of the pre-multi-range columns into pools_json.
+	// Rows where pools_json is already set (or old columns are empty) keep
+	// their value — the NULL check makes re-runs no-ops.
+	if _, err := db.ExecContext(ctx, `
+        UPDATE subnets
+        SET pools_json = json_array(json_object('start', dhcp_pool_start, 'end', dhcp_pool_end)),
+            dhcp_pool_start = NULL, dhcp_pool_end = NULL
+        WHERE pools_json IS NULL
+          AND dhcp_pool_start IS NOT NULL AND dhcp_pool_start != ''
+          AND dhcp_pool_end IS NOT NULL AND dhcp_pool_end != ''`); err != nil {
+		return nil, fmt.Errorf("subnet pools migration: %w", err)
+	}
 	return &Store{db: db, logger: logger, now: time.Now}, nil
+}
+
+// DHCPRange is one inclusive DHCP pool segment on a subnet. See Subnet.
+type DHCPRange struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
 }
 
 // Subnet is the public, JSON-friendly record. Gateway and DNS entries are
 // stored as canonical IPv4 strings; CIDR is the canonical masked form.
-// DHCPPoolStart/End are optional ("" = no DHCP service for this subnet);
-// when set they must lie inside the CIDR and DHCP relays from this segment
-// get leases from that range.
+// DHCPRanges is the optional DHCP pool list (empty = no DHCP service for
+// this subnet); each range must lie inside the CIDR, and DHCP relays from
+// this segment get leases from these ranges. Legacy single-range JSON
+// fields (dhcp_pool_start/end) are still honoured on input for older
+// clients and folded into DHCPRanges.
 type Subnet struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	Description   string    `json:"description,omitempty"`
-	CIDR          string    `json:"cidr"`
-	Gateway       string    `json:"gateway"`
-	DNS           []string  `json:"dns"`
-	VLANID        int       `json:"vlan_id,omitempty"`
+	ID          string      `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description,omitempty"`
+	CIDR        string      `json:"cidr"`
+	Gateway     string      `json:"gateway"`
+	DNS         []string    `json:"dns"`
+	VLANID      int         `json:"vlan_id,omitempty"`
+	DHCPRanges  []DHCPRange `json:"dhcp_ranges,omitempty"`
+	// Legacy single-range mirror, kept read-only for old clients.
 	DHCPPoolStart string    `json:"dhcp_pool_start,omitempty"`
 	DHCPPoolEnd   string    `json:"dhcp_pool_end,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -74,15 +96,17 @@ type Subnet struct {
 }
 
 type CreateInput struct {
-	Name          string   `json:"name"`
-	Description   string   `json:"description,omitempty"`
-	CIDR          string   `json:"cidr"`
-	Gateway       string   `json:"gateway"`
-	DNS           []string `json:"dns,omitempty"`
-	VLANID        int      `json:"vlan_id,omitempty"`
-	DHCPPoolStart string   `json:"dhcp_pool_start,omitempty"`
-	DHCPPoolEnd   string   `json:"dhcp_pool_end,omitempty"`
-	CreatedBy     string   `json:"-"`
+	Name        string      `json:"name"`
+	Description string      `json:"description,omitempty"`
+	CIDR        string      `json:"cidr"`
+	Gateway     string      `json:"gateway"`
+	DNS         []string    `json:"dns,omitempty"`
+	VLANID      int         `json:"vlan_id,omitempty"`
+	DHCPRanges  []DHCPRange `json:"dhcp_ranges,omitempty"`
+	// Legacy single-range input; folded into DHCPRanges when that is empty.
+	DHCPPoolStart string `json:"dhcp_pool_start,omitempty"`
+	DHCPPoolEnd   string `json:"dhcp_pool_end,omitempty"`
+	CreatedBy     string `json:"-"`
 }
 
 type UpdateInput struct {
@@ -95,9 +119,10 @@ type UpdateInput struct {
 	Gateway       *string  `json:"gateway,omitempty"`
 	DNS           []string `json:"dns,omitempty"`
 	VLANID        *int     `json:"vlan_id,omitempty"`
-	DHCPPoolStart *string  `json:"dhcp_pool_start,omitempty"`
-	DHCPPoolEnd   *string  `json:"dhcp_pool_end,omitempty"`
-	UpdatedBy     string   `json:"-"`
+	DHCPRanges    *[]DHCPRange `json:"dhcp_ranges,omitempty"`
+	DHCPPoolStart *string      `json:"dhcp_pool_start,omitempty"`
+	DHCPPoolEnd   *string      `json:"dhcp_pool_end,omitempty"`
+	UpdatedBy     string       `json:"-"`
 }
 
 func (s *Store) Create(ctx context.Context, in CreateInput) (*Subnet, error) {
@@ -124,7 +149,8 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Subnet, error) {
 	if err := validateVLAN(in.VLANID); err != nil {
 		return nil, err
 	}
-	if err := validatePool(in.DHCPPoolStart, in.DHCPPoolEnd, prefix); err != nil {
+	ranges, err := normalizeRanges(in.DHCPRanges, in.DHCPPoolStart, in.DHCPPoolEnd, prefix)
+	if err != nil {
 		return nil, err
 	}
 	if in.CreatedBy == "" {
@@ -142,14 +168,19 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Subnet, error) {
 		vlanArg = in.VLANID
 	}
 
+	rangesBlob, _ := json.Marshal(ranges)
+	var rangesArg any
+	if len(ranges) > 0 {
+		rangesArg = string(rangesBlob)
+	}
 	_, err = s.db.ExecContext(ctx, `
         INSERT INTO subnets
             (id, name, description, cidr, gateway, dns_json, vlan_id,
-             dhcp_pool_start, dhcp_pool_end,
+             pools_json,
              created_at, updated_at, created_by, updated_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, in.Name, in.Description, cidr, gw, string(dnsBlob), vlanArg,
-		nullIfEmpty(in.DHCPPoolStart), nullIfEmpty(in.DHCPPoolEnd),
+		rangesArg,
 		now, now, in.CreatedBy, in.CreatedBy,
 	)
 	if err != nil {
@@ -161,7 +192,9 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Subnet, error) {
 	return &Subnet{
 		ID: id, Name: in.Name, Description: in.Description,
 		CIDR: cidr, Gateway: gw, DNS: dns, VLANID: in.VLANID,
-		DHCPPoolStart: in.DHCPPoolStart, DHCPPoolEnd: in.DHCPPoolEnd,
+		DHCPRanges: ranges,
+		// Single-range mirror for old clients; harmless when ranges is empty.
+		DHCPPoolStart: firstRangeStart(ranges), DHCPPoolEnd: firstRangeEnd(ranges),
 		CreatedAt: time.Unix(now, 0).UTC(),
 		UpdatedAt: time.Unix(now, 0).UTC(),
 		CreatedBy: in.CreatedBy, UpdatedBy: in.CreatedBy,
@@ -263,18 +296,33 @@ func (s *Store) Update(ctx context.Context, id string, in UpdateInput) (*Subnet,
 		}
 		cur.VLANID = *in.VLANID
 	}
-	// Pool bounds: three-state pointers; validate against the (possibly
-	// just-updated) CIDR so a CIDR edit that no longer contains the pool
-	// fails the save with a clear error.
-	if in.DHCPPoolStart != nil {
-		cur.DHCPPoolStart = strings.TrimSpace(*in.DHCPPoolStart)
+	// Pool ranges: DHCPRanges is the source of truth (nil = keep; non-nil
+	// slice = replace, empty slice = clear). Legacy single-range pointers
+	// are folded in only when DHCPRanges is nil and at least one is set.
+	// Validation runs against the (possibly just-updated) CIDR so a CIDR
+	// edit that no longer contains a pool fails the save with a clear error.
+	if in.DHCPRanges != nil {
+		cur.DHCPRanges = *in.DHCPRanges
+	} else if in.DHCPPoolStart != nil || in.DHCPPoolEnd != nil {
+		legacyStart, legacyEnd := cur.DHCPPoolStart, cur.DHCPPoolEnd
+		if in.DHCPPoolStart != nil {
+			legacyStart = strings.TrimSpace(*in.DHCPPoolStart)
+		}
+		if in.DHCPPoolEnd != nil {
+			legacyEnd = strings.TrimSpace(*in.DHCPPoolEnd)
+		}
+		if legacyStart != "" && legacyEnd != "" {
+			cur.DHCPRanges = []DHCPRange{{Start: legacyStart, End: legacyEnd}}
+		} else {
+			cur.DHCPRanges = nil
+		}
 	}
-	if in.DHCPPoolEnd != nil {
-		cur.DHCPPoolEnd = strings.TrimSpace(*in.DHCPPoolEnd)
-	}
-	if err := validatePool(cur.DHCPPoolStart, cur.DHCPPoolEnd, prefix); err != nil {
+	ranges, err := normalizeRanges(cur.DHCPRanges, "", "", prefix)
+	if err != nil {
 		return nil, err
 	}
+	cur.DHCPRanges = ranges
+	cur.DHCPPoolStart, cur.DHCPPoolEnd = firstRangeStart(ranges), firstRangeEnd(ranges)
 
 	now := s.now().UTC().Unix()
 	dnsBlob, _ := json.Marshal(cur.DNS)
@@ -286,14 +334,19 @@ func (s *Store) Update(ctx context.Context, id string, in UpdateInput) (*Subnet,
 	if updatedBy == "" {
 		updatedBy = cur.UpdatedBy
 	}
+	rangesBlob, _ := json.Marshal(cur.DHCPRanges)
+	var rangesArg any
+	if len(cur.DHCPRanges) > 0 {
+		rangesArg = string(rangesBlob)
+	}
 	_, err = s.db.ExecContext(ctx, `
         UPDATE subnets
         SET name = ?, description = ?, cidr = ?, gateway = ?, dns_json = ?,
-            vlan_id = ?, dhcp_pool_start = ?, dhcp_pool_end = ?,
+            vlan_id = ?, pools_json = ?,
             updated_at = ?, updated_by = ?
         WHERE id = ?`,
 		cur.Name, cur.Description, cur.CIDR, cur.Gateway, string(dnsBlob),
-		vlanArg, nullIfEmpty(cur.DHCPPoolStart), nullIfEmpty(cur.DHCPPoolEnd),
+		vlanArg, rangesArg,
 		now, updatedBy, id,
 	)
 	if err != nil {
@@ -323,7 +376,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 // ---- internal helpers ----
 
 const selectSubnetSQL = `SELECT id, name, description, cidr, gateway, dns_json,
-       vlan_id, dhcp_pool_start, dhcp_pool_end,
+       vlan_id, pools_json,
        created_at, updated_at, created_by, updated_by FROM subnets`
 
 type rowScanner interface {
@@ -334,11 +387,11 @@ func scanSubnet(r rowScanner) (*Subnet, error) {
 	var sn Subnet
 	var dnsBlob string
 	var vlan sql.NullInt64
-	var poolStart, poolEnd sql.NullString
+	var pools sql.NullString
 	var createdAt, updatedAt int64
 	if err := r.Scan(
 		&sn.ID, &sn.Name, &sn.Description, &sn.CIDR, &sn.Gateway, &dnsBlob,
-		&vlan, &poolStart, &poolEnd,
+		&vlan, &pools,
 		&createdAt, &updatedAt, &sn.CreatedBy, &sn.UpdatedBy,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -353,11 +406,14 @@ func scanSubnet(r rowScanner) (*Subnet, error) {
 	if vlan.Valid {
 		sn.VLANID = int(vlan.Int64)
 	}
-	if poolStart.Valid {
-		sn.DHCPPoolStart = poolStart.String
+	if pools.Valid && pools.String != "" && pools.String != "null" {
+		// A malformed blob surfaces as no pools rather than a 500 on every
+		// list; edits will rewrite the field.
+		_ = json.Unmarshal([]byte(pools.String), &sn.DHCPRanges)
 	}
-	if poolEnd.Valid {
-		sn.DHCPPoolEnd = poolEnd.String
+	if len(sn.DHCPRanges) > 0 {
+		sn.DHCPPoolStart = sn.DHCPRanges[0].Start
+		sn.DHCPPoolEnd = sn.DHCPRanges[0].End
 	}
 	sn.CreatedAt = time.Unix(createdAt, 0).UTC()
 	sn.UpdatedAt = time.Unix(updatedAt, 0).UTC()
@@ -369,6 +425,22 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+// firstRangeStart/End mirror the first pool range into the legacy
+// single-range JSON fields so old clients keep rendering something sane.
+func firstRangeStart(rs []DHCPRange) string {
+	if len(rs) == 0 {
+		return ""
+	}
+	return rs[0].Start
+}
+
+func firstRangeEnd(rs []DHCPRange) string {
+	if len(rs) == 0 {
+		return ""
+	}
+	return rs[0].End
 }
 
 func newSubnetID() (string, error) {
