@@ -72,6 +72,10 @@ type CreateInput struct {
 }
 
 type UpdateInput struct {
+	// Name is three-state: nil = keep the current name, pointer to a new
+	// value = rename (validated like Create; UNIQUE constraint enforced
+	// with a clear error rather than a raw SQLite failure).
+	Name        *string  `json:"name,omitempty"`
 	Description *string  `json:"description,omitempty"`
 	CIDR        *string  `json:"cidr,omitempty"`
 	Gateway     *string  `json:"gateway,omitempty"`
@@ -180,6 +184,24 @@ func (s *Store) Update(ctx context.Context, id string, in UpdateInput) (*Subnet,
 	if err != nil {
 		return nil, err
 	}
+	if in.Name != nil {
+		name := strings.TrimSpace(*in.Name)
+		if !subnetNameRE.MatchString(name) {
+			return nil, fmt.Errorf("name %q: 1-64 chars, [A-Za-z0-9._-], must start alnum", name)
+		}
+		if name != cur.Name {
+			var owner string
+			err := s.db.QueryRowContext(ctx,
+				`SELECT id FROM subnets WHERE name = ?`, name).Scan(&owner)
+			switch {
+			case err == nil && owner != id:
+				return nil, fmt.Errorf("name %q: already used by another subnet", name)
+			case err != nil && !errors.Is(err, sql.ErrNoRows):
+				return nil, fmt.Errorf("name check: %w", err)
+			}
+			cur.Name = name
+		}
+	}
 	if in.Description != nil {
 		d := strings.TrimSpace(*in.Description)
 		if len(d) > MaxDescriptionLen {
@@ -232,10 +254,10 @@ func (s *Store) Update(ctx context.Context, id string, in UpdateInput) (*Subnet,
 	}
 	_, err = s.db.ExecContext(ctx, `
         UPDATE subnets
-        SET description = ?, cidr = ?, gateway = ?, dns_json = ?,
+        SET name = ?, description = ?, cidr = ?, gateway = ?, dns_json = ?,
             vlan_id = ?, updated_at = ?, updated_by = ?
         WHERE id = ?`,
-		cur.Description, cur.CIDR, cur.Gateway, string(dnsBlob),
+		cur.Name, cur.Description, cur.CIDR, cur.Gateway, string(dnsBlob),
 		vlanArg, now, updatedBy, id,
 	)
 	if err != nil {
