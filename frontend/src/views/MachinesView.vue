@@ -4,10 +4,11 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { machinesApi } from '@/api'
-import type { MachineSummary } from '@/api/types'
+import { bindingsApi, imagesApi, machinesApi, profilesApi, subnetsApi } from '@/api'
+import type { Binding, Image, MachineSummary, Profile, Report, Subnet } from '@/api/types'
 import AppShell from '@/components/AppShell.vue'
 import CopyableText from '@/components/CopyableText.vue'
+import InstallDialog from '@/components/InstallDialog.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { usePollHealth } from '@/composables/usePollHealth'
 import { useQuerySync } from '@/composables/useQuerySync'
@@ -72,6 +73,40 @@ async function load(): Promise<void> {
     health.noteError()
   } finally {
     loading.value = false
+  }
+}
+
+// ---- 列表页直达装机弹窗：点「装机」按需拉取该机器的配置数据 ----
+const installVisible = ref(false)
+const installUuid = ref('')
+const installReport = ref<Report | null>(null)
+const installImages = ref<Image[]>([])
+const installProfiles = ref<Profile[]>([])
+const installSubnets = ref<Subnet[]>([])
+const installBinding = ref<Binding | null>(null)
+const installLoading = ref(false)
+
+async function openInstall(row: MachineSummary): Promise<void> {
+  installLoading.value = true
+  installUuid.value = row.uuid
+  try {
+    const [report, images, profiles, subnets, binding] = await Promise.all([
+      machinesApi.get(row.uuid).catch(() => null),
+      imagesApi.list(),
+      profilesApi.list(),
+      subnetsApi.list(),
+      bindingsApi.get(row.uuid).catch(() => null),
+    ])
+    installReport.value = report
+    installImages.value = images
+    installProfiles.value = profiles
+    installSubnets.value = subnets
+    installBinding.value = binding
+    installVisible.value = true
+  } catch (err) {
+    ElMessage.error(`加载装机数据失败: ${(err as Error).message}`)
+  } finally {
+    installLoading.value = false
   }
 }
 
@@ -200,9 +235,16 @@ async function remove(row: MachineSummary): Promise<void> {
               <StatusTag :status="row.status" raw />
             </template>
           </el-table-column>
-          <el-table-column label="业务 IP" min-width="200">
+          <el-table-column label="IP 地址" min-width="210">
             <template #default="{ row }">
-              <span v-if="row.ipv4_addresses?.length" class="mono">{{ row.ipv4_addresses.join('， ') }}</span>
+              <div v-if="row.ipv4_addresses?.length || row.bmc_ip" style="line-height: 1.5">
+                <span v-if="row.ipv4_addresses?.length" class="mono">{{ row.ipv4_addresses.join('， ') }}</span>
+                <span v-else class="mk-subtle">业务 —</span>
+                <div v-if="row.bmc_ip">
+                  <span class="mk-subtle" style="font-size: 12px">BMC </span>
+                  <span class="mono">{{ row.bmc_ip }}</span>
+                </div>
+              </div>
               <span v-else class="mk-subtle">—</span>
             </template>
           </el-table-column>
@@ -219,12 +261,6 @@ async function remove(row: MachineSummary): Promise<void> {
               {{ [row.manufacturer, row.product_name].filter(Boolean).join(' ') || '—' }}
             </template>
           </el-table-column>
-          <el-table-column label="BMC IP" width="140">
-            <template #default="{ row }">
-              <span v-if="row.bmc_ip" class="mono">{{ row.bmc_ip }}</span>
-              <span v-else class="mk-subtle">—</span>
-            </template>
-          </el-table-column>
           <el-table-column label="BMC" width="70">
             <template #default="{ row }">
               <el-tag v-if="row.bmc_managed" type="success" size="small" disable-transitions>纳管</el-tag>
@@ -234,8 +270,15 @@ async function remove(row: MachineSummary): Promise<void> {
           <el-table-column label="最近上报" width="120">
             <template #default="{ row }">{{ fmtRelative(row.last_seen) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="80" fixed="right">
+          <el-table-column label="操作" width="130" fixed="right">
             <template #default="{ row }">
+              <el-button
+                text
+                size="small"
+                type="primary"
+                :loading="installLoading"
+                @click.stop="openInstall(asRow<MachineSummary>(row))"
+              >装机</el-button>
               <el-button text size="small" type="danger" @click.stop="remove(asRow<MachineSummary>(row))">删除</el-button>
             </template>
           </el-table-column>
@@ -244,6 +287,19 @@ async function remove(row: MachineSummary): Promise<void> {
           </template>
         </el-table>
       </el-card>
+
+      <!-- 列表页直达装机弹窗：数据按需拉取，保存后刷新列表 -->
+      <InstallDialog
+        v-model="installVisible"
+        :machine-uuid="installUuid"
+        :report="installReport"
+        :images="installImages"
+        :profiles="installProfiles"
+        :subnets="installSubnets"
+        :binding="installBinding"
+        intent="install"
+        @saved="load"
+      />
     </div>
   </AppShell>
 </template>
