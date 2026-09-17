@@ -235,16 +235,15 @@ async function remove(row: MachineSummary): Promise<void> {
               <StatusTag :status="row.status" raw />
             </template>
           </el-table-column>
-          <el-table-column label="IP 地址" min-width="210">
+          <el-table-column label="业务地址" min-width="170">
             <template #default="{ row }">
-              <div v-if="row.ipv4_addresses?.length || row.bmc_ip" style="line-height: 1.5">
-                <span v-if="row.ipv4_addresses?.length" class="mono">{{ row.ipv4_addresses.join('， ') }}</span>
-                <span v-else class="mk-subtle">业务 —</span>
-                <div v-if="row.bmc_ip">
-                  <span class="mk-subtle" style="font-size: 12px">BMC </span>
-                  <span class="mono">{{ row.bmc_ip }}</span>
-                </div>
-              </div>
+              <span v-if="row.ipv4_addresses?.length" class="mono">{{ row.ipv4_addresses.join('， ') }}</span>
+              <span v-else class="mk-subtle">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="BMC 地址" width="140">
+            <template #default="{ row }">
+              <span v-if="row.bmc_ip" class="mono">{{ row.bmc_ip }}</span>
               <span v-else class="mk-subtle">—</span>
             </template>
           </el-table-column>
