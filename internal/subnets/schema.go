@@ -7,7 +7,9 @@ package subnets
 //
 // pools_json (optional): JSON array of {"start","end"} address ranges,
 // e.g. [{"start":"192.168.1.100","end":"192.168.1.150"},
-//       {"start":"192.168.1.180","end":"192.168.1.200"}]. When non-empty,
+//
+//	{"start":"192.168.1.180","end":"192.168.1.200"}]. When non-empty,
+//
 // full-mode DHCP serves relays from this subnet out of these ranges — the
 // relay's giaddr (the VLAN SVI) matches the CIDR and picks the pool. Empty
 // means the subnet is usable for static installs only and DHCP requests

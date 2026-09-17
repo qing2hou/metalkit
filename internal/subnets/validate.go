@@ -13,8 +13,10 @@ const (
 )
 
 var (
-	subnetIDRE   = regexp.MustCompile(`^[0-9a-f]{32}$`)
-	subnetNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	subnetIDRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	// 子网名允许字母数字开头，正文可含中日韩文字（\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}）、
+	// 点、下划线、连字符，1-64 字符。曾仅允许 ASCII——中文现场一律撞校验。
+	subnetNameRE = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{N}._-]{0,63}$`)
 )
 
 // validateCIDR parses an IPv4 CIDR like "192.168.10.0/24" and returns the

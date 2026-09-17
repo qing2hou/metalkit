@@ -113,12 +113,12 @@ type UpdateInput struct {
 	// Name is three-state: nil = keep the current name, pointer to a new
 	// value = rename (validated like Create; UNIQUE constraint enforced
 	// with a clear error rather than a raw SQLite failure).
-	Name          *string  `json:"name,omitempty"`
-	Description   *string  `json:"description,omitempty"`
-	CIDR          *string  `json:"cidr,omitempty"`
-	Gateway       *string  `json:"gateway,omitempty"`
-	DNS           []string `json:"dns,omitempty"`
-	VLANID        *int     `json:"vlan_id,omitempty"`
+	Name          *string      `json:"name,omitempty"`
+	Description   *string      `json:"description,omitempty"`
+	CIDR          *string      `json:"cidr,omitempty"`
+	Gateway       *string      `json:"gateway,omitempty"`
+	DNS           []string     `json:"dns,omitempty"`
+	VLANID        *int         `json:"vlan_id,omitempty"`
 	DHCPRanges    *[]DHCPRange `json:"dhcp_ranges,omitempty"`
 	DHCPPoolStart *string      `json:"dhcp_pool_start,omitempty"`
 	DHCPPoolEnd   *string      `json:"dhcp_pool_end,omitempty"`
@@ -129,7 +129,7 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Subnet, error) {
 	in.Name = strings.TrimSpace(in.Name)
 	in.Description = strings.TrimSpace(in.Description)
 	if !subnetNameRE.MatchString(in.Name) {
-		return nil, fmt.Errorf("name %q: 1-64 chars, [A-Za-z0-9._-], must start alnum", in.Name)
+		return nil, fmt.Errorf("name %q: 1-64 字符，需以字母/数字/文字开头，可含 . _ -", in.Name)
 	}
 	if len(in.Description) > MaxDescriptionLen {
 		return nil, fmt.Errorf("description length %d exceeds %d", len(in.Description), MaxDescriptionLen)
@@ -242,7 +242,7 @@ func (s *Store) Update(ctx context.Context, id string, in UpdateInput) (*Subnet,
 	if in.Name != nil {
 		name := strings.TrimSpace(*in.Name)
 		if !subnetNameRE.MatchString(name) {
-			return nil, fmt.Errorf("name %q: 1-64 chars, [A-Za-z0-9._-], must start alnum", name)
+			return nil, fmt.Errorf("name %q: 1-64 字符，需以字母/数字/文字开头，可含 . _ -", name)
 		}
 		if name != cur.Name {
 			var owner string
