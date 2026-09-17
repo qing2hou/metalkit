@@ -178,7 +178,10 @@ async function fetchManagedPassword(): Promise<void> {
 
 // ---------- 提交 ----------
 
-async function submit(): Promise<void> {
+// dispatch=true：保存并触发装机（desired_state 用表单选择的 install/reinstall）。
+// dispatch=false：仅保存配置（desired_state=none），编排器不会建作业——
+// 改镜像/密码/磁盘等参数但不想立刻擦盘重装时用这个。
+async function submit(dispatch: boolean): Promise<void> {
   if (!canSubmit.value) {
     ElMessage.warning('请先补全表单中的必填/校验项')
     return
@@ -202,7 +205,7 @@ async function submit(): Promise<void> {
     const payload: Record<string, unknown> = {
       image_id: form.imageId,
       profile_id: form.profileId,
-      desired_state: form.desiredState,
+      desired_state: dispatch ? form.desiredState : 'none',
       // subnet_id：留空选择时显式发 "" 清除，否则发所选子网
       subnet_id: form.subnetId || '',
       // 静态 + 填了 IP：用该地址；静态 + 留空：后端探测后自动分配。
@@ -240,7 +243,11 @@ async function submit(): Promise<void> {
     }
 
     await bindingsApi.upsert(props.machineUuid, payload)
-    ElMessage.success('装机配置已保存，协调器将自动创建作业')
+    ElMessage.success(
+      dispatch
+        ? '装机配置已保存，协调器将自动创建作业'
+        : '配置已保存（未触发装机；需要时在机器页点「立即重装」）',
+    )
     visible.value = false
     emit('saved')
   } catch (err) {
@@ -520,7 +527,10 @@ async function submit(): Promise<void> {
 
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
-      <el-button type="primary" :loading="saving" :disabled="!canSubmit" @click="submit">
+      <el-button :loading="saving" :disabled="!canSubmit" @click="submit(false)">
+        仅保存配置
+      </el-button>
+      <el-button type="primary" :loading="saving" :disabled="!canSubmit" @click="submit(true)">
         保存并发装
       </el-button>
     </template>
