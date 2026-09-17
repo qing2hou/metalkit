@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
@@ -29,8 +29,14 @@ const subnets = ref<Subnet[]>([])
 const recentJobs = ref<Job[]>([])
 const reportHistory = ref<ReportMeta[]>([])
 
-// 弹窗
+// 弹窗：intent='reinstall' 由「立即重装」进入（预填可改，提交前两步确认）
 const installVisible = ref(false)
+const installIntent = ref<'install' | 'reinstall'>('install')
+
+function openInstallDialog(mode: 'install' | 'reinstall'): void {
+  installIntent.value = mode
+  installVisible.value = true
+}
 const unbindConfirmVisible = ref(false)
 const unbindBusy = ref(false)
 
@@ -103,62 +109,6 @@ const biosVersion = computed(() => {
 const isInstalling = computed(() =>
   recentJobs.value.some((j) => j.status === 'pending' || j.status === 'running'),
 )
-
-// 重装：绑定上已有的镜像/Profile/端口配置原样复用（PUT 三态字段缺省=保留），
-// 只把 desired_state 置回 reinstall，编排器随即建作业并 PXE 重启机器。
-const reinstallBusy = ref(false)
-const machineLabel = computed(() => summary.value?.serial || uuid.value.slice(0, 13))
-
-async function reinstall(): Promise<void> {
-  const b = binding.value
-  if (!b || reinstallBusy.value) return
-  if (!b.image_id || !b.profile_id) {
-    ElMessage.warning('绑定缺少镜像或 Profile，请先在「修改装机配置」中补全')
-    return
-  }
-  const img = images.value.find((i) => i.id === b.image_id)
-  const prof = profiles.value.find((pr) => pr.id === b.profile_id)
-  // 第一步：确认目标与后果
-  try {
-    await ElMessageBox.confirm(
-      `即将擦除 ${machineLabel.value} 的磁盘并重新写入系统（镜像 ${img ? img.name : b.image_id.slice(0, 8)}，` +
-        `Profile ${prof ? prof.name : b.profile_id.slice(0, 8)}）。磁盘数据将全部丢失，此操作不可恢复。`,
-      '重装确认',
-      { type: 'warning', confirmButtonText: '继续', cancelButtonText: '取消' },
-    )
-  } catch {
-    return
-  }
-  // 第二步：输入「重装」最终确认
-  try {
-    const { value } = await ElMessageBox.prompt(
-      '请输入「重装」两个字以确认执行',
-      '最终确认',
-      {
-        confirmButtonText: '执行重装',
-        cancelButtonText: '取消',
-        inputValidator: (v: string) => v.trim() === '重装' || '输入不正确，请输入「重装」',
-      },
-    )
-    if (value.trim() !== '重装') return
-  } catch {
-    return
-  }
-  reinstallBusy.value = true
-  try {
-    await bindingsApi.upsert(uuid.value, {
-      image_id: b.image_id,
-      profile_id: b.profile_id,
-      desired_state: 'reinstall',
-    })
-    ElMessage.success('重装已触发：作业已创建，机器将通过 BMC 以 PXE 重启')
-    await load()
-  } catch (err) {
-    ElMessage.error(`触发重装失败: ${(err as Error).message}`)
-  } finally {
-    reinstallBusy.value = false
-  }
-}
 
 async function unbind(): Promise<void> {
   if (!binding.value) return
@@ -257,20 +207,19 @@ function viewHistoryItem(meta: ReportMeta): void {
             <span>装机管理</span>
             <div>
               <template v-if="binding">
-                <el-button type="primary" @click="installVisible = true">
+                <el-button type="primary" @click="openInstallDialog('install')">
                   {{ isInstalling ? '查看装机参数' : '修改装机配置' }}
                 </el-button>
                 <el-button
                   type="danger"
-                  :loading="reinstallBusy"
                   :disabled="isInstalling"
-                  @click="reinstall"
+                  @click="openInstallDialog('reinstall')"
                 >
                   {{ isInstalling ? '装机进行中' : '立即重装' }}
                 </el-button>
                 <el-button type="danger" plain @click="unbindConfirmVisible = true">删除绑定</el-button>
               </template>
-              <el-button v-else type="primary" @click="installVisible = true">配置装机</el-button>
+              <el-button v-else type="primary" @click="openInstallDialog('install')">配置装机</el-button>
             </div>
           </div>
         </template>
@@ -472,6 +421,7 @@ function viewHistoryItem(meta: ReportMeta): void {
         :subnets="subnets"
         :binding="binding"
         @saved="load"
+        :intent="installIntent"
       />
 
       <!-- 删除绑定确认 -->

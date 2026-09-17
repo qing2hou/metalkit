@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 
 import { bindingsApi } from '@/api'
@@ -11,6 +11,9 @@ import { fmtBytes } from '@/lib/format'
 const props = defineProps<{
   modelValue: boolean
   machineUuid: string
+  /** 'reinstall'：由机器页「立即重装」进入——预填当前配置、隐藏期望状态选择，
+   *  底栏变成「确认重装并执行」，提交前走两步确认。 */
+  intent?: 'install' | 'reinstall' 
   report: Report | null
   images: Image[]
   profiles: Profile[]
@@ -22,6 +25,8 @@ const emit = defineEmits<{
   (e: 'update:modelValue', v: boolean): void
   (e: 'saved'): void
 }>()
+
+const isReinstall = computed(() => props.intent === 'reinstall')
 
 const visible = computed({
   get: () => props.modelValue,
@@ -97,7 +102,9 @@ watch(
     if (!open) return
     form.imageId = props.binding?.image_id ?? ''
     form.profileId = props.binding?.profile_id ?? ''
-    form.desiredState = (props.binding?.desired_state as 'install') ?? 'install'
+    form.desiredState = isReinstall.value
+      ? 'reinstall'
+      : ((props.binding?.desired_state as 'install') ?? 'install')
     form.subnetId = props.binding?.subnet_id ?? ''
     if (props.binding?.static_address) {
       form.ipMode = 'static'
@@ -176,6 +183,40 @@ async function fetchManagedPassword(): Promise<void> {
   }
 }
 
+// ---------- 重装确认（两步） ----------
+
+async function confirmReinstall(): Promise<void> {
+  if (!canSubmit.value) {
+    ElMessage.warning('请先补全表单中的必填/校验项')
+    return
+  }
+  const img = props.images.find((i) => i.id === form.imageId)
+  const prof = props.profiles.find((pr) => pr.id === form.profileId)
+  const disk = form.diskMode === 'smallest' ? '最小磁盘' : `${form.diskMode}=${form.diskValue}`
+  try {
+    await ElMessageBox.confirm(
+      `即将擦除机器 ${props.machineUuid.slice(0, 13)} 的磁盘并重新写入系统` +
+        `（镜像 ${img ? img.name : form.imageId.slice(0, 8)}，Profile ${prof ? prof.name : form.profileId.slice(0, 8)}，目标盘 ${disk}）。` +
+        '磁盘数据将全部丢失，此操作不可恢复。',
+      '重装确认',
+      { type: 'warning', confirmButtonText: '继续', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const { value } = await ElMessageBox.prompt('请输入「重装」两个字以确认执行', '最终确认', {
+      confirmButtonText: '执行重装',
+      cancelButtonText: '取消',
+      inputValidator: (v: string) => v.trim() === '重装' || '输入不正确，请输入「重装」',
+    })
+    if (value.trim() !== '重装') return
+  } catch {
+    return
+  }
+  await submit(true)
+}
+
 // ---------- 提交 ----------
 
 // dispatch=true：保存并触发装机（desired_state 用表单选择的 install/reinstall）。
@@ -245,7 +286,9 @@ async function submit(dispatch: boolean): Promise<void> {
     await bindingsApi.upsert(props.machineUuid, payload)
     ElMessage.success(
       dispatch
-        ? '装机配置已保存，协调器将自动创建作业'
+        ? isReinstall.value
+          ? '重装已触发：作业已创建，机器将通过 BMC 以 PXE 重启'
+          : '装机配置已保存，协调器将自动创建作业'
         : '配置已保存（未触发装机；需要时在机器页点「立即重装」）',
     )
     visible.value = false
@@ -259,7 +302,7 @@ async function submit(dispatch: boolean): Promise<void> {
 </script>
 
 <template>
-  <el-dialog v-model="visible" title="配置装机" width="720px" top="6vh" destroy-on-close>
+  <el-dialog v-model="visible" :title="isReinstall ? '重装机器' : '配置装机'" width="720px" top="6vh" destroy-on-close>
     <el-form label-width="120px">
       <el-row :gutter="16">
         <el-col :span="12">
@@ -297,7 +340,7 @@ async function submit(dispatch: boolean): Promise<void> {
 
       <el-row :gutter="16">
         <el-col :span="12">
-          <el-form-item label="期望状态">
+          <el-form-item v-if="!isReinstall" label="期望状态">
             <el-radio-group v-model="form.desiredState">
               <el-radio-button value="install">install（首次）</el-radio-button>
               <el-radio-button value="reinstall">reinstall</el-radio-button>
@@ -530,7 +573,16 @@ async function submit(dispatch: boolean): Promise<void> {
       <el-button :loading="saving" :disabled="!canSubmit" @click="submit(false)">
         仅保存配置
       </el-button>
-      <el-button type="primary" :loading="saving" :disabled="!canSubmit" @click="submit(true)">
+      <el-button
+        v-if="isReinstall"
+        type="danger"
+        :loading="saving"
+        :disabled="!canSubmit"
+        @click="confirmReinstall"
+      >
+        确认重装并执行
+      </el-button>
+      <el-button v-else type="primary" :loading="saving" :disabled="!canSubmit" @click="submit(true)">
         保存并发装
       </el-button>
     </template>
