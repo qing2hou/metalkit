@@ -15,6 +15,8 @@ export interface MachineSummary {
   status: string
   latest_report: number
   bmc_ip?: string
+  /** 业务 IPv4（去掩码），取自最近一次上报的网卡地址；装机完成后即在此可见。 */
+  ipv4_addresses?: string[]
   bmc_managed?: boolean
 }
 

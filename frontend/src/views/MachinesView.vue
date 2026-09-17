@@ -200,6 +200,12 @@ async function remove(row: MachineSummary): Promise<void> {
               <StatusTag :status="row.status" raw />
             </template>
           </el-table-column>
+          <el-table-column label="业务 IP" min-width="200">
+            <template #default="{ row }">
+              <span v-if="row.ipv4_addresses?.length" class="mono">{{ row.ipv4_addresses.join('， ') }}</span>
+              <span v-else class="mk-subtle">—</span>
+            </template>
+          </el-table-column>
           <el-table-column label="序列号" min-width="140">
             <template #default="{ row }">{{ row.serial || '—' }}</template>
           </el-table-column>

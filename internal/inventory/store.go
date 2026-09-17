@@ -243,6 +243,10 @@ type MachineSummary struct {
 	LatestReport int64     `json:"latest_report"`
 	BMCIP        string    `json:"bmc_ip"`      // agent-reported BMC IP, parsed from latest report's JSON body
 	BMCManaged   bool      `json:"bmc_managed"` // true if bmc_credentials row exists for this machine
+	// IPv4Addresses are the machine's configured IPv4s (no CIDR mask) from
+	// the latest report's nics[].addresses — the "business IP" an operator
+	// needs right after an install, without opening the full report.
+	IPv4Addresses []string `json:"ipv4_addresses,omitempty"`
 }
 
 // ListMachines returns all machines, most-recently-seen first.
@@ -252,7 +256,18 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
                m.first_seen, m.last_seen, m.status,
                COALESCE(m.latest_report, 0),
                COALESCE(json_extract(r.body, '$.bmc.ip'), ''),
-               EXISTS(SELECT 1 FROM bmc_credentials b WHERE b.machine_uuid = m.uuid)
+               EXISTS(SELECT 1 FROM bmc_credentials b WHERE b.machine_uuid = m.uuid),
+               -- Machine IPs: flatten nics[].addresses, keep dotted-quad
+               -- entries (agent reports them as "a.b.c.d/nn"; the mask is
+               -- stripped in Go), deduped.
+               COALESCE((
+                   SELECT group_concat(DISTINCT substr(a.value, 1, instr(a.value, '/') - 1))
+                   FROM json_each(r.body, '$.nics') n,
+                        json_each(n.value, '$.addresses') a
+                   WHERE a.value LIKE '%.%.%.%'   -- dotted quad (with mask)
+                     AND a.value NOT LIKE '%:%' -- drop IPv6
+                     AND a.value NOT LIKE '127.%'
+               ), '')
         FROM machines m
         LEFT JOIN reports r ON r.id = m.latest_report
         ORDER BY m.last_seen DESC
@@ -268,11 +283,11 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
 			m                    MachineSummary
 			firstSeen, lastSeen  int64
 			serial, mfr, product sql.NullString
-			bmcIP                sql.NullString
+			bmcIP, ipsCSV        sql.NullString
 			managed              bool
 		)
 		if err := rows.Scan(&m.UUID, &serial, &mfr, &product, &firstSeen, &lastSeen,
-			&m.Status, &m.LatestReport, &bmcIP, &managed); err != nil {
+			&m.Status, &m.LatestReport, &bmcIP, &managed, &ipsCSV); err != nil {
 			return nil, fmt.Errorf("scan machine: %w", err)
 		}
 		m.Serial = serial.String
@@ -282,6 +297,9 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
 		m.LastSeen = time.Unix(lastSeen, 0).UTC()
 		m.BMCIP = bmcIP.String
 		m.BMCManaged = managed
+		if ipsCSV.String != "" {
+			m.IPv4Addresses = strings.Split(ipsCSV.String, ",")
+		}
 		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {
