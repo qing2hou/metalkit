@@ -17,6 +17,8 @@ interface SubnetForm {
   gateway: string
   dns: string
   vlanId: number | undefined
+  poolStart: string
+  poolEnd: string
 }
 
 const list = ref<Subnet[]>([])
@@ -24,7 +26,7 @@ const loading = ref(false)
 const dialogVisible = ref(false)
 const saving = ref(false)
 const formRef = ref<FormInstance>()
-const form = reactive<SubnetForm>({ name: '', cidr: '', gateway: '', dns: '', vlanId: undefined })
+const form = reactive<SubnetForm>({ name: '', cidr: '', gateway: '', dns: '', vlanId: undefined, poolStart: '', poolEnd: '' })
 
 const rules: FormRules = {
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
@@ -56,6 +58,33 @@ const rules: FormRules = {
       trigger: 'blur',
     },
   ],
+  poolStart: [
+    {
+      validator: (_r, v: string, cb) => {
+        const a = v.trim(), b = form.poolEnd.trim()
+        if (!a && !b) return cb()
+        if (!a || !b) return cb(new Error('起始和结束需同时填写，或同时留空（不分配 DHCP）'))
+        if (!isValidIPv4(a)) return cb(new Error('起始不是合法 IPv4'))
+        const range = isValidCIDR(form.cidr) ? subnetRange(form.cidr) : null
+        if (range && (a === range.network || a === range.broadcast)) return cb(new Error('起始不能是网络/广播地址'))
+        cb()
+      },
+      trigger: 'blur',
+    },
+  ],
+  poolEnd: [
+    {
+      validator: (_r, v: string, cb) => {
+        const a = form.poolStart.trim(), b = v.trim()
+        if (!a || !b) return cb()
+        if (!isValidIPv4(b)) return cb(new Error('结束不是合法 IPv4'))
+        const range = isValidCIDR(form.cidr) ? subnetRange(form.cidr) : null
+        if (range && (b === range.network || b === range.broadcast)) return cb(new Error('结束不能是网络/广播地址'))
+        cb()
+      },
+      trigger: 'blur',
+    },
+  ],
 }
 
 onMounted(load)
@@ -72,7 +101,7 @@ async function load(): Promise<void> {
 }
 
 function openCreate(): void {
-  Object.assign(form, { id: undefined, name: '', cidr: '', gateway: '', dns: '', vlanId: undefined })
+  Object.assign(form, { id: undefined, name: '', cidr: '', gateway: '', dns: '', vlanId: undefined, poolStart: '', poolEnd: '' })
   dialogVisible.value = true
 }
 
@@ -84,6 +113,8 @@ function openEdit(row: Subnet): void {
     gateway: row.gateway ?? '',
     dns: (row.dns ?? []).join(', '),
     vlanId: row.vlan_id,
+    poolStart: row.dhcp_pool_start ?? '',
+    poolEnd: row.dhcp_pool_end ?? '',
   })
   dialogVisible.value = true
 }
@@ -102,6 +133,8 @@ async function save(): Promise<void> {
         .map((s) => s.trim())
         .filter(Boolean),
       vlan_id: form.vlanId,
+      dhcp_pool_start: form.poolStart.trim() || undefined,
+      dhcp_pool_end: form.poolEnd.trim() || undefined,
     }
     if (form.id) {
       await subnetsApi.update(form.id, payload)
@@ -161,6 +194,12 @@ async function remove(row: Subnet): Promise<void> {
           <el-table-column prop="vlan_id" label="VLAN" width="80">
             <template #default="{ row }">{{ row.vlan_id ?? '—' }}</template>
           </el-table-column>
+          <el-table-column label="DHCP 池" min-width="190">
+            <template #default="{ row }">
+              <span v-if="row.dhcp_pool_start" class="mono">{{ row.dhcp_pool_start }} ~ {{ row.dhcp_pool_end }}</span>
+              <span v-else>—</span>
+            </template>
+          </el-table-column>
           <el-table-column label="创建时间" width="150">
             <template #default="{ row }">{{ fmtAbsolute(row.created_at) }}</template>
           </el-table-column>
@@ -198,6 +237,16 @@ async function remove(row: Subnet): Promise<void> {
           <el-form-item label="VLAN">
             <el-input-number v-model="form.vlanId" :min="1" :max="4094" placeholder="可选" />
           </el-form-item>
+          <el-form-item label="池起始" prop="poolStart">
+            <el-input v-model="form.poolStart" placeholder="留空 = 不做 DHCP 分配" class="mono" />
+          </el-form-item>
+          <el-form-item label="池结束" prop="poolEnd">
+            <el-input v-model="form.poolEnd" placeholder="与起始同时填写" class="mono" />
+          </el-form-item>
+          <div style="margin: 0 0 12px 90px; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5">
+            填写 DHCP 池后，从其他网段经 DHCP 中继（giaddr）转发来的请求将分配该范围内的地址；
+            对端网关/SVI 地址需与本子网同网段。留空表示该子网仅用于静态分配。
+          </div>
         </el-form>
         <template #footer>
           <el-button @click="dialogVisible = false">取消</el-button>

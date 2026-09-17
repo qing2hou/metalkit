@@ -97,6 +97,44 @@ func validateVLAN(v int) error {
 	return nil
 }
 
+// validatePool checks an optional DHCP pool range: both ends empty = no DHCP
+// for this subnet; both set = valid in-range host addresses with start <=
+// end; one set without the other is a config error.
+func validatePool(start, end string, prefix netip.Prefix) error {
+	start, end = strings.TrimSpace(start), strings.TrimSpace(end)
+	if start == "" && end == "" {
+		return nil
+	}
+	if start == "" || end == "" {
+		return fmt.Errorf("dhcp pool: both start and end are required (or neither)")
+	}
+	sa, err := netip.ParseAddr(start)
+	if err != nil || !sa.Is4() {
+		return fmt.Errorf("dhcp pool start %q: must be IPv4", start)
+	}
+	ea, err := netip.ParseAddr(end)
+	if err != nil || !ea.Is4() {
+		return fmt.Errorf("dhcp pool end %q: must be IPv4", end)
+	}
+	for _, a := range []struct {
+		name string
+		ip   netip.Addr
+	}{
+		{"start", sa}, {"end", ea},
+	} {
+		if !prefix.Contains(a.ip) || a.ip == prefix.Addr() {
+			return fmt.Errorf("dhcp pool %s %q: not a host address inside cidr %s", a.name, a.ip, prefix)
+		}
+		if b := broadcastOf(prefix); b.IsValid() && a.ip == b {
+			return fmt.Errorf("dhcp pool %s %q: is the broadcast address", a.name, a.ip)
+		}
+	}
+	if sa.Compare(ea) > 0 {
+		return fmt.Errorf("dhcp pool: start %s > end %s", sa, ea)
+	}
+	return nil
+}
+
 // HostInSubnet reports whether `ip` (IPv4 literal) is a valid host address
 // inside `cidr` — i.e. inside the prefix, not the network or broadcast, and
 // not equal to the gateway. Used by bindings to validate host_ip; exported so

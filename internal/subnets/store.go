@@ -42,46 +42,62 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger) (*Store, err
 	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
 		return nil, fmt.Errorf("apply subnets schema: %w", err)
 	}
+	for _, m := range migrations {
+		if _, err := db.ExecContext(ctx, m); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column name") {
+				return nil, fmt.Errorf("subnet migration %q: %w", m, err)
+			}
+		}
+	}
 	return &Store{db: db, logger: logger, now: time.Now}, nil
 }
 
 // Subnet is the public, JSON-friendly record. Gateway and DNS entries are
 // stored as canonical IPv4 strings; CIDR is the canonical masked form.
+// DHCPPoolStart/End are optional ("" = no DHCP service for this subnet);
+// when set they must lie inside the CIDR and DHCP relays from this segment
+// get leases from that range.
 type Subnet struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description,omitempty"`
-	CIDR        string    `json:"cidr"`
-	Gateway     string    `json:"gateway"`
-	DNS         []string  `json:"dns"`
-	VLANID      int       `json:"vlan_id,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	CreatedBy   string    `json:"created_by,omitempty"`
-	UpdatedBy   string    `json:"updated_by,omitempty"`
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Description   string    `json:"description,omitempty"`
+	CIDR          string    `json:"cidr"`
+	Gateway       string    `json:"gateway"`
+	DNS           []string  `json:"dns"`
+	VLANID        int       `json:"vlan_id,omitempty"`
+	DHCPPoolStart string    `json:"dhcp_pool_start,omitempty"`
+	DHCPPoolEnd   string    `json:"dhcp_pool_end,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	CreatedBy     string    `json:"created_by,omitempty"`
+	UpdatedBy     string    `json:"updated_by,omitempty"`
 }
 
 type CreateInput struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	CIDR        string   `json:"cidr"`
-	Gateway     string   `json:"gateway"`
-	DNS         []string `json:"dns,omitempty"`
-	VLANID      int      `json:"vlan_id,omitempty"`
-	CreatedBy   string   `json:"-"`
+	Name          string   `json:"name"`
+	Description   string   `json:"description,omitempty"`
+	CIDR          string   `json:"cidr"`
+	Gateway       string   `json:"gateway"`
+	DNS           []string `json:"dns,omitempty"`
+	VLANID        int      `json:"vlan_id,omitempty"`
+	DHCPPoolStart string   `json:"dhcp_pool_start,omitempty"`
+	DHCPPoolEnd   string   `json:"dhcp_pool_end,omitempty"`
+	CreatedBy     string   `json:"-"`
 }
 
 type UpdateInput struct {
 	// Name is three-state: nil = keep the current name, pointer to a new
 	// value = rename (validated like Create; UNIQUE constraint enforced
 	// with a clear error rather than a raw SQLite failure).
-	Name        *string  `json:"name,omitempty"`
-	Description *string  `json:"description,omitempty"`
-	CIDR        *string  `json:"cidr,omitempty"`
-	Gateway     *string  `json:"gateway,omitempty"`
-	DNS         []string `json:"dns,omitempty"`
-	VLANID      *int     `json:"vlan_id,omitempty"`
-	UpdatedBy   string   `json:"-"`
+	Name          *string  `json:"name,omitempty"`
+	Description   *string  `json:"description,omitempty"`
+	CIDR          *string  `json:"cidr,omitempty"`
+	Gateway       *string  `json:"gateway,omitempty"`
+	DNS           []string `json:"dns,omitempty"`
+	VLANID        *int     `json:"vlan_id,omitempty"`
+	DHCPPoolStart *string  `json:"dhcp_pool_start,omitempty"`
+	DHCPPoolEnd   *string  `json:"dhcp_pool_end,omitempty"`
+	UpdatedBy     string   `json:"-"`
 }
 
 func (s *Store) Create(ctx context.Context, in CreateInput) (*Subnet, error) {
@@ -108,6 +124,9 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Subnet, error) {
 	if err := validateVLAN(in.VLANID); err != nil {
 		return nil, err
 	}
+	if err := validatePool(in.DHCPPoolStart, in.DHCPPoolEnd, prefix); err != nil {
+		return nil, err
+	}
 	if in.CreatedBy == "" {
 		return nil, errors.New("subnets: created_by is required")
 	}
@@ -126,9 +145,11 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Subnet, error) {
 	_, err = s.db.ExecContext(ctx, `
         INSERT INTO subnets
             (id, name, description, cidr, gateway, dns_json, vlan_id,
+             dhcp_pool_start, dhcp_pool_end,
              created_at, updated_at, created_by, updated_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, in.Name, in.Description, cidr, gw, string(dnsBlob), vlanArg,
+		nullIfEmpty(in.DHCPPoolStart), nullIfEmpty(in.DHCPPoolEnd),
 		now, now, in.CreatedBy, in.CreatedBy,
 	)
 	if err != nil {
@@ -140,6 +161,7 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Subnet, error) {
 	return &Subnet{
 		ID: id, Name: in.Name, Description: in.Description,
 		CIDR: cidr, Gateway: gw, DNS: dns, VLANID: in.VLANID,
+		DHCPPoolStart: in.DHCPPoolStart, DHCPPoolEnd: in.DHCPPoolEnd,
 		CreatedAt: time.Unix(now, 0).UTC(),
 		UpdatedAt: time.Unix(now, 0).UTC(),
 		CreatedBy: in.CreatedBy, UpdatedBy: in.CreatedBy,
@@ -241,6 +263,18 @@ func (s *Store) Update(ctx context.Context, id string, in UpdateInput) (*Subnet,
 		}
 		cur.VLANID = *in.VLANID
 	}
+	// Pool bounds: three-state pointers; validate against the (possibly
+	// just-updated) CIDR so a CIDR edit that no longer contains the pool
+	// fails the save with a clear error.
+	if in.DHCPPoolStart != nil {
+		cur.DHCPPoolStart = strings.TrimSpace(*in.DHCPPoolStart)
+	}
+	if in.DHCPPoolEnd != nil {
+		cur.DHCPPoolEnd = strings.TrimSpace(*in.DHCPPoolEnd)
+	}
+	if err := validatePool(cur.DHCPPoolStart, cur.DHCPPoolEnd, prefix); err != nil {
+		return nil, err
+	}
 
 	now := s.now().UTC().Unix()
 	dnsBlob, _ := json.Marshal(cur.DNS)
@@ -255,10 +289,12 @@ func (s *Store) Update(ctx context.Context, id string, in UpdateInput) (*Subnet,
 	_, err = s.db.ExecContext(ctx, `
         UPDATE subnets
         SET name = ?, description = ?, cidr = ?, gateway = ?, dns_json = ?,
-            vlan_id = ?, updated_at = ?, updated_by = ?
+            vlan_id = ?, dhcp_pool_start = ?, dhcp_pool_end = ?,
+            updated_at = ?, updated_by = ?
         WHERE id = ?`,
 		cur.Name, cur.Description, cur.CIDR, cur.Gateway, string(dnsBlob),
-		vlanArg, now, updatedBy, id,
+		vlanArg, nullIfEmpty(cur.DHCPPoolStart), nullIfEmpty(cur.DHCPPoolEnd),
+		now, updatedBy, id,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update subnet: %w", err)
@@ -287,7 +323,8 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 // ---- internal helpers ----
 
 const selectSubnetSQL = `SELECT id, name, description, cidr, gateway, dns_json,
-       vlan_id, created_at, updated_at, created_by, updated_by FROM subnets`
+       vlan_id, dhcp_pool_start, dhcp_pool_end,
+       created_at, updated_at, created_by, updated_by FROM subnets`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -297,10 +334,12 @@ func scanSubnet(r rowScanner) (*Subnet, error) {
 	var sn Subnet
 	var dnsBlob string
 	var vlan sql.NullInt64
+	var poolStart, poolEnd sql.NullString
 	var createdAt, updatedAt int64
 	if err := r.Scan(
 		&sn.ID, &sn.Name, &sn.Description, &sn.CIDR, &sn.Gateway, &dnsBlob,
-		&vlan, &createdAt, &updatedAt, &sn.CreatedBy, &sn.UpdatedBy,
+		&vlan, &poolStart, &poolEnd,
+		&createdAt, &updatedAt, &sn.CreatedBy, &sn.UpdatedBy,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -314,9 +353,22 @@ func scanSubnet(r rowScanner) (*Subnet, error) {
 	if vlan.Valid {
 		sn.VLANID = int(vlan.Int64)
 	}
+	if poolStart.Valid {
+		sn.DHCPPoolStart = poolStart.String
+	}
+	if poolEnd.Valid {
+		sn.DHCPPoolEnd = poolEnd.String
+	}
 	sn.CreatedAt = time.Unix(createdAt, 0).UTC()
 	sn.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 	return &sn, nil
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func newSubnetID() (string, error) {

@@ -32,7 +32,8 @@ type Config struct {
 
 	// Full-mode-only fields. When Mode == ModeProxy these are ignored.
 	Mode   Mode
-	Pool   *Pool
+	Pool   *Pool        // single local pool (legacy; folded into Pools by New)
+	Pools  *SubnetPools // full pool set: local + per-relay-subnet pools
 	Leases LeaseStore
 }
 
@@ -69,14 +70,14 @@ type Server struct {
 	srvIP  net.IP
 	listen *net.UDPAddr
 
-	// mu guards the hot-reloadable fields (mode, pool, leases). UDP/67 stays
+	// mu guards the hot-reloadable fields (mode, pools, leases). UDP/67 stays
 	// bound the whole time — Reload only swaps the in-memory references, so
 	// the socket never closes and PXE clients never see a window of "no
 	// DHCP server on the wire". Each handler invocation grabs an RLock for
 	// the duration of one packet, which costs ~nothing under contention.
 	mu     sync.RWMutex
 	mode   Mode
-	pool   *Pool
+	pools  *SubnetPools
 	leases LeaseStore
 }
 
@@ -88,8 +89,15 @@ func New(cfg Config) (*Server, error) {
 		cfg.Mode = ModeProxy
 	}
 	if cfg.Mode == ModeFull {
-		if cfg.Pool == nil {
-			return nil, fmt.Errorf("full mode requires Pool")
+		if cfg.Pools == nil {
+			if cfg.Pool == nil {
+				return nil, fmt.Errorf("full mode requires Pools (or legacy Pool)")
+			}
+			// Legacy single-pool construction: a pool set with only the
+			// local entry. Direct clients behave identically to the old
+			// code; relayed clients get no pool (old code would have
+			// mis-leased them from this single pool — see pools.go).
+			cfg.Pools = &SubnetPools{local: cfg.Pool}
 		}
 		if cfg.Leases == nil {
 			return nil, fmt.Errorf("full mode requires Leases store")
@@ -113,7 +121,7 @@ func New(cfg Config) (*Server, error) {
 		srvIP:  ip.To4(),
 		listen: laddr,
 		mode:   cfg.Mode,
-		pool:   cfg.Pool,
+		pools:  cfg.Pools,
 		leases: cfg.Leases,
 	}, nil
 }
@@ -127,7 +135,7 @@ func New(cfg Config) (*Server, error) {
 // Validation here mirrors New(): ModeFull requires both a Pool and a
 // LeaseStore. An invalid combination is rejected before any state is
 // touched, so a bad call is a no-op.
-func (s *Server) Reload(mode Mode, pool *Pool, leases LeaseStore) error {
+func (s *Server) Reload(mode Mode, pools *SubnetPools, leases LeaseStore) error {
 	if mode == "" {
 		mode = ModeProxy
 	}
@@ -135,8 +143,8 @@ func (s *Server) Reload(mode Mode, pool *Pool, leases LeaseStore) error {
 		return fmt.Errorf("invalid mode %q", mode)
 	}
 	if mode == ModeFull {
-		if pool == nil {
-			return fmt.Errorf("full mode requires Pool")
+		if pools == nil {
+			return fmt.Errorf("full mode requires Pools")
 		}
 		if leases == nil {
 			return fmt.Errorf("full mode requires Leases store")
@@ -144,20 +152,26 @@ func (s *Server) Reload(mode Mode, pool *Pool, leases LeaseStore) error {
 	}
 	s.mu.Lock()
 	s.mode = mode
-	s.pool = pool
+	s.pools = pools
 	s.leases = leases
 	s.mu.Unlock()
 	s.logger.Info("dhcp: reloaded", "mode", string(mode))
 	return nil
 }
 
-// snapshot returns the current mode/pool/leases under read lock — handlers
+// snapshot returns the current mode/pools/leases under read lock — handlers
 // call this once at the top of each packet so the rest of the per-packet
 // work uses a consistent view even if Reload fires mid-handler.
-func (s *Server) snapshot() (Mode, *Pool, LeaseStore) {
+func (s *Server) snapshot() (Mode, *SubnetPools, LeaseStore) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.mode, s.pool, s.leases
+	return s.mode, s.pools, s.leases
+}
+
+// Snapshot is the exported form of snapshot for the subnets-API reload hook
+// (it only needs the mode to decide whether a pool refresh is relevant).
+func (s *Server) Snapshot() (Mode, *SubnetPools, LeaseStore) {
+	return s.snapshot()
 }
 
 func resolveListen(addr string) (*net.UDPAddr, error) {
@@ -225,12 +239,12 @@ func (s *Server) handle(ctx context.Context, conn net.PacketConn, peer net.Addr,
 		"msg_type", req.MessageType().String(),
 	)
 
-	mode, pool, leases := s.snapshot()
+	mode, pools, leases := s.snapshot()
 
 	var reply *dhcpv4.DHCPv4
 	var err error
 	if mode == ModeFull {
-		reply, err = s.buildFullReplyWith(ctx, req, pool, leases)
+		reply, err = s.buildFullReplyWith(ctx, req, pools, leases)
 	} else {
 		reply, err = buildReply(req, &s.cfg)
 	}
@@ -282,11 +296,38 @@ func (s *Server) handle(ctx context.Context, conn net.PacketConn, peer net.Addr,
 // buildFullReplyWith() so a single packet uses a consistent snapshot of
 // the reloadable state.
 func (s *Server) buildFullReply(ctx context.Context, req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
-	_, pool, leases := s.snapshot()
-	return s.buildFullReplyWith(ctx, req, pool, leases)
+	_, pools, leases := s.snapshot()
+	return s.buildFullReplyWith(ctx, req, pools, leases)
 }
 
-func (s *Server) buildFullReplyWith(ctx context.Context, req *dhcpv4.DHCPv4, pool *Pool, leases LeaseStore) (*dhcpv4.DHCPv4, error) {
+// resolvePool picks the pool for this packet: giaddr (relay) routed through
+// SubnetPools, falling back to the local pool when no set is configured.
+// Returns nil when the packet comes from a relay subnet we have no pool
+// for — the caller must not answer (answering from the local pool is the
+// original cross-subnet bug).
+func (s *Server) resolvePool(req *dhcpv4.DHCPv4, pools *SubnetPools) *Pool {
+	if pools == nil {
+		return nil
+	}
+	if req.GatewayIPAddr.IsUnspecified() {
+		return pools.Local()
+	}
+	gi, ok := netip.AddrFromSlice(req.GatewayIPAddr.To4())
+	if !ok {
+		return pools.Local()
+	}
+	return pools.poolForRequest(gi)
+}
+
+func (s *Server) buildFullReplyWith(ctx context.Context, req *dhcpv4.DHCPv4, pools *SubnetPools, leases LeaseStore) (*dhcpv4.DHCPv4, error) {
+	pool := s.resolvePool(req, pools)
+	if pool == nil {
+		s.logger.Warn("dhcp: no pool for relay subnet — ignoring",
+			"giaddr", req.GatewayIPAddr.String(),
+			"mac", req.ClientHWAddr.String(),
+		)
+		return nil, nil
+	}
 	switch req.MessageType() {
 	case dhcpv4.MessageTypeRelease, dhcpv4.MessageTypeDecline:
 		_ = leases.Release(ctx, req.ClientHWAddr.String())

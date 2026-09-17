@@ -192,6 +192,10 @@ export interface Subnet {
   gateway?: string
   dns?: string[]
   vlan_id?: number
+  /** Optional DHCP pool; when set, relayed requests from this subnet are
+   *  answered from this range (full-mode DHCP per-subnet pools). */
+  dhcp_pool_start?: string
+  dhcp_pool_end?: string
   created_at?: string
   updated_at?: string
 }

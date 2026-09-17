@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -140,34 +142,105 @@ func (a *leasesAdapter) Release(ctx context.Context, mac string) error {
 }
 
 // dhcpReloader implements settings.DHCPReloader. The settings API hands us
-// the validated new DHCPSettings; we rebuild a dhcp.Pool and call Reload on
+// the validated new DHCPSettings; we rebuild the pool set (local pool from
+// settings + relay pools from the subnets catalog) and call Reload on
 // the live server. The UDP/67 socket stays bound throughout — there's no
 // window where DHCP is "down" between save and effective.
 type dhcpReloader struct {
-	server *dhcp.Server
-	leases dhcp.LeaseStore
-	logger *slog.Logger
+	server      *dhcp.Server
+	leases      dhcp.LeaseStore
+	subnets     *subnets.Store
+	localPoolFn func() (dhcp.SubnetPoolInput, bool)
+	logger      *slog.Logger
 }
 
-func (r *dhcpReloader) ReloadDHCP(_ context.Context, s settings.DHCPSettings) error {
+// subnetsToPools assembles the full pool set: one local pool entry plus one
+// relay entry per subnet that declares a DHCP pool. Subnets without pool
+// bounds are skipped (statics-only VLANs); their relayed requests will find
+// no selector and be ignored — the logging in buildFullReplyWith surfaces
+// that per-packet if it happens.
+func subnetsToPools(local dhcp.SubnetPoolInput, subs []subnets.Subnet) (*dhcp.SubnetPools, error) {
+	in := []dhcp.SubnetPoolInput{local}
+	for i := range subs {
+		sn := &subs[i]
+		if sn.DHCPPoolStart == "" || sn.DHCPPoolEnd == "" {
+			continue
+		}
+		in = append(in, dhcp.SubnetPoolInput{
+			Selector: sn.CIDR,
+			Start:    sn.DHCPPoolStart,
+			End:      sn.DHCPPoolEnd,
+			Netmask:  netmaskOf(sn.CIDR),
+			Gateway:  sn.Gateway,
+			DNS:      sn.DNS,
+			LeaseSec: local.LeaseSec, // lease time is global policy, not per-VLAN
+		})
+	}
+	return dhcp.NewSubnetPools(in)
+}
+
+func (r *dhcpReloader) ReloadDHCP(ctx context.Context, s settings.DHCPSettings) error {
 	if s.Mode == config.DHCPModeProxy {
 		// Proxy mode: no pool, no leases needed by the protocol layer. The
 		// leases store is still alive in the background for the next flip
 		// back to full.
 		return r.server.Reload(dhcp.ModeProxy, nil, nil)
 	}
-	pool, err := dhcp.NewPool(
+	local, err := dhcp.NewPool(
 		s.Start, s.End, s.Netmask, s.Gateway,
 		s.DNS, uint32(s.LeaseHours)*3600, s.Exclude,
 	)
 	if err != nil {
-		return fmt.Errorf("rebuild pool: %w", err)
+		return fmt.Errorf("rebuild local pool: %w", err)
+	}
+	input := dhcp.SubnetPoolInput{
+		Start: local.Start.String(), End: local.End.String(),
+		Netmask: local.Netmask.String(), Gateway: local.Gateway.String(),
+		LeaseSec: local.LeaseSec, Exclude: s.Exclude,
+	}
+	pools, err := r.buildPools(ctx, input)
+	if err != nil {
+		return err
 	}
 	r.logger.Info("dhcp: hot-reloading",
 		"mode", s.Mode, "start", s.Start, "end", s.End,
 		"gateway", s.Gateway, "netmask", s.Netmask, "lease_hours", s.LeaseHours,
 	)
-	return r.server.Reload(dhcp.ModeFull, pool, r.leases)
+	return r.server.Reload(dhcp.ModeFull, pools, r.leases)
+}
+
+// reloadFromSubnets is invoked by the subnets API after any create/update/
+// /delete so relay pools track the catalog without a controller restart.
+func (r *dhcpReloader) reloadFromSubnets(ctx context.Context) error {
+	mode, _, _ := r.server.Snapshot()
+	if mode != dhcp.ModeFull {
+		return nil // nothing live to refresh in proxy mode
+	}
+	if r.localPoolFn == nil {
+		return nil
+	}
+	local, ok := r.localPoolFn()
+	if !ok || local.Start == "" {
+		return nil // settings not resolvable right now; skip silently
+	}
+	next, err := r.buildPools(ctx, local)
+	if err != nil {
+		return err
+	}
+	r.logger.Info("dhcp: pools refreshed from subnets catalog",
+		"relays", len(next.RelayPools()))
+	return r.server.Reload(dhcp.ModeFull, next, r.leases)
+}
+
+func (r *dhcpReloader) buildPools(ctx context.Context, local dhcp.SubnetPoolInput) (*dhcp.SubnetPools, error) {
+	if r.subnets == nil {
+		return dhcp.NewSubnetPools([]dhcp.SubnetPoolInput{local})
+	}
+	subs, err := r.subnets.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list subnets for pools: %w", err)
+	}
+	return subnetsToPools(local, subs)
 }
 
 // runLeaseGC periodically drops fully-expired lease rows. Loop interval is
@@ -297,18 +370,19 @@ func run() int {
 	}
 
 	// DHCP pool is only built when full mode is the initial state; if the
-	// UI flips mode later, the reloader builds a fresh pool from the new
+	// UI flips mode later, the reloader builds a fresh pool set from the new
 	// settings without going through this path.
 	var dhcpPool *dhcp.Pool
 	if cfg.DHCPMode == config.DHCPModeFull {
-		dhcpPool, err = dhcp.NewPool(
+		var err2 error
+		dhcpPool, err2 = dhcp.NewPool(
 			cfg.DHCPPool.Start, cfg.DHCPPool.End,
 			cfg.DHCPPool.Netmask, cfg.DHCPPool.Gateway,
 			cfg.DHCPPool.DNS, uint32(cfg.DHCPPool.LeaseHours)*3600,
 			cfg.DHCPPool.Exclude,
 		)
-		if err != nil {
-			logger.Error("dhcp pool", "err", err)
+		if err2 != nil {
+			logger.Error("dhcp pool", "err", err2)
 			return 1
 		}
 		logger.Info("dhcp: full mode enabled",
@@ -456,6 +530,31 @@ func run() int {
 	// promote the FK to ON DELETE RESTRICT proper).
 	subnetAPI = subnetAPI.WithBindingRefCount(bindStore.RefCountBySubnet)
 
+	// Full-mode pool set: local pool (from config/settings) + one relay pool
+	// per subnet that declares DHCP bounds. Built once here so relayed VLANs
+	// work from boot; the reloader re-assembles it on every settings change
+	// and the subnets API triggers a refresh after catalog edits.
+	if cfg.DHCPMode == config.DHCPModeFull && dhcpPool != nil {
+		input := dhcp.SubnetPoolInput{
+			Start: dhcpPool.Start.String(), End: dhcpPool.End.String(),
+			Netmask: dhcpPool.Netmask.String(), Gateway: dhcpPool.Gateway.String(),
+			LeaseSec: dhcpPool.LeaseSec,
+		}
+		pools, err := subnetsToPools(input, mustListSubnets(runCtx, subnetStore, logger))
+		if err != nil {
+			logger.Error("dhcp pool set", "err", err)
+			return 1
+		}
+		if err := dhcpSrv.Reload(dhcp.ModeFull, pools, leasesForDHCP); err != nil {
+			logger.Error("dhcp initial reload", "err", err)
+			return 1
+		}
+		logger.Info("dhcp: pool set assembled",
+			"relays", len(pools.RelayPools()),
+			"relay_pools", pools.RelaySummary(),
+		)
+	}
+
 	// One-shot back-fill of bindings.subnet_id from legacy profile.network.
 	// Idempotent — re-runs find every binding already has subnet_id set and
 	// short-circuit. Logged so we can spot rows the heuristic skipped.
@@ -563,13 +662,31 @@ func run() int {
 
 	uiHandler := webui.Handler(webui.Config{Mount: "/ui"})
 
+	settingsAPI := settings.NewAPI(settingsStore, cfg, logger.With("component", "settings-api"))
+
 	reloader := &dhcpReloader{
-		server: dhcpSrv,
-		leases: leasesForDHCP,
+		server:  dhcpSrv,
+		leases:  leasesForDHCP,
+		subnets: subnetStore,
+		// Local pool from the *effective* settings — resolved lazily via the
+		// settings API (captured by closure; settingsAPI is assigned above
+		// this point) so a subnets-only edit refreshes relay pools against
+		// the current local pool, not the startup snapshot.
+		localPoolFn: func() (dhcp.SubnetPoolInput, bool) {
+			s, err := settingsAPI.EffectiveDHCP(runCtx)
+			if err != nil || s.Mode != config.DHCPModeFull {
+				return dhcp.SubnetPoolInput{}, false
+			}
+			return dhcp.SubnetPoolInput{
+				Start: s.Start, End: s.End, Netmask: s.Netmask,
+				Gateway: s.Gateway, DNS: s.DNS,
+				LeaseSec: uint32(s.LeaseHours) * 3600, Exclude: s.Exclude,
+			}, true
+		},
 		logger: logger.With("component", "dhcp-reload"),
 	}
-	settingsAPI := settings.NewAPI(settingsStore, cfg, logger.With("component", "settings-api")).
-		WithReloader(reloader)
+	settingsAPI = settingsAPI.WithReloader(reloader)
+	subnetAPI = subnetAPI.WithDHCPReload(reloader.reloadFromSubnets)
 
 	httpSrv, err := httpd.New(httpd.Config{
 		ListenAddr:       cfg.HTTPAddr,
@@ -662,4 +779,25 @@ func run() int {
 		}
 	}
 	return 0
+}
+
+// netmaskOf converts "192.168.1.0/24" → "255.255.255.0" for dhcp.SubnetPoolInput.
+func netmaskOf(cidr string) string {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil || !prefix.Addr().Is4() {
+		return ""
+	}
+	m := net.CIDRMask(prefix.Bits(), 32)
+	return net.IP(m).String()
+}
+
+// mustListSubnets is the startup-time List: a DB failure here should abort
+// boot (relay pools would silently vanish), not limp along half-configured.
+func mustListSubnets(ctx context.Context, store *subnets.Store, logger *slog.Logger) []subnets.Subnet {
+	subs, err := store.List(ctx)
+	if err != nil {
+		logger.Error("list subnets at boot", "err", err)
+		os.Exit(1)
+	}
+	return subs
 }

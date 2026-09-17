@@ -80,6 +80,13 @@ type DHCPReloader interface {
 	ReloadDHCP(ctx context.Context, s DHCPSettings) error
 }
 
+// EffectiveDHCP is the exported form of the merged boot-config + override
+// view, used by cmd/controller's reloader to rebuild relay pools against
+// the *current* local pool on subnets-only edits.
+func (a *API) EffectiveDHCP(ctx context.Context) (DHCPSettings, error) {
+	return a.effectiveDHCP(ctx)
+}
+
 func NewAPI(store *Store, bootCfg *config.Config, logger *slog.Logger) *API {
 	return &API{store: store, bootCfg: bootCfg, logger: logger}
 }

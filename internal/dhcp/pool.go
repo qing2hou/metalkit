@@ -17,6 +17,11 @@ type Pool struct {
 	DNS      []netip.Addr
 	Exclude  map[string]struct{}
 	LeaseSec uint32 // option 51
+
+	// selectors are the relay match keys this pool serves (see pools.go).
+	// Empty for the local pool; populated only by NewSubnetPools, never by
+	// the plain single-pool path.
+	selectors []netip.Prefix
 }
 
 // NewPool validates each input and returns a Pool ready for the server to
@@ -74,4 +79,19 @@ func (p *Pool) Contains(ip netip.Addr) bool {
 		return false
 	}
 	return ip.Compare(p.Start) >= 0 && ip.Compare(p.End) <= 0
+}
+
+// ContainsKey reports whether ip is inside this pool's *network* (start's
+// subnet under the pool netmask). NewSubnetPools uses it to reject relay
+// selectors that could never match, e.g. selector 192.168.1.10 against a
+// pool leasing 192.168.10.150-200.
+func (p *Pool) ContainsKey(ip netip.Addr) bool {
+	if !ip.Is4() || !p.Netmask.Is4() {
+		return false
+	}
+	masked := func(a netip.Addr) [4]byte {
+		ha, hm := a.As4(), p.Netmask.As4()
+		return [4]byte{ha[0] & hm[0], ha[1] & hm[1], ha[2] & hm[2], ha[3] & hm[3]}
+	}
+	return masked(p.Start) == masked(ip)
 }
