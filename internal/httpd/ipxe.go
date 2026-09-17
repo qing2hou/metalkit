@@ -28,6 +28,18 @@ import (
 // removes the most common source). Metalkit does not support LVM root images
 // (rootfs detection skips LVM2_member), so nothing in the install path needs
 // VG auto-activation.
+// ethdevice-timeout=90: live-boot's 9990-networking.sh runs ONE klibc
+// ipconfig per interface with -t $ETHDEV_TIMEOUT (default 15s, no outer
+// retry) and then panics with "Unable to find a live file system on the
+// network". At kernel handoff the NIC is reset (PHY renegotiates) and the
+// switch port re-runs STP, so the first ~30-45s of egress frames from the
+// host are blackholed — a 15s DHCP window can die entirely inside that
+// blackout (Dell R630 reinstall incident 2026-09-17: boot deterministically
+// dropped to (initramfs) with zero DISCOVERs reaching the DHCP server, while
+// a manual `ipconfig eno1` minutes later succeeded instantly). 90s lets
+// ipconfig keep retransmitting DISCOVERs through classic-STP convergence;
+// the cost is a slower failure (90s) only when no DHCP server answers at all.
+//
 // The /boot/* URLs are path-style (/boot/<arch>/<file>) rather than
 // query-style (?arch=) — live-boot's initramfs 9990-mount-http.sh derives the
 // fetch archive type from a sed on the extension suffix and the query string
@@ -38,7 +50,7 @@ import (
 // UART (ttyAMA0). The ttyS0 rationale comment above still applies on arm64
 // — we keep the same serial-only strategy, just the right device.
 const ipxeTemplate = `#!ipxe
-kernel http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/vmlinuz initrd=initrd.img boot=live fetch=http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/filesystem.squashfs ip=dhcp console={{.Console}},115200 metalkit.url=http://{{.ServerIP}}{{.HTTPAddr}} systemd.mask=lvm2-pvscan@.service
+kernel http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/vmlinuz initrd=initrd.img boot=live fetch=http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/filesystem.squashfs ip=dhcp ethdevice-timeout=90 console={{.Console}},115200 metalkit.url=http://{{.ServerIP}}{{.HTTPAddr}} systemd.mask=lvm2-pvscan@.service
 initrd http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/initrd.img
 boot
 `

@@ -59,6 +59,11 @@ func TestIPXEScriptPerArch(t *testing.T) {
 	if !strings.Contains(bodyX, "/boot/amd64/filesystem.squashfs") {
 		t.Errorf("default script missing path-style squashfs URL: %s", bodyX)
 	}
+	// The DHCP window must outlive the post-kernel PHY/STP blackout;
+	// live-boot's default 15s one-shot window dies inside it.
+	if !strings.Contains(bodyX, "ethdevice-timeout=90") {
+		t.Errorf("default script missing ethdevice-timeout: %s", bodyX)
+	}
 }
 
 func TestBootFileArchFallback(t *testing.T) {
