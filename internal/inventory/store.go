@@ -171,6 +171,29 @@ func (s *Store) UpsertReport(ctx context.Context, r *Report) (string, int64, err
 	return uuid, reportID, nil
 }
 
+// ReportedBMCIP returns the BMC IP from the machine's latest report; ""
+// when the machine, the report, or the BMC section is absent. Satisfies
+// bmc.ReportReader (interface declared on the bmc side to avoid an import
+// cycle).
+func (s *Store) ReportedBMCIP(ctx context.Context, uuid string) (string, error) {
+	uuid = strings.ToLower(strings.TrimSpace(uuid))
+	if uuid == "" {
+		return "", nil
+	}
+	var ip sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+        SELECT json_extract(r.body, '$.bmc.ip')
+        FROM machines m LEFT JOIN reports r ON r.id = m.latest_report
+        WHERE m.uuid = ?`, uuid).Scan(&ip)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reported bmc ip: %w", err)
+	}
+	return ip.String, nil
+}
+
 // Heartbeat advances last_seen and inserts a heartbeats row. It does not
 // create machines; an unknown uuid returns ErrNotFound so callers can
 // distinguish a missed registration from a transient error.

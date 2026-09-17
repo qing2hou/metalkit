@@ -51,16 +51,31 @@ type Tester interface {
 	BootForPXE(ctx context.Context, cred PasswordedCredential) error
 }
 
+// ReportReader is the inventory link the reconcile endpoint needs: just the
+// latest-report lookup, so bmc doesn't import inventory (which imports bmc).
+type ReportReader interface {
+	// ReportedBMCIP returns the BMC IP from the machine's latest report, ""
+	// when the machine/report/BMC section is missing.
+	ReportedBMCIP(ctx context.Context, uuid string) (string, error)
+}
+
 // API binds the store to HTTP handlers.
 type API struct {
-	store  *Store
-	logger *slog.Logger
-	tester Tester // optional; nil means /test returns 503
+	store     *Store
+	logger    *slog.Logger
+	tester    Tester       // optional; nil means /test returns 503
+	inventory ReportReader // optional; nil means /reconcile returns 503
 }
 
 // NewAPI constructs an API.
 func NewAPI(store *Store, logger *slog.Logger) *API {
 	return &API{store: store, logger: logger}
+}
+
+// WithInventory wires the latest-report reader used by POST /reconcile.
+func (a *API) WithInventory(r ReportReader) *API {
+	a.inventory = r
+	return a
 }
 
 // WithTester wires an ipmi tester for the POST /test endpoint. If unset, the
@@ -80,6 +95,50 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/bmc/{uuid}/test", a.test)
 	mux.HandleFunc("POST /api/v1/bmc/{uuid}/power/{action}", a.power)
 	mux.HandleFunc("POST /api/v1/bmc/{uuid}/onboard", a.onboard)
+	mux.HandleFunc("POST /api/v1/bmc/{uuid}/reconcile", a.reconcile)
+}
+
+// reconcile pairs a PXE-reported machine with its BMC-menu credential by the
+// BMC IP the agent reported — no reboot, no live image. The UI's machine
+// detail "同步 BMC" button calls this.
+//
+//	POST /api/v1/bmc/{machine_uuid}/reconcile
+//	200 {"ok":true,"migrated":bool,"bmc_ip":"..."}   paired (migrated=false when already paired)
+//	404 no credential registered for the reported BMC IP
+//	409 machine has no report/BMC IP yet
+func (a *API) reconcile(w http.ResponseWriter, r *http.Request) {
+	uuid := r.PathValue("uuid")
+	if a.inventory == nil {
+		writeError(w, http.StatusServiceUnavailable, "inventory store not wired")
+		return
+	}
+	ip, err := a.inventory.ReportedBMCIP(r.Context(), uuid)
+	if err != nil {
+		a.logger.Error("reconcile: latest report", "err", err, "uuid", uuid)
+		writeError(w, http.StatusInternalServerError, "fetch report failed")
+		return
+	}
+	if ip == "" {
+		writeError(w, http.StatusConflict, "machine has no BMC IP in its latest report; let it PXE-report once first")
+		return
+	}
+
+	migrated, err := a.store.ReconcileToMachine(r.Context(), uuid, ip)
+	if errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusNotFound, "no BMC credential registered for reported IP "+ip)
+		return
+	}
+	if err != nil {
+		a.logger.Error("reconcile bmc", "err", err, "uuid", uuid)
+		writeError(w, http.StatusInternalServerError, "reconcile failed: "+err.Error())
+		return
+	}
+	a.logger.Info("bmc reconciled (manual)", "uuid", uuid, "bmc_ip", ip, "migrated", migrated, "by", basicAuthUser(r))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"migrated": migrated,
+		"bmc_ip":   ip,
+	})
 }
 
 func (a *API) list(w http.ResponseWriter, r *http.Request) {

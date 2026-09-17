@@ -126,17 +126,16 @@ async function unbind(): Promise<void> {
 }
 
 async function syncBmc(): Promise<void> {
-  if (!summary.value?.bmc_ip) return
-  const cred = await bmcApi.list().then((l) => l.find((c) => c.ip === summary.value?.bmc_ip))
-  if (!cred) {
-    ElMessage.warning(`未找到 ${summary.value.bmc_ip} 的 BMC 凭据，请先在 BMC 页添加`)
-    return
-  }
   try {
-    await bmcApi.onboard(cred.machine_uuid)
-    ElMessage.success('已下发 PXE 引导，机器将重启进入 live 系统重新上报')
+    const res = await bmcApi.reconcile(uuid.value)
+    if (res.migrated) {
+      ElMessage.success(`已将 ${res.bmc_ip} 的 BMC 凭据对齐到本机`)
+    } else {
+      ElMessage.info('本机与 BMC 凭据已是对齐状态')
+    }
+    await load()
   } catch (err) {
-    ElMessage.error(`操作失败: ${(err as Error).message}`)
+    ElMessage.error(`同步失败: ${(err as Error).message}`)
   }
 }
 

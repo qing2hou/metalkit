@@ -107,6 +107,8 @@ export const bmcApi = {
   update: (uuid: string, input: Record<string, unknown>) =>
     apiSend<BmcCredential>('PUT', `/bmc/${uuid}`, input),
   remove: (uuid: string) => apiSend<null>('DELETE', `/bmc/${uuid}`),
+  reconcile: (uuid: string) =>
+    apiSend<{ ok: boolean; migrated: boolean; bmc_ip: string }>('POST', `/bmc/${uuid}/reconcile`),
   test: (uuid: string) => apiSend<BmcTestResult>('POST', `/bmc/${uuid}/test`, {}),
   power: (uuid: string, action: 'on' | 'off' | 'cycle' | 'soft' | 'reset') =>
     apiSend<BmcActionResult>('POST', `/bmc/${uuid}/power/${action}`, {}),

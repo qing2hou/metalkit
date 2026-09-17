@@ -574,7 +574,8 @@ func run() int {
 		logger.Error("bmc open", "err", err)
 		return 1
 	}
-	bmcAPI := bmc.NewAPI(bmcStore, logger.With("component", "bmc-api"))
+	bmcAPI := bmc.NewAPI(bmcStore, logger.With("component", "bmc-api")).
+		WithInventory(store) // /reconcile reads the latest report's BMC IP
 
 	// Inventory needs the bmc store as a reconciler so a placeholder credential
 	// (registered by IP before the host PXE'd) gets migrated to the real SMBIOS
