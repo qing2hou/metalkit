@@ -98,9 +98,12 @@ func TestSetBootDevicePXE(t *testing.T) {
 		t.Fatalf("calls=%d want 1", len(fr.calls))
 	}
 	args := fr.calls[0].args
-	wantTail := []string{"chassis", "bootdev", "pxe", "options=efiboot"}
+	wantTail := []string{"chassis", "bootdev", "pxe"}
 	if !endsWith(args, wantTail) {
-		t.Errorf("args tail=%v want %v (full=%v)", args[len(args)-4:], wantTail, args)
+		t.Errorf("args tail=%v want %v (full=%v)", args[len(args)-3:], wantTail, args)
+	}
+	if containsString(args, "options=efiboot") {
+		t.Errorf("options=efiboot must not be sent: iDRAC 8 resolves it to a UEFI boot-table entry that can be the hard disk (2026-09-18 double no-PXE incident)")
 	}
 	if !containsAll(args, []string{"-H", "10.0.0.7", "-p", "623", "-I", "lanplus", "-U", "ADMIN", "-E"}) {
 		t.Errorf("args missing standard fields: %v", args)
@@ -119,7 +122,7 @@ func TestSetBootDeviceDisk(t *testing.T) {
 	if err := c.SetBootDevice(context.Background(), sampleCred(), BootDeviceDisk); err != nil {
 		t.Fatalf("SetBootDevice disk: %v", err)
 	}
-	if !endsWith(fr.calls[0].args, []string{"chassis", "bootdev", "disk", "options=efiboot"}) {
+	if !endsWith(fr.calls[0].args, []string{"chassis", "bootdev", "disk"}) {
 		t.Errorf("disk args: %v", fr.calls[0].args)
 	}
 }
@@ -181,19 +184,22 @@ func TestPowerStatusErrorPropagates(t *testing.T) {
 }
 
 func TestBootForPXEComposite(t *testing.T) {
-	fr := &fakeRunner{}
+	// bootdev pxe → (2s settle) → power cycle. An off→on cold-boot variant
+	// was tried and reverted: iDRAC 8 acknowledges the quick `power on`
+	// but silently drops it while the PSU settles (2026-09-18, twice).
+	fr := &fakeRunner{stdout: []byte("Chassis Power is on\n")}
 	c := newClient(t, fr)
 	if err := c.BootForPXE(context.Background(), sampleCred()); err != nil {
 		t.Fatalf("BootForPXE: %v", err)
 	}
 	if len(fr.calls) != 2 {
-		t.Fatalf("calls=%d want 2", len(fr.calls))
+		t.Fatalf("calls=%d want 2 (bootdev, cycle): %v", len(fr.calls), fr.calls)
 	}
-	if !endsWith(fr.calls[0].args, []string{"chassis", "bootdev", "pxe", "options=efiboot"}) {
-		t.Errorf("first call: %v", fr.calls[0].args)
+	if !endsWith(fr.calls[0].args, []string{"chassis", "bootdev", "pxe"}) {
+		t.Errorf("call 0 (bootdev): %v", fr.calls[0].args)
 	}
 	if !endsWith(fr.calls[1].args, []string{"chassis", "power", "cycle"}) {
-		t.Errorf("second call: %v", fr.calls[1].args)
+		t.Errorf("call 1 (cycle): %v", fr.calls[1].args)
 	}
 }
 
@@ -217,7 +223,7 @@ func TestFinalizeBootDisk(t *testing.T) {
 	if len(fr.calls) != 2 {
 		t.Fatalf("calls=%d want 2 (bootdev=disk + power cycle)", len(fr.calls))
 	}
-	if !endsWith(fr.calls[0].args, []string{"chassis", "bootdev", "disk", "options=efiboot"}) {
+	if !endsWith(fr.calls[0].args, []string{"chassis", "bootdev", "disk"}) {
 		t.Errorf("first call: %v", fr.calls[0].args)
 	}
 	if !endsWith(fr.calls[1].args, []string{"chassis", "power", "cycle"}) {

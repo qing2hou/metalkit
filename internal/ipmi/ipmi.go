@@ -112,7 +112,7 @@ func (c *Client) SetBootDevice(ctx context.Context, cred bmc.PasswordedCredentia
 	default:
 		return fmt.Errorf("ipmi: unsupported boot device %q", dev)
 	}
-	_, err := c.run(ctx, cred, "chassis", "bootdev", string(dev), "options=efiboot")
+	_, err := c.run(ctx, cred, "chassis", "bootdev", string(dev))
 	return err
 }
 
@@ -178,6 +178,15 @@ func (c *Client) BootForPXE(ctx context.Context, cred bmc.PasswordedCredential) 
 	if err := c.SetBootDevice(ctx, cred, BootDevicePXE); err != nil {
 		return fmt.Errorf("set bootdev=pxe: %w", err)
 	}
+	// Let the iDRAC commit the one-shot boot flag before the reset —
+	// cycling immediately after bootdev races the BMC's own write.
+	time.Sleep(2 * time.Second)
+	// "cycle", NOT an off→on pair: on iDRAC 8 (R630) a `power on` sent
+	// seconds after `power off` is acknowledged but silently dropped while
+	// the PSU/BMC is still settling, leaving the host dark (verified twice
+	// on 2026-09-18 — both attempts ended with chassis power off and zero
+	// PXE traffic). A plain cycle has never lost the flag once efiboot was
+	// removed (see SetBootDevice).
 	if err := c.PowerCycle(ctx, cred); err != nil {
 		return fmt.Errorf("power cycle: %w", err)
 	}
