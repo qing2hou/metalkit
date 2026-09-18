@@ -152,7 +152,13 @@ async function syncBmc(): Promise<void> {
       else ElMessage.info('本机与 BMC 凭据已是对齐状态')
       await load()
     } catch (err) {
-      ElMessage.error(`同步失败: ${(err as Error).message}`)
+      // Even if the credential on a different key gets 404, it means the credential is actually gone → fall back to the entry form
+      if ((err as Error).message.includes('no BMC credential')) {
+        Object.assign(bmcForm, { ip, username: '', password: '', name: '', port: 623, iface: 'lanplus' })
+        bmcFormVisible.value = true
+      } else {
+        ElMessage.error(`同步失败: ${(err as Error).message}`)
+      }
     }
     return
   }
