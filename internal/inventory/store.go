@@ -270,6 +270,12 @@ type MachineSummary struct {
 	// the latest report's nics[].addresses — the "business IP" an operator
 	// needs right after an install, without opening the full report.
 	IPv4Addresses []string `json:"ipv4_addresses,omitempty"`
+	// InstallIP is the static address the current binding installs onto the
+	// machine. It IS the business address for static installs: the final
+	// report during install comes from the live image on the provisioning
+	// network, so IPv4Addresses shows that temporary PXE address instead.
+	// UIs should prefer InstallIP when set.
+	InstallIP string `json:"install_ip,omitempty"`
 }
 
 // ListMachines returns all machines, most-recently-seen first.
@@ -328,7 +334,51 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate machines: %w", err)
 	}
+
+	// Fill InstallIP from the bindings catalog when it exists (separate
+	// schema package; its table may be absent in minimal/test DBs — the
+	// guard keeps ListMachines self-sufficient). One indexed scan per list
+	// call is cheap next to the machines scan itself.
+	ok, err := s.tableExists(ctx, "bindings")
+	if err != nil {
+		s.logger.Warn("check bindings table", "err", err)
+		return out, nil
+	}
+	if !ok {
+		return out, nil
+	}
+	bindIPs := make(map[string]string, len(out))
+	brows, err := s.db.QueryContext(ctx, `SELECT machine_uuid, static_address FROM bindings WHERE static_address IS NOT NULL AND static_address != ''`)
+	if err != nil {
+		s.logger.Warn("list binding addresses", "err", err)
+		return out, nil
+	}
+	for brows.Next() {
+		var uuid, ip string
+		if err := brows.Scan(&uuid, &ip); err == nil {
+			bindIPs[uuid] = ip
+		}
+	}
+	_ = brows.Close()
+	for i := range out {
+		if ip, ok := bindIPs[out[i].UUID]; ok {
+			out[i].InstallIP = ip
+		}
+	}
 	return out, nil
+}
+
+func (s *Store) tableExists(ctx context.Context, name string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?`, name).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // LatestReport returns the most recent Report for a machine, or ErrNotFound.

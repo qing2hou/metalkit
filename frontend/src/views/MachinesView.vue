@@ -237,7 +237,8 @@ async function remove(row: MachineSummary): Promise<void> {
           </el-table-column>
           <el-table-column label="业务地址" min-width="170">
             <template #default="{ row }">
-              <span v-if="row.ipv4_addresses?.length" class="mono">{{ row.ipv4_addresses.join('， ') }}</span>
+              <span v-if="row.install_ip" class="mono">{{ row.install_ip }}</span>
+              <span v-else-if="row.ipv4_addresses?.length" class="mono">{{ row.ipv4_addresses.join('， ') }}</span>
               <span v-else class="mk-subtle">—</span>
             </template>
           </el-table-column>

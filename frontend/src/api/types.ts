@@ -17,6 +17,8 @@ export interface MachineSummary {
   bmc_ip?: string
   /** 业务 IPv4（去掩码），取自最近一次上报的网卡地址；装机完成后即在此可见。 */
   ipv4_addresses?: string[]
+  /** 当前绑定配置的装机目标 IP（静态方式时即装好后的业务地址，优先于上报地址显示）。 */
+  install_ip?: string
   bmc_managed?: boolean
 }
 
