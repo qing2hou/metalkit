@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { bmcApi, bindingsApi, imagesApi, jobsApi, machinesApi, profilesApi, subnetsApi } from '@/api'
-import type { Binding, Image, Job, Profile, Report, ReportMeta, Subnet } from '@/api/types'
+import type { BmcCredential, Binding, Image, Job, Profile, Report, ReportMeta, Subnet } from '@/api/types'
 import AppShell from '@/components/AppShell.vue'
 import CopyableText from '@/components/CopyableText.vue'
 import InstallDialog from '@/components/InstallDialog.vue'
@@ -125,17 +125,63 @@ async function unbind(): Promise<void> {
   }
 }
 
+// ---- BMC 同步/录入 ----
+// 已录入过凭据：点「同步 BMC」做数据对齐（reconcile）。
+// 未录入：直接在本页弹出录入表单（IP 预填上报值），保存即挂到本机。
+const bmcFormVisible = ref(false)
+const bmcSaving = ref(false)
+const bmcForm = reactive({ ip: '', username: '', password: '', name: '', port: 623, iface: 'lanplus' })
+
 async function syncBmc(): Promise<void> {
+  if (!summary.value?.bmc_ip) {
+    ElMessage.warning('本机还没有上报过 BMC 信息')
+    return
+  }
+  const ip = summary.value.bmc_ip
+  let creds: BmcCredential[] = []
   try {
-    const res = await bmcApi.reconcile(uuid.value)
-    if (res.migrated) {
-      ElMessage.success(`已将 ${res.bmc_ip} 的 BMC 凭据对齐到本机`)
-    } else {
-      ElMessage.info('本机与 BMC 凭据已是对齐状态')
+    creds = await bmcApi.list()
+  } catch {
+    creds = []
+  }
+  const existing = creds.find((c) => c.ip === ip)
+  if (existing) {
+    try {
+      const res = await bmcApi.reconcile(uuid.value)
+      if (res.migrated) ElMessage.success(`已将 ${res.bmc_ip} 的 BMC 凭据对齐到本机`)
+      else ElMessage.info('本机与 BMC 凭据已是对齐状态')
+      await load()
+    } catch (err) {
+      ElMessage.error(`同步失败: ${(err as Error).message}`)
     }
+    return
+  }
+  Object.assign(bmcForm, { ip, username: '', password: '', name: '', port: 623, iface: 'lanplus' })
+  bmcFormVisible.value = true
+}
+
+async function saveBmc(): Promise<void> {
+  if (!bmcForm.username.trim() || !bmcForm.password) {
+    ElMessage.warning('请填写 BMC 用户名和密码')
+    return
+  }
+  bmcSaving.value = true
+  try {
+    await bmcApi.update(uuid.value, {
+      ip: bmcForm.ip.trim(),
+      port: bmcForm.port,
+      username: bmcForm.username.trim(),
+      password: bmcForm.password,
+      ...(bmcForm.name.trim() ? { name: bmcForm.name.trim() } : {}),
+      ipmi_interface: bmcForm.iface,
+    })
+    ElMessage.success('BMC 凭据已录入并关联到本机')
+    bmcFormVisible.value = false
     await load()
   } catch (err) {
-    ElMessage.error(`同步失败: ${(err as Error).message}`)
+    ElMessage.error(`保存失败: ${(err as Error).message}`)
+  } finally {
+    bmcSaving.value = false
   }
 }
 
@@ -409,6 +455,37 @@ function viewHistoryItem(meta: ReportMeta): void {
           </el-collapse-item>
         </el-collapse>
       </el-card>
+
+      <!-- BMC 录入弹窗（同步入口在未录入时打开） -->
+      <el-dialog v-model="bmcFormVisible" title="录入 BMC 凭据" width="440px" destroy-on-close>
+        <el-form label-width="90px">
+          <el-form-item label="BMC IP">
+            <el-input v-model="bmcForm.ip" class="mono" disabled />
+          </el-form-item>
+          <el-form-item label="名称">
+            <el-input v-model="bmcForm.name" placeholder="可选，如 机房A-节点3" />
+          </el-form-item>
+          <el-form-item label="用户名">
+            <el-input v-model="bmcForm.username" placeholder="如 root / ADMIN" />
+          </el-form-item>
+          <el-form-item label="密码">
+            <el-input v-model="bmcForm.password" type="password" show-password />
+          </el-form-item>
+          <el-form-item label="端口">
+            <el-input-number v-model="bmcForm.port" :min="1" :max="65535" />
+          </el-form-item>
+          <el-form-item label="接口">
+            <el-select v-model="bmcForm.iface">
+              <el-option value="lanplus" label="lanplus (IPMI 2.0)" />
+              <el-option value="lan" label="lan (IPMI 1.5)" />
+            </el-select>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="bmcFormVisible = false">取消</el-button>
+          <el-button type="primary" :loading="bmcSaving" @click="saveBmc">保存</el-button>
+        </template>
+      </el-dialog>
 
       <!-- 装机弹窗 -->
       <InstallDialog
