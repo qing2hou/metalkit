@@ -123,22 +123,6 @@ async function save(): Promise<void> {
   if (!valid) return
   saving.value = true
   try {
-    const payload: Record<string, unknown> = {
-      name: form.name.trim(),
-      os_family: form.osFamily.trim(),
-      hostname_template: form.hostnameTemplate.trim(),
-      // 后端 CreateInput 要求 target_disk / network 必填（smallest 时 value 留空）
-      target_disk: {
-        mode: form.diskMode,
-        ...(form.diskMode !== 'smallest' && form.diskValue
-          ? { value: form.diskValue.trim() }
-          : {}),
-      },
-      network: { method: form.netMethod, nic_selector: 'auto' },
-      network_renderer: form.networkRenderer || undefined,
-      bootloader: form.bootloader || undefined,
-    }
-
     // 后端约束：by-* 模式必须带 value
     if (form.diskMode !== 'smallest' && !form.diskValue.trim()) {
       ElMessage.warning('by-wwn / by-path / by-model 模式必须填写匹配值')
@@ -147,16 +131,48 @@ async function save(): Promise<void> {
     }
 
     // 密码：仅在用户填写新明文时提交（先换 hash）
+    const passwordPart: Record<string, unknown> = {}
     if (form.rootPassword) {
       const { hash } = await utilApi.cryptSha512(form.rootPassword)
-      payload.root_password_hash = hash
+      passwordPart.root_password_hash = hash
     }
 
     if (form.id) {
-      await profilesApi.update(form.id, payload)
+      // 更新走 UpdateInput：name 不可改（后端 DisallowUnknownFields 会拒），
+      // os_family / network_renderer / bootloader 是三态字段——仅在用户
+      // 实际选择时提交，留空（回 auto）显式发 ""。
+      await profilesApi.update(form.id, {
+        hostname_template: form.hostnameTemplate.trim(),
+        target_disk: {
+          mode: form.diskMode,
+          ...(form.diskMode !== 'smallest' && form.diskValue
+            ? { value: form.diskValue.trim() }
+            : {}),
+        },
+        network: { method: form.netMethod, nic_selector: 'auto' },
+        network_renderer: form.networkRenderer || '',
+        bootloader: form.bootloader || '',
+        ...passwordPart,
+      })
       ElMessage.success('Profile 已更新')
     } else {
-      await profilesApi.create(payload)
+      // 创建走 CreateInput：name / os_family 必填，target_disk / network
+      // 必填（smallest 时 value 留空）。
+      await profilesApi.create({
+        name: form.name.trim(),
+        os_family: form.osFamily.trim(),
+        hostname_template: form.hostnameTemplate.trim(),
+        target_disk: {
+          mode: form.diskMode,
+          ...(form.diskMode !== 'smallest' && form.diskValue
+            ? { value: form.diskValue.trim() }
+            : {}),
+        },
+        network: { method: form.netMethod, nic_selector: 'auto' },
+        network_renderer: form.networkRenderer || undefined,
+        bootloader: form.bootloader || undefined,
+        ...passwordPart,
+      })
       ElMessage.success('Profile 已创建')
     }
     dialogVisible.value = false
