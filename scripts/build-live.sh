@@ -161,17 +161,17 @@ cp "$LIVE_DIR/binary/live/filesystem.squashfs" "$BOOT_OUT/filesystem.squashfs"
 # NEXT lb build skips the includes.chroot copy stage as "already
 # done" — producing an agentless image that still builds green.
 # (Incident 2026-09-28: two live boots booted silent before this check.)
-if ! unsquashfs -ll "$BOOT_OUT/filesystem.squashfs" 2>/dev/null | grep -q 'usr/local/bin/metalkit-agent'; then
-    # unsquashfs missing → fall back to strings-scan on the inode data
-    if command -v unsquashfs >/dev/null 2>&1; then
-        echo "FATAL: metalkit-agent missing from filesystem.squashfs — build produced a bootable brick." >&2
-        echo "  This happens when a previous build was interrupted and lb skipped the includes copy." >&2
-        echo "  Fix: rm -rf live-image/{chroot,cache,.build,binary} binary && re-run this script." >&2
-        exit 1
-    elif ! strings "$BOOT_OUT/filesystem.squashfs" 2>/dev/null | grep -q 'usr/local/bin/metalkit-agent'; then
-        echo "FATAL: metalkit-agent missing from filesystem.squashfs — build produced a bootable brick." >&2
-        exit 1
-    fi
+#
+# Implementation note: do NOT use `unsquashfs | grep -q` — under this
+# script's `set -o pipefail`, grep -q exits on first match and unsquashfs
+# dies of SIGPIPE(141), which pipefail turns into a false FATAL. Capture the
+# listing to a variable/file first, then grep the complete output.
+SQ_LIST=$(unsquashfs -ll "$BOOT_OUT/filesystem.squashfs" 2>/dev/null || true)
+if ! grep -q 'usr/local/bin/metalkit-agent' <<< "$SQ_LIST"; then
+    echo "FATAL: metalkit-agent missing from filesystem.squashfs — build produced a bootable brick." >&2
+    echo "  This happens when a previous build was interrupted and lb skipped the includes copy." >&2
+    echo "  Fix: rm -rf live-image/{chroot,cache,.build,binary} binary && re-run this script." >&2
+    exit 1
 fi
 
 echo "=== done (backend=$BACKEND) ==="
