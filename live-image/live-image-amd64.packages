@@ -186,7 +186,7 @@ libldap-2.5-0:amd64	2.5.13+dfsg-5
 liblocale-gettext-perl	1.07-5
 liblvm2cmd2.03:amd64	2.03.16-2
 liblz4-1:amd64	1.9.4-1
-liblzma5:amd64	5.4.1-1+deb12u1
+liblzma5:amd64	5.4.1-1+deb12u2
 liblzo2-2:amd64	2.10-2
 libmagic-mgc	1:5.44-3
 libmagic1:amd64	1:5.44-3
@@ -236,7 +236,7 @@ libsmartcols1:amd64	2.38.1-5+deb12u3
 libsqlite3-0:amd64	3.40.1-2+deb12u2
 libss2:amd64	1.47.0-2+b2
 libssh2-1:amd64	1.10.0-3+deb12u1
-libssl3:amd64	3.0.20-1~deb12u2
+libssl3:amd64	3.0.22-1~deb12u1
 libstdc++6:amd64	12.2.0-14+deb12u1
 libsystemd-shared:amd64	252.39-1~deb12u2
 libsystemd0:amd64	252.39-1~deb12u2
@@ -298,7 +298,7 @@ nvme-cli	2.4+really2.3-3
 openssh-client	1:9.2p1-2+deb12u10
 openssh-server	1:9.2p1-2+deb12u10
 openssh-sftp-server	1:9.2p1-2+deb12u10
-openssl	3.0.20-1~deb12u2
+openssl	3.0.22-1~deb12u1
 parted	3.5-3
 passwd	1:4.13+dfsg1-1+deb12u2
 pci.ids	0.0~2023.04.11-1
@@ -329,7 +329,7 @@ sysvinit-utils	3.06-4
 tar	1.34+dfsg-1.2+deb12u1
 tasksel	3.73
 tasksel-data	3.73
-tzdata	2026b-0+deb12u1
+tzdata	2026c-0+deb12u1
 ucf	3.0043+nmu1+deb12u1
 udev	252.39-1~deb12u2
 usr-is-merged	37~deb12u1
@@ -344,6 +344,6 @@ whois	5.5.17
 wireless-regdb	2026.05.30-1~deb12u1
 xfsprogs	6.1.0-1
 xorriso	1.5.4-4
-xz-utils	5.4.1-1+deb12u1
+xz-utils	5.4.1-1+deb12u2
 zlib1g:amd64	1:1.2.13.dfsg-1
 zstd	1.5.4+dfsg2-5

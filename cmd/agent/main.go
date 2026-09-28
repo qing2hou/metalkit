@@ -97,11 +97,14 @@ func run() int {
 	}
 	logger.Info("agent: report accepted", "uuid", uuid)
 
-	// Convert inventory NICs to installer NICInfo for bond slave MAC resolution.
+	// Convert inventory NICs to installer NICInfo for bond slave MAC resolution
+	// and auto NIC-picking. Driver matters: BMC virtual NICs (iDRAC etc.) are
+	// USB CDC devices whose names collide with kernel ethN numbering in the
+	// installed OS, so the installer skips them via IsVirtual().
 	installerNICs := make([]installer.NICInfo, 0, len(report.NICs))
 	for _, n := range report.NICs {
 		if n.Name != "" && n.MAC != "" {
-			installerNICs = append(installerNICs, installer.NICInfo{Name: n.Name, MAC: n.MAC})
+			installerNICs = append(installerNICs, installer.NICInfo{Name: n.Name, MAC: n.MAC, Driver: n.Driver, Link: n.Link})
 		}
 	}
 

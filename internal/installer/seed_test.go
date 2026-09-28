@@ -317,9 +317,66 @@ func TestRenderNetworkConfig_Auto(t *testing.T) {
 		NICSelector: "auto",
 	}
 	b := bindings.Binding{StaticAddress: "10.0.0.5"}
+	// No NIC inventory → wildcard name fallback stays.
 	got := renderNetworkConfig(nc, b, nil, false)
 	if !strings.Contains(got, `name: "en*"`) {
 		t.Fatalf("auto selector must produce en* match:\n%s", got)
+	}
+}
+
+// TestRenderNetworkConfig_AutoPinsPhysicalMAC is the regression test for the
+// 2026-09-28 incident: auto NIC selection hardcoded a name matcher, and with
+// net.ifnames=0 the iDRAC USB NIC (cdc_ether) enumerated as eth0 before the
+// real PCI NICs — the business VLAN+static IP landed on the management
+// passthrough port. With NIC inventory present, auto must pin a physical
+// NIC's MAC and never match the virtual one.
+func TestRenderNetworkConfig_AutoPinsPhysicalMAC(t *testing.T) {
+	nc := profiles.NetworkConfig{
+		Method:      "static",
+		PrefixLen:   24,
+		Gateway:     "10.0.0.1",
+		NICSelector: "auto",
+	}
+	b := bindings.Binding{StaticAddress: "10.0.0.5"}
+	nics := []NICInfo{
+		{Name: "idrac", MAC: "64:00:6a:c2:bf:e3", Driver: "cdc_ether", Link: true},  // BMC virtual
+		{Name: "eno1", MAC: "f8:bc:12:50:53:c0", Driver: "tg3", Link: true},         // physical, link-up
+		{Name: "eno2", MAC: "f8:bc:12:50:53:c1", Driver: "tg3"},                     // physical, no link
+	}
+	got := renderNetworkConfig(nc, b, nics, false)
+	if !strings.Contains(got, `macaddress: "f8:bc:12:50:53:c0"`) {
+		t.Fatalf("auto must pin the link-up physical NIC's MAC:\n%s", got)
+	}
+	if strings.Contains(got, "64:00:6a") {
+		t.Fatalf("auto must never match the BMC virtual NIC:\n%s", got)
+	}
+}
+
+func TestPickPhysicalNIC_SkipsVirtualAndPrefersLinkUp(t *testing.T) {
+	nics := []NICInfo{
+		{Name: "idrac", MAC: "64:00:6a:c2:bf:e3", Driver: "cdc_ether", Link: true},
+		{Name: "eno1", MAC: "aa:aa:aa:aa:aa:01", Driver: "tg3"},                     // first physical, no link
+		{Name: "eno2", MAC: "aa:aa:aa:aa:aa:02", Driver: "tg3", Link: true},         // link-up physical
+	}
+	got, ok := pickPhysicalNIC(nics)
+	if !ok {
+		t.Fatal("expected a pick from mixed inventory")
+	}
+	if got.MAC != "aa:aa:aa:aa:aa:02" {
+		t.Fatalf("want link-up eno2, got %+v", got)
+	}
+
+	// No link anywhere → first physical wins, still not the virtual one.
+	nics[2].Link = false
+	got, _ = pickPhysicalNIC(nics)
+	if got.MAC != "aa:aa:aa:aa:aa:01" {
+		t.Fatalf("want first physical eno1 when no link, got %+v", got)
+	}
+
+	// Virtual-only inventory → no pick (caller falls back to wildcard).
+	got, ok = pickPhysicalNIC([]NICInfo{{Name: "idrac", MAC: "64:00:6a:c2:bf:e3", Driver: "cdc_ether"}})
+	if ok {
+		t.Fatalf("virtual-only inventory must not pick, got %+v", got)
 	}
 }
 

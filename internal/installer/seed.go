@@ -314,6 +314,36 @@ func renderNetworkConfig(nc profiles.NetworkConfig, b bindings.Binding, nics []N
 //
 // Auto mode (or no live match) falls back to "eth0" — netplan treats it as a
 // logical alias of any en* device via the wildcard matcher.
+// pickPhysicalNIC resolves which real NIC the business network should bind
+// to, as a MAC address (empty = unknown). Interface names are NOT stable
+// across the three stages (live=eno1/idrac, installed with net.ifnames=0 →
+// eth0..N — where the BMC's USB NIC may enumerate as eth0 BEFORE the real
+// PCI NICs, installed with predictable names → ens1f0), but the MAC is.
+// Every renderer (netplan / NM keyfile / sysconfig / ENI) can match on MAC,
+// so MAC is the one anchor the installer relies on end to end.
+//
+// Preference order: first LINK-UP physical NIC, else the first physical NIC
+// reported. Virtual/BMC ports (see NICInfo.IsVirtual) are skipped — binding
+// the business IP to iDRAC's passthrough port is exactly the 2026-09-28
+// incident (business VLAN 40 + static IP landed on eth0 = iDRAC USB NIC,
+// while the real ports freeloaded on DHCP).
+func pickPhysicalNIC(nics []NICInfo) (NICInfo, bool) {
+	var first NICInfo
+	found := false
+	for _, n := range nics {
+		if n.IsVirtual() || n.MAC == "" {
+			continue
+		}
+		if !found {
+			first, found = n, true
+		}
+		if n.Link {
+			return n, true
+		}
+	}
+	return first, found
+}
+
 func resolveSingleNICKey(selector string, nics []NICInfo, rhel7 bool) string {
 	switch {
 	case strings.HasPrefix(selector, "by-mac:"):
@@ -363,10 +393,20 @@ func renderNetworkConfigSingle(nc profiles.NetworkConfig, b bindings.Binding, ni
 		sb.WriteString("    match:\n")
 		fmt.Fprintf(&sb, "      name: %q\n", name)
 	default:
-		// auto: match any en* nic. Netplan demands at least one matcher
-		// when the device name (metalkit0) is virtual.
-		sb.WriteString("    match:\n")
-		sb.WriteString("      name: \"en*\"\n")
+		// auto: match by MAC of the picked physical NIC when the agent
+		// reported one. A bare name wildcard ("en*") or a hardcoded eth0
+		// would race the installed OS's naming (net.ifnames=0 renumbers
+		// everything and the BMC's USB NIC can enumerate as eth0 before
+		// the real PCI NICs — incident 2026-09-28). MAC is the only
+		// stable anchor; the wildcard is the last-resort fallback for
+		// missing inventory data.
+		if picked, ok := pickPhysicalNIC(nics); ok {
+			sb.WriteString("    match:\n")
+			fmt.Fprintf(&sb, "      macaddress: %q\n", strings.ToLower(picked.MAC))
+		} else {
+			sb.WriteString("    match:\n")
+			sb.WriteString("      name: \"en*\"\n")
+		}
 	}
 	if nc.VLAN > 0 {
 		// Physical NIC is L2-only; IP config goes on the VLAN sub-if.
@@ -681,7 +721,11 @@ func writeENIInterfaces(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 		_ = deps.FS.MkdirAll(ifDir, 0o755)
 	}
 
-	// Resolve the interface name.
+	// Resolve the interface name. by-mac/by-name select the NIC explicitly;
+	// auto falls back to the first physical NIC in the live inventory —
+	// ifcfg-style names (ethN) are rewritten by the installed kernel
+	// (net.ifnames=0) and the BMC USB NIC often takes eth0, so we never
+	// hardcode a bare "eth0" here.
 	dev := "eth0"
 	switch {
 	case strings.HasPrefix(nc.NICSelector, "by-mac:"):
@@ -703,6 +747,10 @@ func writeENIInterfaces(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 			}
 		} else if name != "" {
 			dev = name
+		}
+	default:
+		if picked, ok := pickPhysicalNIC(nics); ok {
+			dev = picked.Name
 		}
 	}
 
@@ -883,6 +931,13 @@ func writeWickedIfcfg(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bi
 		} else if name != "" {
 			dev = name
 		}
+	default:
+		// auto: pin the first physical NIC by MAC (LLADDR). Bare dev
+		// names are unstable across live → installed renaming.
+		if picked, ok := pickPhysicalNIC(nics); ok {
+			hwaddr = strings.ToLower(picked.MAC)
+			dev = picked.Name
+		}
 	}
 
 	var lines []string
@@ -1027,9 +1082,11 @@ func ternary(cond bool, a, b string) string {
 //     installed OS will produce. HWADDR pins the IP to the right NIC even
 //     if the index ends up off by one.
 //   - by-name:<MAC>: same handling as by-mac when name is a MAC.
-//   - everything else (auto / by-name with a real ifname): fall back to
-//     ifcfg-eth0 with no HWADDR — agent picks the first up NIC at the
-//     installed OS layer too, so the alphabetical first ethN wins.
+//   - auto: pick the first link-up physical NIC from the live inventory
+//     (skipping BMC USB virtual ports via NICInfo.IsVirtual) and pin it with
+//     HWADDR. Never bare ifcfg-eth0: net.ifnames=0 renumbers NICs at boot and
+//     the iDRAC USB NIC often takes eth0, which would put the business IP on
+//     the management passthrough port (incident 2026-09-28).
 func writeIfcfg(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo) {
 	sysDir := filepath.Join(mntRoot, "etc", "sysconfig", "network-scripts")
 	if !deps.FS.Exists(sysDir) {
@@ -1037,8 +1094,6 @@ func writeIfcfg(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings
 	}
 
 	// Resolve the target MAC + post-install eth index from the live NIC list.
-	// When the selector doesn't pick a specific NIC (auto), we fall back to
-	// eth0 with no HWADDR so initscripts simply use the first NIC.
 	mac := ""
 	ethIdx := 0
 	switch {
@@ -1048,6 +1103,18 @@ func writeIfcfg(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings
 		nm := strings.TrimPrefix(nc.NICSelector, "by-name:")
 		if isValidMAC(nm) {
 			mac = strings.ToLower(nm)
+		}
+	default:
+		// auto: pin the first physical NIC. ethIdx follows the live list
+		// order only for the FILE NAME (cosmetic); HWADDR is what binds.
+		if picked, ok := pickPhysicalNIC(nics); ok {
+			mac = strings.ToLower(picked.MAC)
+			for i, n := range nics {
+				if strings.ToLower(n.MAC) == mac {
+					ethIdx = i
+					break
+				}
+			}
 		}
 	}
 	if mac != "" {
