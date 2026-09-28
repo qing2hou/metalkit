@@ -74,9 +74,13 @@ const selectedProfile = computed(() => props.profiles.find((p) => p.id === form.
 //   dhcp   → 由 DHCP 取址，绝不分配静态地址
 const profileUsesStatic = computed(() => selectedProfile.value?.network?.method === 'static')
 
-// profile → 联动默认值（对应旧版 profile→subnet 联动）
-watch(selectedProfile, (p) => {
+// profile → 联动默认值（用户手动切换 profile 时）。弹窗打开时的预填
+// 会赋 form.profileId 并间接触发本 watch——此时不能让 profile 默认值
+// 覆盖刚回填的上次装机配置，用 prefilling 标志跳过这一拍。
+let prefilling = false
+watch(selectedProfile, (p, old) => {
   if (!p) return
+  if (prefilling || old === undefined) return
   // 地址方式跟随 profile：静态 profile 默认静态（留空自动分配），
   // DHCP profile 固定 DHCP；切换 profile 时清掉不属于该方式的输入。
   if (p.network?.method === 'dhcp') {
@@ -95,21 +99,23 @@ watch(selectedProfile, (p) => {
   }
 })
 
-// 打开时用现有 binding 初始化
+// 打开时用现有 binding 初始化：binding 里存的就是「上次装机的配置」
+// （image/profile/子网/静态 IP/目标盘/NIC/bond 都是装机时下发并被
+// Upsert 持久化的），全部预填回来，用户在拷贝上改即可，不用重选。
 watch(
   () => props.modelValue,
   (open) => {
     if (!open) return
-    form.imageId = props.binding?.image_id ?? ''
-    form.profileId = props.binding?.profile_id ?? ''
-    form.desiredState = isReinstall.value
-      ? 'reinstall'
-      : ((props.binding?.desired_state as 'install') ?? 'install')
-    form.subnetId = props.binding?.subnet_id ?? ''
-    if (props.binding?.static_address) {
+    prefilling = true
+    const b = props.binding
+    form.imageId = b?.image_id ?? ''
+    form.profileId = b?.profile_id ?? ''
+    form.desiredState = isReinstall.value ? 'reinstall' : ((b?.desired_state as 'install') ?? 'install')
+    form.subnetId = b?.subnet_id ?? ''
+    if (b?.static_address) {
       form.ipMode = 'static'
-      form.staticIp = props.binding.static_address
-    } else if (props.binding?.subnet_id && selectedProfile.value?.network?.method === 'static') {
+      form.staticIp = b.static_address
+    } else if (b?.subnet_id && selectedProfile.value?.network?.method === 'static') {
       // 静态 profile：留空即"自动分配"，交给后端探测挑地址
       form.ipMode = 'static'
       form.staticIp = ''
@@ -119,17 +125,41 @@ watch(
     }
     form.usePasswordOverride = false
     form.rootPassword = ''
-    form.nicMode = 'auto'
-    form.nicMac = ''
-    // binding 只覆盖 ip/subnet；bond 配置来自 profile，弹窗内可再覆盖
-    const pbond = selectedProfile.value?.network?.bond ?? null
-    form.useBond = Boolean(pbond)
-    form.bondMode = pbond?.mode ?? 'active-backup'
-    form.bondSlaves = pbond?.slaves ?? []
-    form.bondMiimon = pbond?.miimon ?? 100
-    form.bondLacpRate = pbond?.lacp_rate ?? ''
-    form.bondXmitHashPolicy = pbond?.xmit_hash_policy ?? ''
-    form.bondPrimary = pbond?.primary ?? ''
+    // 目标盘：上次的覆盖值优先；无覆盖（smallest）回退 profile 默认
+    if (b?.target_disk) {
+      form.diskMode = (['smallest', 'by-wwn', 'by-path', 'by-model'] as const).includes(
+        b.target_disk.mode as 'smallest',
+      )
+        ? (b.target_disk.mode as 'smallest' | 'by-wwn' | 'by-path' | 'by-model')
+        : 'smallest'
+      form.diskValue = b.target_disk.value ?? ''
+    } else {
+      form.diskMode = selectedProfile.value?.target_disk?.mode as typeof form.diskMode ?? 'smallest'
+      form.diskValue = selectedProfile.value?.target_disk?.value ?? ''
+    }
+    // NIC：上次 by-mac 覆盖则带回
+    const nicSel = b?.nic_selector_override ?? ''
+    if (nicSel.startsWith('by-mac:')) {
+      form.nicMode = 'mac'
+      form.nicMac = nicSel.slice('by-mac:'.length)
+    } else {
+      form.nicMode = 'auto'
+      form.nicMac = ''
+    }
+    // Bond：上次 binding 级覆盖优先，无覆盖回退 profile 默认
+    const bond = b?.bond ?? selectedProfile.value?.network?.bond ?? null
+    form.useBond = Boolean(bond)
+    form.bondMode = bond?.mode ?? 'active-backup'
+    form.bondSlaves = bond?.slaves ?? []
+    form.bondMiimon = bond?.miimon ?? 100
+    form.bondLacpRate = bond?.lacp_rate ?? ''
+    form.bondXmitHashPolicy = bond?.xmit_hash_policy ?? ''
+    form.bondPrimary = bond?.primary ?? ''
+    // 等这一拍 selectedProfile watch flush 后再放开联动（flush:'post' 的
+    // watch 在 nextTick 前后触发，setTimeout 0 足够排在其后）。
+    setTimeout(() => {
+      prefilling = false
+    }, 0)
   },
 )
 
