@@ -195,6 +195,11 @@ func needsAuth(path string) bool {
 		return true
 	case path == "/api/v1/jobs", strings.HasPrefix(path, "/api/v1/jobs/"):
 		return true
+	case path == "/api/v1/metrics", strings.HasPrefix(path, "/api/v1/metrics/"):
+		// Operator-side metrics queries (monitoring dashboards). The agent
+		// push lives under /api/v1/agent/metrics, which — like the other
+		// /api/v1/agent/* paths — stays open for credential-less monitors.
+		return true
 	case path == "/api/v1/util", strings.HasPrefix(path, "/api/v1/util/"):
 		return true
 	case path == "/api/v1/settings", strings.HasPrefix(path, "/api/v1/settings/"):

@@ -1463,3 +1463,171 @@ func TestBuildSeed_NoCloudInit_Bond_NMKeyfiles(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildSeed_NM_Bond_VLAN_MasterL2Only is the regression test for the
+// 2026-09-28 Rocky incident: with a VLAN on top of the bond, the bond master
+// keyfile must NOT carry the static IP — the IP lives on the VLAN keyfile.
+// Duplicate IP on bond0 AND bond0.40 wedged routing (gateway unreachable).
+func TestBuildSeed_NM_Bond_VLAN_MasterL2Only(t *testing.T) {
+	fs := newMockFS()
+	exec := newMockExec()
+	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="rocky"` + "\n")
+	fs.files["/mnt/root/etc/shadow"] = []byte("root:$6$old:19000:0:99999:7:::\n")
+	deps := Deps{
+		Exec: exec,
+		FS:   fs,
+		NICs: []NICInfo{
+			{Name: "eno1", MAC: "AA:BB:CC:DD:EE:01"},
+			{Name: "eno2", MAC: "AA:BB:CC:DD:EE:02"},
+		},
+	}
+
+	spec := jobs.InstallSpec{
+		Profile: profiles.Profile{OSFamily: "rhel",
+			HostnameTemplate: "node-{uuid8}",
+			RootPasswordHash: "$6$hash",
+			Network: profiles.NetworkConfig{
+				Method:    "static",
+				PrefixLen: 24,
+				Gateway:   "172.16.40.1",
+				DNS:       []string{"223.5.5.5"},
+				VLAN:      40,
+				Bond: &profiles.BondConfig{
+					Mode:   "802.3ad",
+					Slaves: []string{"by-name:eno1", "by-name:eno2"},
+				},
+			},
+		},
+		Binding: bindings.Binding{
+			MachineUUID:   "abcdef01-0000-0000-0000-000000000000",
+			StaticAddress: "172.16.40.2",
+		},
+	}
+
+	if err := BuildSeed(context.Background(), deps, spec, "/mnt/root"); err != nil {
+		t.Fatalf("BuildSeed failed: %v", err)
+	}
+
+	bondData, ok := fs.files["/mnt/root/etc/NetworkManager/system-connections/bond0.nmconnection"]
+	if !ok {
+		t.Fatal("bond0.nmconnection not written")
+	}
+	bondStr := string(bondData)
+	if strings.Contains(bondStr, "[ipv4]") || strings.Contains(bondStr, "address1=") {
+		t.Errorf("bond0 master must stay L2-only when a VLAN sits on top:\n%s", bondStr)
+	}
+	if !strings.Contains(bondStr, "mode=802.3ad") {
+		t.Errorf("bond0 missing 802.3ad mode:\n%s", bondStr)
+	}
+
+	vlanData, ok := fs.files["/mnt/root/etc/NetworkManager/system-connections/bond0.40.nmconnection"]
+	if !ok {
+		t.Fatal("bond0.40.nmconnection (VLAN) not written")
+	}
+	vlanStr := string(vlanData)
+	for _, sub := range []string{"type=vlan", "parent=bond0", "id=40", "address1=172.16.40.2/24", "gateway=172.16.40.1"} {
+		if !strings.Contains(vlanStr, sub) {
+			t.Errorf("bond0.40 VLAN keyfile missing %q:\n%s", sub, vlanStr)
+		}
+	}
+}
+
+// TestBuildSeed_Sysconfig_Bond_VLAN verifies the RHEL7 ifcfg bond path: with
+// a VLAN, the master ifcfg-bond0 stays L2-only and ifcfg-bond0.<vlan> carries
+// the static IP.
+func TestBuildSeed_Sysconfig_Bond_VLAN(t *testing.T) {
+	fs := newMockFS()
+	if err := fs.MkdirAll("/mnt/root/etc", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fs.files["/mnt/root/etc/os-release"] = []byte("ID=\"centos\"\nVERSION_ID=\"7\"\n")
+	deps := Deps{
+		Exec: newMockExec(),
+		FS:   fs,
+		NICs: []NICInfo{
+			{Name: "eno1", MAC: "aa:bb:cc:dd:ee:01"},
+			{Name: "eno2", MAC: "aa:bb:cc:dd:ee:02"},
+		},
+	}
+	spec := jobs.InstallSpec{
+		Profile: profiles.Profile{OSFamily: "rhel7",
+			HostnameTemplate: "c7-{uuid8}",
+			RootPasswordHash: "$6$h$" + strings.Repeat("b", 86),
+			Network: profiles.NetworkConfig{
+				Method:    "static",
+				PrefixLen: 24,
+				Gateway:   "172.16.40.1",
+				VLAN:      40,
+				Bond: &profiles.BondConfig{
+					Mode:   "active-backup",
+					Slaves: []string{"eno1", "eno2"},
+				},
+			},
+		},
+		Binding: bindings.Binding{
+			MachineUUID:   "deadbeef000000000000000000000000",
+			StaticAddress: "172.16.40.5",
+		},
+	}
+
+	if err := BuildSeed(context.Background(), deps, spec, "/mnt/root"); err != nil {
+		t.Fatalf("BuildSeed failed: %v", err)
+	}
+
+	sysDir := "/mnt/root/etc/sysconfig/network-scripts"
+	master, ok := fs.files[sysDir+"/ifcfg-bond0"]
+	if !ok {
+		t.Fatal("ifcfg-bond0 not written")
+	}
+	if strings.Contains(string(master), "IPADDR=") {
+		t.Errorf("bond0 master ifcfg must not carry IPADDR with VLAN on top:\n%s", master)
+	}
+
+	vlan, ok := fs.files[sysDir+"/ifcfg-bond0.40"]
+	if !ok {
+		t.Fatal("ifcfg-bond0.40 (VLAN) not written")
+	}
+	for _, sub := range []string{"VLAN=yes", "PHYSDEV=bond0", "IPADDR=172.16.40.5", "GATEWAY=172.16.40.1"} {
+		if !strings.Contains(string(vlan), sub) {
+			t.Errorf("ifcfg-bond0.40 missing %q:\n%s", sub, vlan)
+		}
+	}
+}
+
+// TestWriteENIInterfacesBond_VLAN verifies the ENI bond path writes the VLAN
+// stanza and keeps the bond master L2-only.
+func TestWriteENIInterfacesBond_VLAN(t *testing.T) {
+	fs := newMockFS()
+	deps := Deps{FS: fs}
+	nc := profiles.NetworkConfig{
+		Method:    "static",
+		PrefixLen: 24,
+		Gateway:   "172.16.40.1",
+		DNS:       []string{"223.5.5.5"},
+		VLAN:      40,
+		Bond: &profiles.BondConfig{
+			Mode:   "802.3ad",
+			Slaves: []string{"eno1", "eno2"},
+		},
+	}
+	b := bindings.Binding{StaticAddress: "172.16.40.9"}
+
+	writeENIInterfacesBond(deps, "/mnt/root", nc, b, nil)
+
+	data, ok := fs.files["/mnt/root/etc/network/interfaces"]
+	if !ok {
+		t.Fatal("interfaces not written")
+	}
+	content := string(data)
+	if !strings.Contains(content, "iface bond0 inet manual") {
+		t.Errorf("bond0 must be inet manual (L2-only) with VLAN on top:\n%s", content)
+	}
+	if strings.Contains(content, "iface bond0 inet static") {
+		t.Errorf("bond0 must not hold the static IP:\n%s", content)
+	}
+	for _, sub := range []string{"auto bond0.40", "iface bond0.40 inet static", "address 172.16.40.9", "gateway 172.16.40.1", "vlan-raw-device bond0"} {
+		if !strings.Contains(content, sub) {
+			t.Errorf("ENI bond VLAN stanza missing %q:\n%s", sub, content)
+		}
+	}
+}

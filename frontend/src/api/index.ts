@@ -13,6 +13,8 @@ import type {
   Job,
   JobLog,
   MachineSummary,
+  MonitorHistoryItem,
+  MonitorSample,
   Profile,
   ProfileComponents,
   Report,
@@ -132,6 +134,14 @@ export const jobsApi = {
   cancel: (id: string) => apiSend<null>('POST', `/jobs/${id}/cancel`, {}),
   remove: (id: string) => apiSend<null>('DELETE', `/jobs/${id}`),
   purge: () => apiSend<{ deleted: number }>('POST', '/jobs/purge', {}),
+}
+
+// ---------- metrics ----------
+
+export const metricsApi = {
+  latest: () => apiGet<MonitorSample[]>('/metrics'),
+  history: (uuid: string, limit = 60) =>
+    apiGet<MonitorHistoryItem[]>(`/metrics/${uuid}?limit=${limit}`),
 }
 
 // ---------- settings ----------

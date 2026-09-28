@@ -30,6 +30,7 @@ import (
 	"metalkit/internal/ipxebin"
 	"metalkit/internal/jobs"
 	"metalkit/internal/leases"
+	"metalkit/internal/monitor"
 	"metalkit/internal/profiles"
 	"metalkit/internal/sessions"
 	"metalkit/internal/settings"
@@ -626,6 +627,17 @@ func run() int {
 
 	utilAPI := util.NewAPI(logger.With("component", "util-api"))
 
+	// Monitor (metrics-only agent) ingestion: samples pushed by implanted
+	// monitors land in machine_samples; a GC loop prunes them past the
+	// retention window. Shares the controller's SQLite handle.
+	monitorStore, err := monitor.NewStore(ctx, db, logger.With("component", "monitor"))
+	if err != nil {
+		logger.Error("monitor open", "err", err)
+		return 1
+	}
+	go monitorStore.GCLoop(runCtx, monitor.JanitorInterval)
+	monitorAPI := monitor.NewAPI(monitorStore, logger.With("component", "monitor-api"))
+
 	// Browser-UI sessions (cookie auth). Basic Auth keeps working for curl
 	// and agents; the cookie path is what makes the form-based login page
 	// usable. GC loop runs every hour to evict expired rows.
@@ -711,6 +723,7 @@ func run() int {
 		BMC:              bmcAPI,
 		Jobs:             jobsAPI,
 		AgentJobs:        agentJobsAPI,
+		Monitor:          monitorAPI,
 		Util:             utilAPI,
 		Settings:         settingsAPI,
 		Audit:            auditAPI,

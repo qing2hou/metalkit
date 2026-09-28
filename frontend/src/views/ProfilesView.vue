@@ -36,6 +36,8 @@ const form = reactive({
   // 静态配置细节由 binding 覆盖；profile 侧只存默认
   networkRenderer: '',
   bootloader: '',
+  // 装机时植入监控 agent（可选，非必填）
+  agentInstalled: false,
   // 组件选项
   componentOptions: null as ProfileComponents | null,
 })
@@ -91,6 +93,7 @@ function openCreate(): void {
     netMethod: 'dhcp',
     networkRenderer: '',
     bootloader: '',
+    agentInstalled: false,
     componentOptions: null,
   })
   dialogVisible.value = true
@@ -109,6 +112,7 @@ function openEdit(row: Profile): void {
     netMethod: row.network?.method ?? 'dhcp',
     networkRenderer: row.network_renderer ?? '',
     bootloader: row.bootloader ?? '',
+    agentInstalled: row.agent_installed ?? false,
     componentOptions: null,
   })
   dialogVisible.value = true
@@ -152,6 +156,7 @@ async function save(): Promise<void> {
         network: { method: form.netMethod, nic_selector: 'auto' },
         network_renderer: form.networkRenderer || '',
         bootloader: form.bootloader || '',
+        agent_installed: form.agentInstalled,
         ...passwordPart,
       })
       ElMessage.success('Profile 已更新')
@@ -171,6 +176,7 @@ async function save(): Promise<void> {
         network: { method: form.netMethod, nic_selector: 'auto' },
         network_renderer: form.networkRenderer || undefined,
         bootloader: form.bootloader || undefined,
+        agent_installed: form.agentInstalled,
         ...passwordPart,
       })
       ElMessage.success('Profile 已创建')
@@ -227,6 +233,12 @@ async function remove(row: Profile): Promise<void> {
           <el-table-column label="渲染器 / 引导器" min-width="170">
             <template #default="{ row }">
               {{ row.network_renderer || '默认' }} / {{ row.bootloader || '默认' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="监控 Agent" width="100" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.agent_installed" type="success" size="small">植入</el-tag>
+              <span v-else class="mk-subtle">—</span>
             </template>
           </el-table-column>
           <el-table-column label="更新时间" width="150">
@@ -349,6 +361,12 @@ async function remove(row: Profile): Promise<void> {
               </el-form-item>
             </el-col>
           </el-row>
+          <el-form-item label="监控 Agent">
+            <el-switch v-model="form.agentInstalled" />
+            <span class="mk-subtle" style="margin-left: 8px">
+              开启后装机时向系统内植入独立的监控 agent（仅收集 CPU / 内存 / 磁盘 / 网络指标并周期上报）
+            </span>
+          </el-form-item>
         </el-form>
         <template #footer>
           <el-button @click="dialogVisible = false">取消</el-button>

@@ -183,6 +183,8 @@ export interface Profile {
   network?: NetworkConfig
   network_renderer?: string
   bootloader?: string
+  /** 装机时植入监控 agent（仅收集监控信息并上报的独立组件） */
+  agent_installed?: boolean
   created_at?: string
   updated_at?: string
 }
@@ -225,6 +227,8 @@ export interface Binding {
   subnet_id?: string
   vlan_override?: number
   nic_selector_override?: string
+  /** 每机器覆盖 profile.agent_installed；缺省 = 沿用 profile */
+  agent_installed_override?: boolean | null
   updated_at?: string
 }
 
@@ -281,6 +285,51 @@ export interface JobLog {
   level: 'debug' | 'info' | 'warn' | 'error'
   message: string
 }
+
+// ---------- metrics (monitor agent) ----------
+
+/** 一次监控采样（与 Go internal/monitor.Metrics 对应） */
+export interface MonitorMetrics {
+  cpu_total_jiffies?: number
+  cpu_idle_jiffies?: number
+  cpus?: number
+  loadavg_1?: number
+  loadavg_5?: number
+  loadavg_15?: number
+  mem_total_kb?: number
+  mem_available_kb?: number
+  swap_total_kb?: number
+  swap_free_kb?: number
+  disks?: Array<{
+    device: string
+    reads_completed?: number
+    read_sectors?: number
+    writes_completed?: number
+    write_sectors?: number
+    io_ticks_ms?: number
+  }>
+  interfaces?: Array<{
+    name: string
+    bytes?: { rx?: number; tx?: number }
+    packets?: { rx?: number; tx?: number }
+  }>
+  boot_uptime_seconds?: number
+}
+
+/** /api/v1/metrics 返回的单机最新采样 */
+export interface MonitorSample {
+  machine_uuid: string
+  agent_online: boolean
+  payload: {
+    machine_uuid: string
+    schema_version: number
+    monitored_at: string
+    metrics: MonitorMetrics
+  }
+}
+
+/** /api/v1/metrics/{uuid} 返回的历史采样（含 metrics） */
+export type MonitorHistoryItem = MonitorSample['payload']
 
 // ---------- settings ----------
 

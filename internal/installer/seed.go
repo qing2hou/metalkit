@@ -827,9 +827,13 @@ func writeENIInterfacesBond(deps Deps, mntRoot string, nc profiles.NetworkConfig
 		lines = append(lines, "")
 	}
 
-	// Bond master.
+	// Bond master. With a VLAN on top, the bond stays L2-only (inet manual)
+	// and the IP lives on the bond0.<vlan> stanza below — mirroring the
+	// netplan/NM renderers (duplicate IP on master+VLAN wedges routing).
 	lines = append(lines, "auto bond0")
-	if nc.Method == "dhcp" {
+	if nc.VLAN > 0 {
+		lines = append(lines, "iface bond0 inet manual")
+	} else if nc.Method == "dhcp" {
 		lines = append(lines, "iface bond0 inet dhcp")
 	} else {
 		lines = append(lines, "iface bond0 inet static")
@@ -864,6 +868,31 @@ func writeENIInterfacesBond(deps Deps, mntRoot string, nc profiles.NetworkConfig
 			policy = "layer3+4"
 		}
 		lines = append(lines, "    bond-xmit-hash-policy "+policy)
+	}
+
+	// VLAN sub-interface stanza when requested (IP here, master above is
+	// L2-only).
+	if nc.VLAN > 0 {
+		lines = append(lines, "")
+		lines = append(lines, fmt.Sprintf("auto bond0.%d", nc.VLAN))
+		if nc.Method == "dhcp" {
+			lines = append(lines, fmt.Sprintf("iface bond0.%d inet dhcp", nc.VLAN))
+		} else {
+			lines = append(lines, fmt.Sprintf("iface bond0.%d inet static", nc.VLAN))
+			if b.StaticAddress != "" {
+				lines = append(lines, "    address "+b.StaticAddress)
+				if nc.PrefixLen > 0 {
+					lines = append(lines, fmt.Sprintf("    netmask %s", prefixToNetmask(nc.PrefixLen)))
+				}
+			}
+			if nc.Gateway != "" {
+				lines = append(lines, "    gateway "+nc.Gateway)
+			}
+			if len(nc.DNS) > 0 {
+				lines = append(lines, "    dns-nameservers "+strings.Join(nc.DNS, " "))
+			}
+		}
+		lines = append(lines, fmt.Sprintf("    vlan-raw-device bond0"))
 	}
 
 	content := strings.Join(lines, "\n") + "\n"
@@ -1005,11 +1034,13 @@ func writeWickedBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bin
 		)
 	}
 
-	// Bond master ifcfg-bond0.
+	// Bond master ifcfg-bond0. With a VLAN on top, L2-only — the IP lives
+	// on the ifcfg-bond0.<vlan> below (same rule as the other renderers:
+	// duplicating the static IP on master+VLAN wedges routing).
 	var master []string
 	master = append(master, "# Managed by metalkit installer")
-	master = append(master, "BOOTPROTO='"+ternary(nc.Method == "dhcp", "dhcp", "static")+"'")
-	if nc.Method != "dhcp" {
+	master = append(master, "BOOTPROTO='"+ternary(nc.Method == "dhcp" && nc.VLAN == 0, "dhcp", "none")+"'")
+	if nc.Method != "dhcp" && nc.VLAN == 0 {
 		if b.StaticAddress != "" {
 			master = append(master, "IPADDR='"+b.StaticAddress+"'")
 		}
@@ -1048,6 +1079,33 @@ func writeWickedBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bin
 		[]byte(strings.Join(master, "\n")+"\n"),
 		0o644,
 	)
+
+	// VLAN sub-interface ifcfg-bond0.<vlan> when requested.
+	if nc.VLAN > 0 {
+		var vlan []string
+		vlan = append(vlan, "# Managed by metalkit installer")
+		vlan = append(vlan, fmt.Sprintf("BOOTPROTO='%s'", ternary(nc.Method == "dhcp", "dhcp", "static")))
+		if nc.Method != "dhcp" {
+			if b.StaticAddress != "" {
+				vlan = append(vlan, "IPADDR='"+b.StaticAddress+"'")
+			}
+			if nc.PrefixLen > 0 {
+				vlan = append(vlan, fmt.Sprintf("PREFIXLEN='%d'", nc.PrefixLen))
+			}
+			if nc.Gateway != "" {
+				vlan = append(vlan, "GATEWAY='"+nc.Gateway+"'")
+			}
+		}
+		vlan = append(vlan, "STARTMODE='auto'")
+		vlan = append(vlan, "VLAN='yes'")
+		vlan = append(vlan, fmt.Sprintf("ETHERDEVICE='bond0'"))
+		vlan = append(vlan, fmt.Sprintf("VLAN_ID='%d'", nc.VLAN))
+		_ = deps.FS.WriteFile(
+			filepath.Join(sysDir, fmt.Sprintf("ifcfg-bond0.%d", nc.VLAN)),
+			[]byte(strings.Join(vlan, "\n")+"\n"),
+			0o644,
+		)
+	}
 }
 
 // prefixToNetmask converts a CIDR prefix length (1-32) to a dotted-decimal
@@ -1215,7 +1273,10 @@ func writeIfcfgBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bind
 		opts = append(opts, fmt.Sprintf("xmit_hash_policy=%s", policy))
 	}
 
-	// Master ifcfg-bond0.
+	// Master ifcfg-bond0. With a VLAN on top, the bond stays L2-only —
+	// the IP/gateway/DNS live on the ifcfg-bond0.<vlan> sub-interface
+	// written below. Duplicating the static IP on both the master and the
+	// VLAN wedges routing (2026-09-28 Rocky incident, NM variant).
 	var master []string
 	master = append(master, "# Managed by metalkit installer")
 	master = append(master, "DEVICE=bond0")
@@ -1224,28 +1285,67 @@ func writeIfcfgBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bind
 	master = append(master, "BONDING_MASTER=yes")
 	master = append(master, "ONBOOT=yes")
 	master = append(master, fmt.Sprintf("BONDING_OPTS=%q", strings.Join(opts, " ")))
-	if nc.Method == "dhcp" {
-		master = append(master, "BOOTPROTO=dhcp")
+	if nc.VLAN == 0 {
+		if nc.Method == "dhcp" {
+			master = append(master, "BOOTPROTO=dhcp")
+		} else {
+			master = append(master, "BOOTPROTO=none")
+			if b.StaticAddress != "" {
+				master = append(master, "IPADDR="+b.StaticAddress)
+			}
+			if nc.PrefixLen > 0 {
+				master = append(master, fmt.Sprintf("PREFIX=%d", nc.PrefixLen))
+			}
+			if nc.Gateway != "" {
+				master = append(master, "GATEWAY="+nc.Gateway)
+			}
+			for i, dns := range nc.DNS {
+				master = append(master, fmt.Sprintf("DNS%d=%s", i+1, dns))
+			}
+		}
 	} else {
 		master = append(master, "BOOTPROTO=none")
-		if b.StaticAddress != "" {
-			master = append(master, "IPADDR="+b.StaticAddress)
-		}
-		if nc.PrefixLen > 0 {
-			master = append(master, fmt.Sprintf("PREFIX=%d", nc.PrefixLen))
-		}
-		if nc.Gateway != "" {
-			master = append(master, "GATEWAY="+nc.Gateway)
-		}
-		for i, dns := range nc.DNS {
-			master = append(master, fmt.Sprintf("DNS%d=%s", i+1, dns))
-		}
 	}
 	_ = deps.FS.WriteFile(
 		filepath.Join(sysDir, "ifcfg-bond0"),
 		[]byte(strings.Join(master, "\n")+"\n"),
 		0o644,
 	)
+
+	// VLAN sub-interface ifcfg-bond0.<vlan> when requested.
+	if nc.VLAN > 0 {
+		var vlan []string
+		vlan = append(vlan, "# Managed by metalkit installer")
+		vlan = append(vlan, fmt.Sprintf("DEVICE=bond0.%d", nc.VLAN))
+		vlan = append(vlan, fmt.Sprintf("NAME=bond0.%d", nc.VLAN))
+		vlan = append(vlan, "TYPE=Vlan")
+		vlan = append(vlan, "ONBOOT=yes")
+		vlan = append(vlan, "VLAN=yes")
+		vlan = append(vlan, fmt.Sprintf("PHYSDEV=bond0"))
+		vlan = append(vlan, fmt.Sprintf("VLAN_ID=%d", nc.VLAN))
+		if nc.Method == "dhcp" {
+			vlan = append(vlan, "BOOTPROTO=dhcp")
+		} else {
+			vlan = append(vlan, "BOOTPROTO=none")
+			if b.StaticAddress != "" {
+				vlan = append(vlan, "IPADDR="+b.StaticAddress)
+			}
+			if nc.PrefixLen > 0 {
+				vlan = append(vlan, fmt.Sprintf("PREFIX=%d", nc.PrefixLen))
+			}
+			if nc.Gateway != "" {
+				vlan = append(vlan, "GATEWAY="+nc.Gateway)
+			}
+			for i, dns := range nc.DNS {
+				vlan = append(vlan, fmt.Sprintf("DNS%d=%s", i+1, dns))
+			}
+		}
+		_ = deps.FS.WriteFile(
+			filepath.Join(sysDir, fmt.Sprintf("ifcfg-bond0.%d", nc.VLAN)),
+			[]byte(strings.Join(vlan, "\n")+"\n"),
+			0o644,
+		)
+	}
 
 	// One ifcfg per slave, logical names eth0, eth1, ...
 	for i, slave := range bond.Slaves {
@@ -1547,19 +1647,27 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 		master = append(master, "transmit-hash-policy="+policy)
 	}
 	master = append(master, "")
-	master = append(master, "[ipv4]")
-	if nc.Method == "dhcp" {
-		master = append(master, "method=auto")
-	} else {
-		master = append(master, "method=manual")
-		if b.StaticAddress != "" {
-			master = append(master, fmt.Sprintf("address1=%s/%d", b.StaticAddress, nc.PrefixLen))
-		}
-		if nc.Gateway != "" {
-			master = append(master, "gateway="+nc.Gateway)
-		}
-		if len(nc.DNS) > 0 {
-			master = append(master, "dns="+strings.Join(nc.DNS, ";"))
+	// When a VLAN sits on top of the bond, the bond master stays L2-only:
+	// the IP/gateway/DNS live on the VLAN sub-interface (writeNMKeyfileVLAN).
+	// Writing the same static IP on BOTH the master and the VLAN duplicates
+	// the address and wedges routing — the 2026-09-28 Rocky incident: bond0
+	// AND bond0.40 both carried 172.16.40.2, gateway unreachable until the
+	// master's IP was removed by hand.
+	if nc.VLAN == 0 {
+		master = append(master, "[ipv4]")
+		if nc.Method == "dhcp" {
+			master = append(master, "method=auto")
+		} else {
+			master = append(master, "method=manual")
+			if b.StaticAddress != "" {
+				master = append(master, fmt.Sprintf("address1=%s/%d", b.StaticAddress, nc.PrefixLen))
+			}
+			if nc.Gateway != "" {
+				master = append(master, "gateway="+nc.Gateway)
+			}
+			if len(nc.DNS) > 0 {
+				master = append(master, "dns="+strings.Join(nc.DNS, ";"))
+			}
 		}
 	}
 

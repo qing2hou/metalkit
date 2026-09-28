@@ -203,6 +203,14 @@ func (a *AgentAPI) getSpec(w http.ResponseWriter, r *http.Request) {
 		profile.Network.NICSelector = binding.NICSelectorOverride
 	}
 
+	// Per-binding monitor implant override (agent_installed): when the
+	// install modal flipped the profile's default for this machine,
+	// substitute it into the profile copy so the installer's
+	// agent-implant stage sees the per-machine decision.
+	if binding.AgentInstalledOverride != nil {
+		profile.AgentInstalled = *binding.AgentInstalledOverride
+	}
+
 	// Subnet overlay (M2.3-12 phase ④): when the operator picked a subnet on
 	// the binding, the subnet is the source of truth for gateway/DNS/VLAN —
 	// not the profile. We overlay those fields onto the profile copy so the

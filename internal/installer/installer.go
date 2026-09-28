@@ -15,15 +15,16 @@ import (
 // Stage names — exported so the agent main and tests can reference them
 // without stringly-typed duplication.
 const (
-	StageBootDetect  = "boot-detect"
-	StageDiskPick    = "disk-pick"
-	StageDownload    = "download"
-	StageWrite       = "write"
-	StageGrow        = "grow"
-	StageMount       = "mount"
-	StageSeed        = "seed"
-	StageGrubInstall = "grub-install"
-	StageUnmount     = "umount"
+	StageBootDetect   = "boot-detect"
+	StageDiskPick     = "disk-pick"
+	StageDownload     = "download"
+	StageWrite        = "write"
+	StageGrow         = "grow"
+	StageMount        = "mount"
+	StageSeed         = "seed"
+	StageAgentImplant = "agent-implant"
+	StageGrubInstall  = "grub-install"
+	StageUnmount      = "umount"
 )
 
 // Run executes the full install pipeline for spec. On any error Reporter.Fail
@@ -170,6 +171,22 @@ func Run(ctx context.Context, deps Deps, spec jobs.InstallSpec) (retErr error) {
 	}
 	if err := osInst.BuildSeed(ctx, deps, spec, mntRoot); err != nil {
 		return err
+	}
+
+	// --- agent-implant ---------------------------------------------------
+	// Optional: when the profile/binding asked for the monitoring agent,
+	// copy the live image's monitor binary + unit into the target rootfs.
+	// No-op otherwise (the stage marker is still reported so the UI's
+	// stage list stays uniform across installs).
+	if err := deps.Reporter.Stage(ctx, StageAgentImplant); err != nil {
+		return fmt.Errorf("install: stage %s: %w", StageAgentImplant, err)
+	}
+	if spec.Profile.AgentInstalled {
+		if err := implantMonitor(ctx, deps, mntRoot, deps.BaseURL); err != nil {
+			return err
+		}
+	} else if deps.Logger != nil {
+		deps.Logger.Info("implant: agent_installed off — skipping monitor implant")
 	}
 
 	// --- grub-install ----------------------------------------------------

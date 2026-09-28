@@ -131,9 +131,14 @@ type Binding struct {
 	// into the profile copy before producing the agent spec. Accepts the same
 	// shapes as profile.network.nic_selector: "auto", "by-mac:..", "by-name:..".
 	// Empty / NULL = inherit profile.
-	NICSelectorOverride string    `json:"nic_selector_override,omitempty"`
-	UpdatedAt           time.Time `json:"updated_at"`
-	UpdatedBy           string    `json:"updated_by"`
+	NICSelectorOverride string `json:"nic_selector_override,omitempty"`
+	// AgentInstalledOverride is the per-binding override for
+	// profile.agent_installed. nil = inherit profile (JSON omitted);
+	// set = the jobs spec endpoint substitutes it into the profile copy
+	// before sending the spec (implant / don't-implant the monitor).
+	AgentInstalledOverride *bool     `json:"agent_installed_override,omitempty"`
+	UpdatedAt              time.Time `json:"updated_at"`
+	UpdatedBy              string    `json:"updated_by"`
 }
 
 // UpsertInput is what the PUT handler accepts.
@@ -178,7 +183,12 @@ type UpsertInput struct {
 	//   ""  → explicit clear (NULL = inherit profile)
 	//   set → validate same shapes as profile.network.nic_selector and store
 	NICSelectorOverride *string `json:"nic_selector_override,omitempty"`
-	UpdatedBy           string  `json:"-"` // injected by handler
+	// AgentInstalledOverride is three-state via *bool:
+	//   nil  → keep existing
+	//   set  → true = implant the monitor into this machine, false = never;
+	//          stored as 1/0, NULL (both nil-cases) = inherit profile
+	AgentInstalledOverride *bool  `json:"agent_installed_override,omitempty"`
+	UpdatedBy              string `json:"-"` // injected by handler
 }
 
 // Upsert validates the input (including cross-table referential checks and
@@ -251,14 +261,16 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 	keepExistingSubnet := in.SubnetID == nil
 	keepExistingVLAN := in.VLANOverride == nil
 	keepExistingNICSel := in.NICSelectorOverride == nil
+	keepExistingAgentInstalled := in.AgentInstalledOverride == nil
 
 	var existingSubnet sql.NullString
 	var existingVLAN sql.NullInt64
 	var existingNICSel sql.NullString
-	if keepExistingSubnet || keepExistingVLAN || keepExistingNICSel {
+	var existingAgentInstalled sql.NullInt64
+	if keepExistingSubnet || keepExistingVLAN || keepExistingNICSel || keepExistingAgentInstalled {
 		_ = s.db.QueryRowContext(ctx,
-			`SELECT subnet_id, vlan_override, nic_selector_override FROM bindings WHERE machine_uuid = ?`, muuid).
-			Scan(&existingSubnet, &existingVLAN, &existingNICSel)
+			`SELECT subnet_id, vlan_override, nic_selector_override, agent_installed_override FROM bindings WHERE machine_uuid = ?`, muuid).
+			Scan(&existingSubnet, &existingVLAN, &existingNICSel, &existingAgentInstalled)
 	}
 
 	var subnetIDSQL any
@@ -346,6 +358,21 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 		if sel != "" {
 			nicSelectorSQL = sel
 		}
+	}
+
+	// agent_installed_override: NULL = inherit profile, 0/1 = override.
+	// Note the explicit false branch: Go's zero value for bool would also
+	// produce 0, but we must not conflate "false" with "unset" — a nil
+	// pointer already handled by keepExistingAgentInstalled above.
+	var agentInstalledSQL any
+	if keepExistingAgentInstalled {
+		if existingAgentInstalled.Valid {
+			agentInstalledSQL = existingAgentInstalled.Int64
+		}
+	} else if *in.AgentInstalledOverride {
+		agentInstalledSQL = 1
+	} else {
+		agentInstalledSQL = 0
 	}
 
 	now := time.Now().Unix()
@@ -451,23 +478,24 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
             (machine_uuid, image_id, profile_id, desired_state,
              static_address, hostname, root_password_enc, target_disk_override,
              bond_override, subnet_id, vlan_override, nic_selector_override,
-             updated_at, updated_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             agent_installed_override, updated_at, updated_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(machine_uuid) DO UPDATE SET
-            image_id              = excluded.image_id,
-            profile_id            = excluded.profile_id,
-            desired_state         = excluded.desired_state,
-            static_address        = excluded.static_address,
-            hostname              = excluded.hostname,
-            root_password_enc     = excluded.root_password_enc,
-            target_disk_override  = excluded.target_disk_override,
-            bond_override         = excluded.bond_override,
-            subnet_id             = excluded.subnet_id,
-            vlan_override         = excluded.vlan_override,
-            nic_selector_override = excluded.nic_selector_override,
-            updated_at            = excluded.updated_at,
-            updated_by            = excluded.updated_by`,
-		muuid, imageID, profileID, desired, addrSQL, hostnameSQL, ctSQL, tdSQL, bondSQL, subnetIDSQL, vlanSQL, nicSelectorSQL, now, in.UpdatedBy,
+            image_id                   = excluded.image_id,
+            profile_id                 = excluded.profile_id,
+            desired_state              = excluded.desired_state,
+            static_address             = excluded.static_address,
+            hostname                   = excluded.hostname,
+            root_password_enc          = excluded.root_password_enc,
+            target_disk_override       = excluded.target_disk_override,
+            bond_override              = excluded.bond_override,
+            subnet_id                  = excluded.subnet_id,
+            vlan_override              = excluded.vlan_override,
+            nic_selector_override      = excluded.nic_selector_override,
+            agent_installed_override   = excluded.agent_installed_override,
+            updated_at                 = excluded.updated_at,
+            updated_by                 = excluded.updated_by`,
+		muuid, imageID, profileID, desired, addrSQL, hostnameSQL, ctSQL, tdSQL, bondSQL, subnetIDSQL, vlanSQL, nicSelectorSQL, agentInstalledSQL, now, in.UpdatedBy,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("upsert binding: %w", err)
@@ -484,17 +512,17 @@ func (s *Store) Get(ctx context.Context, machineUUID string) (*Binding, error) {
 	}
 	var b Binding
 	var addr, hostname, tdJSON, bondJSON, subnetID, nicSelOverride sql.NullString
-	var vlanOverride sql.NullInt64
+	var vlanOverride, agentInstalledOverride sql.NullInt64
 	var updatedAt int64
 	var passwordCT []byte
 	err = s.db.QueryRowContext(ctx, `
         SELECT machine_uuid, image_id, profile_id, desired_state,
                static_address, hostname, root_password_enc, target_disk_override,
                bond_override, subnet_id, vlan_override, nic_selector_override,
-               updated_at, updated_by
+               agent_installed_override, updated_at, updated_by
         FROM bindings WHERE machine_uuid = ?`, muuid).Scan(
 		&b.MachineUUID, &b.ImageID, &b.ProfileID, &b.DesiredState,
-		&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &updatedAt, &b.UpdatedBy,
+		&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &agentInstalledOverride, &updatedAt, &b.UpdatedBy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -526,6 +554,10 @@ func (s *Store) Get(ctx context.Context, machineUUID string) (*Binding, error) {
 	if nicSelOverride.Valid {
 		b.NICSelectorOverride = nicSelOverride.String
 	}
+	if agentInstalledOverride.Valid {
+		v := agentInstalledOverride.Int64 != 0
+		b.AgentInstalledOverride = &v
+	}
 	b.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 	return &b, nil
 }
@@ -537,7 +569,7 @@ func (s *Store) List(ctx context.Context) ([]Binding, error) {
         SELECT machine_uuid, image_id, profile_id, desired_state,
                static_address, hostname, root_password_enc, target_disk_override,
                bond_override, subnet_id, vlan_override, nic_selector_override,
-               updated_at, updated_by
+               agent_installed_override, updated_at, updated_by
         FROM bindings ORDER BY machine_uuid`)
 	if err != nil {
 		return nil, fmt.Errorf("list bindings: %w", err)
@@ -547,11 +579,11 @@ func (s *Store) List(ctx context.Context) ([]Binding, error) {
 	for rows.Next() {
 		var b Binding
 		var addr, hostname, tdJSON, bondJSON, subnetID, nicSelOverride sql.NullString
-		var vlanOverride sql.NullInt64
+		var vlanOverride, agentInstalledOverride sql.NullInt64
 		var updatedAt int64
 		var passwordCT []byte
 		if err := rows.Scan(&b.MachineUUID, &b.ImageID, &b.ProfileID, &b.DesiredState,
-			&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &updatedAt, &b.UpdatedBy); err != nil {
+			&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &agentInstalledOverride, &updatedAt, &b.UpdatedBy); err != nil {
 			return nil, fmt.Errorf("scan binding: %w", err)
 		}
 		b.StaticAddress = addr.String
@@ -577,6 +609,10 @@ func (s *Store) List(ctx context.Context) ([]Binding, error) {
 		}
 		if nicSelOverride.Valid {
 			b.NICSelectorOverride = nicSelOverride.String
+		}
+		if agentInstalledOverride.Valid {
+			v := agentInstalledOverride.Int64 != 0
+			b.AgentInstalledOverride = &v
 		}
 		b.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 		out = append(out, b)

@@ -4,8 +4,8 @@ import { ElMessage } from 'element-plus'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { bmcApi, bindingsApi, imagesApi, jobsApi, machinesApi, profilesApi, subnetsApi } from '@/api'
-import type { BmcCredential, Binding, Image, Job, Profile, Report, ReportMeta, Subnet } from '@/api/types'
+import { bmcApi, bindingsApi, imagesApi, jobsApi, machinesApi, metricsApi, profilesApi, subnetsApi } from '@/api'
+import type { BmcCredential, Binding, Image, Job, MonitorHistoryItem, Profile, Report, ReportMeta, Subnet } from '@/api/types'
 import AppShell from '@/components/AppShell.vue'
 import CopyableText from '@/components/CopyableText.vue'
 import InstallDialog from '@/components/InstallDialog.vue'
@@ -28,6 +28,9 @@ const profiles = ref<Profile[]>([])
 const subnets = ref<Subnet[]>([])
 const recentJobs = ref<Job[]>([])
 const reportHistory = ref<ReportMeta[]>([])
+
+// 监控（植入的 monitor agent 上报；无采样 = 未植入或未上报）
+const monitorHistory = ref<MonitorHistoryItem[]>([])
 
 // 弹窗：intent='reinstall' 由「立即重装」进入（预填可改，提交前两步确认）
 const installVisible = ref(false)
@@ -57,18 +60,20 @@ async function load(): Promise<void> {
     summary.value = machines.find((m) => m.uuid === uuid.value) ?? null
     report.value = rep
     binding.value = bindings
-    const [imgs, profs, subs, jobs, history] = await Promise.all([
+    const [imgs, profs, subs, jobs, history, monHist] = await Promise.all([
       imagesApi.list(),
       profilesApi.list(),
       subnetsApi.list(),
       jobsApi.list({ machine_uuid: uuid.value, limit: 10 }),
       machinesApi.reports(uuid.value).catch(() => []),
+      metricsApi.history(uuid.value).catch(() => []),
     ])
     images.value = imgs
     profiles.value = profs
     subnets.value = subs
     recentJobs.value = jobs
     reportHistory.value = history.slice(0, 20)
+    monitorHistory.value = monHist
     health.noteOk()
   } catch {
     health.noteError()
@@ -109,6 +114,36 @@ const biosVersion = computed(() => {
 const isInstalling = computed(() =>
   recentJobs.value.some((j) => j.status === 'pending' || j.status === 'running'),
 )
+
+// ---- 监控（植入的 monitor agent） ----
+const latestMonitor = computed(() => {
+  const h = monitorHistory.value
+  return h.length ? h[h.length - 1] : null
+})
+
+// CPU 使用率（最近两拍的 jiffies 差分；不足两拍时返回空）
+const monitorCpuPercent = computed(() => {
+  const h = monitorHistory.value
+  if (h.length < 2) return null
+  const a = h[h.length - 2].metrics
+  const b = h[h.length - 1].metrics
+  const dTotal = (b.cpu_total_jiffies ?? 0) - (a.cpu_total_jiffies ?? 0)
+  const dIdle = (b.cpu_idle_jiffies ?? 0) - (a.cpu_idle_jiffies ?? 0)
+  if (dTotal <= 0) return null
+  return Math.max(0, Math.min(100, ((dTotal - dIdle) / dTotal) * 100))
+})
+
+const monitorMemPercent = computed(() => {
+  const m = latestMonitor.value?.metrics
+  if (!m || !m.mem_total_kb) return null
+  return ((m.mem_total_kb - (m.mem_available_kb ?? 0)) / m.mem_total_kb) * 100
+})
+
+const monitorMonitoredAtFresh = computed(() => {
+  const at = latestMonitor.value?.monitored_at
+  if (!at) return false
+  return Date.now() - new Date(at).getTime() < 5 * 60_000
+})
 
 async function unbind(): Promise<void> {
   if (!binding.value) return
@@ -287,6 +322,56 @@ function viewHistoryItem(meta: ReportMeta): void {
         <el-empty
           v-else
           description="尚未配置：选择镜像与安装参数后，机器将自动进入装机流程"
+          :image-size="60"
+        />
+      </el-card>
+
+      <!-- 监控状态（植入的监控 agent） -->
+      <el-card class="mk-card">
+        <template #header><span>监控状态</span></template>
+        <template v-if="latestMonitor">
+          <dl class="mk-kv-grid">
+            <div class="mk-kv">
+              <dt>监控 Agent</dt>
+              <dd>
+                <el-tag :type="monitorMonitoredAtFresh ? 'success' : 'info'" size="small">
+                  {{ monitorMonitoredAtFresh ? '在线' : '无新数据' }}
+                </el-tag>
+              </dd>
+            </div>
+            <div class="mk-kv">
+              <dt>CPU 使用率</dt>
+              <dd>{{ monitorCpuPercent !== null ? `${monitorCpuPercent.toFixed(1)}%` : '—' }}</dd>
+            </div>
+            <div class="mk-kv">
+              <dt>内存使用率</dt>
+              <dd>
+                {{ monitorMemPercent !== null ? `${monitorMemPercent.toFixed(1)}%（${fmtBytes(((latestMonitor.metrics.mem_total_kb ?? 0) - (latestMonitor.metrics.mem_available_kb ?? 0)) * 1024)} / ${fmtBytes((latestMonitor.metrics.mem_total_kb ?? 0) * 1024)}）` : '—' }}
+              </dd>
+            </div>
+            <div class="mk-kv">
+              <dt>负载 (1/5/15m)</dt>
+              <dd>
+                {{ [latestMonitor.metrics.loadavg_1, latestMonitor.metrics.loadavg_5, latestMonitor.metrics.loadavg_15]
+                  .map((v) => (v === undefined ? '—' : v.toFixed(2))).join(' / ') }}
+              </dd>
+            </div>
+            <div class="mk-kv">
+              <dt>运行时长</dt>
+              <dd>{{ Math.floor((latestMonitor.metrics.boot_uptime_seconds ?? 0) / 3600) }} 小时</dd>
+            </div>
+            <div class="mk-kv">
+              <dt>最近采样</dt>
+              <dd>{{ fmtAbsolute(latestMonitor.monitored_at) }}</dd>
+            </div>
+          </dl>
+          <div v-if="latestMonitor.metrics.disks?.length" class="mk-subtle" style="margin-top: 8px">
+            磁盘 I/O 累计：{{ latestMonitor.metrics.disks.map((d) => `${d.device} 读 ${Math.round((d.read_sectors ?? 0) / 2048)}MB / 写 ${Math.round((d.write_sectors ?? 0) / 2048)}MB`).join('；') }}
+          </div>
+        </template>
+        <el-empty
+          v-else
+          description="未收到监控数据：系统未植入监控 agent 或尚未开机上报"
           :image-size="60"
         />
       </el-card>

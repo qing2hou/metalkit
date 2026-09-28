@@ -58,6 +58,8 @@ const form = reactive({
   bondLacpRate: '',
   bondXmitHashPolicy: '',
   bondPrimary: '',
+  // 监控 agent 植入（三态：跟随 profile / 强制开 / 强制关）
+  agentMode: 'inherit' as 'inherit' | 'on' | 'off',
 })
 
 const saving = ref(false)
@@ -155,6 +157,12 @@ watch(
     form.bondLacpRate = bond?.lacp_rate ?? ''
     form.bondXmitHashPolicy = bond?.xmit_hash_policy ?? ''
     form.bondPrimary = bond?.primary ?? ''
+    // 监控 agent：binding 覆盖优先（true/false），否则跟随 profile
+    if (typeof b?.agent_installed_override === 'boolean') {
+      form.agentMode = b.agent_installed_override ? 'on' : 'off'
+    } else {
+      form.agentMode = selectedProfile.value?.agent_installed ? 'on' : 'inherit'
+    }
     // 等这一拍 selectedProfile watch flush 后再放开联动（flush:'post' 的
     // watch 在 nextTick 前后触发，setTimeout 0 足够排在其后）。
     setTimeout(() => {
@@ -300,6 +308,10 @@ async function submit(dispatch: boolean): Promise<void> {
         : {}),
       // NIC：by-mac 覆盖；auto 显式清空（回退 profile 默认）
       nic_selector_override: form.nicMode === 'mac' ? `by-mac:${form.nicMac}` : '',
+      // 监控 agent 植入：覆盖值（true/false）改写本机行为；inherit 清除覆盖（回 profile）
+      ...(form.agentMode !== 'inherit'
+        ? { agent_installed_override: form.agentMode === 'on' }
+        : { agent_installed_override: null }),
       // bond 永远显式发送（与旧版一致）：null = 清除绑定级 bond
       bond: form.useBond
         ? {
@@ -450,6 +462,21 @@ async function submit(dispatch: boolean): Promise<void> {
 
       <el-form-item label="Bond">
         <el-switch v-model="form.useBond" />
+      </el-form-item>
+
+      <el-divider content-position="left">监控 Agent</el-divider>
+
+      <el-form-item label="植入监控">
+        <el-radio-group v-model="form.agentMode">
+          <el-radio-button value="inherit">
+            跟随 Profile{{ selectedProfile ? `（${selectedProfile.agent_installed ? '开启' : '关闭'}）` : '' }}
+          </el-radio-button>
+          <el-radio-button value="on">本次植入</el-radio-button>
+          <el-radio-button value="off">本次不植入</el-radio-button>
+        </el-radio-group>
+        <div class="mk-subtle" style="width: 100%">
+          植入后系统内运行独立的监控 agent，仅收集 CPU / 内存 / 磁盘 / 网络指标并周期上报到本平台
+        </div>
       </el-form-item>
 
       <template v-if="form.useBond">

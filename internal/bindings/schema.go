@@ -53,4 +53,8 @@ var migrations = []string{
 	// vlan_override: install modal becomes the source of truth, operator picks the
 	// concrete physical NIC by MAC at install time.
 	`ALTER TABLE bindings ADD COLUMN nic_selector_override TEXT`,
+	// agent_installed_override (per-binding override of profile.agent_installed).
+	// NULL = inherit profile; 0 = never implant the monitor; 1 = implant it.
+	// Same three-state semantics as the other *_override columns.
+	`ALTER TABLE bindings ADD COLUMN agent_installed_override INTEGER`,
 }

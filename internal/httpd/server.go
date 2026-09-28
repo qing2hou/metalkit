@@ -20,6 +20,7 @@ import (
 	"metalkit/internal/images"
 	"metalkit/internal/inventory"
 	"metalkit/internal/jobs"
+	"metalkit/internal/monitor"
 	"metalkit/internal/profiles"
 	"metalkit/internal/sessions"
 	"metalkit/internal/settings"
@@ -68,6 +69,12 @@ type Config struct {
 	// agents have no credential store — and use a body-level machine_uuid
 	// consistency check as a foot-gun guard (not real authentication).
 	AgentJobs *jobs.AgentAPI
+
+	// Optional monitor API (metrics ingestion + UI queries). When set,
+	// mounts POST /api/v1/agent/metrics (open — implanted monitors have no
+	// credential store, same model as /api/v1/report) and the operator-side
+	// GET /api/v1/metrics* endpoints (behind normal auth).
+	Monitor *monitor.API
 
 	// Optional util API. When set, mounts /api/v1/util/* (currently just
 	// the SHA-512 crypt helper used by the operator UI).
@@ -328,6 +335,9 @@ func (s *Server) routes() *http.ServeMux {
 	}
 	if s.cfg.AgentJobs != nil {
 		s.cfg.AgentJobs.RegisterRoutes(mux)
+	}
+	if s.cfg.Monitor != nil {
+		s.cfg.Monitor.RegisterRoutes(mux)
 	}
 	if s.cfg.Util != nil {
 		s.cfg.Util.RegisterRoutes(mux)
