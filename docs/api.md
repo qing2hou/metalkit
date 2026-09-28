@@ -636,8 +636,12 @@ got, err := bmcStore.GetWithPassword(ctx, machineUUID)
 controller 进程内有一个 5s tick 的 reconciliation loop：
 
 1. **install 触发**：扫描 `bindings.desired_state ∈ {install, reinstall}` 且无在飞 job 的行，
-   创建 pending job，取 BMC 凭据，调用 ipmitool `chassis bootdev pxe + chassis power cycle`，
-   把 job 推入 `running` 并打 `stage=pxe_booting`。
+   创建 pending job，然后二选一：
+   - **机器已在 live 系统**（心跳 90s 内 + 最新上报的 `system.kernel_cmdline` 含
+     `boot=live`）：跳过 BMC 重启，job 直接 `running` + `stage=waiting_agent`，
+     由本机 agent 轮询认领后原地装机——省一轮电源循环和 600MB live 镜像下载；
+   - **否则**：取 BMC 凭据，调用 ipmitool `chassis bootdev pxe + chassis power cycle`，
+     把 job 推入 `running` 并打 `stage=pxe_booting`。
 2. **finalize**：扫描 `status=succeeded` 但 `bindings.desired_state != none` 的 job：
    ipmitool `chassis bootdev disk`（防止下次启动又 PXE 回 live），然后清掉
    `desired_state` 为 `none`。
