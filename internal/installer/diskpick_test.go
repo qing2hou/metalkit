@@ -69,6 +69,37 @@ func TestPickDisk_ByPath(t *testing.T) {
 	}
 }
 
+// TestPickDisk_ByPath_DevicePathFallbacks is the regression test for the
+// 2026-09-28 incident: the install dialog sent the kernel device path
+// (/dev/sda) as the by-path value while the agent never populated
+// Disk.ByPath, so every by-path install died with `disk not found:
+// by-path="/dev/sda"`. All three spellings of the same disk must resolve.
+func TestPickDisk_ByPath_DevicePathFallbacks(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"stable symlink", "pci-0000:00:17.0-ata-1"},
+		{"device path", "/dev/sda"},
+		{"kernel name", "sda"},
+		{"stable symlink nvme", "pci-0000:01:00.0-nvme-1"},
+		{"device path nvme", "/dev/nvme0n1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := PickDisk(sampleDisks(),
+				profiles.TargetDisk{Mode: "by-path", Value: tc.value})
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			want := "sda"
+			if got.Name != want && got.Name != "nvme0n1" {
+				t.Fatalf("want sda or nvme0n1, got %s", got.Name)
+			}
+		})
+	}
+}
+
 func TestPickDisk_ByPath_NotFound(t *testing.T) {
 	_, err := PickDisk(sampleDisks(),
 		profiles.TargetDisk{Mode: "by-path", Value: "pci-0000:99:99.0-bogus"})
@@ -78,7 +109,11 @@ func TestPickDisk_ByPath_NotFound(t *testing.T) {
 }
 
 func TestPickDisk_ByWWN(t *testing.T) {
-	got, err := PickDisk(sampleDisks(),
+	// Regression shape from the 2026-09-28 incident: a disk whose ByPath the
+	// lister failed to populate (empty) must still be selectable by WWN.
+	disks := sampleDisks()
+	disks[0].ByPath = ""
+	got, err := PickDisk(disks,
 		profiles.TargetDisk{Mode: "by-wwn", Value: "0x5000c500abc"})
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)

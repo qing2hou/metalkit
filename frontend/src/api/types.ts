@@ -46,6 +46,7 @@ export interface Disk {
   rotational?: boolean
   transport?: string
   wwn?: string
+  by_path?: string
   smart?: Record<string, unknown>
   nvme?: Record<string, unknown>
 }

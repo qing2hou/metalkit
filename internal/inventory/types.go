@@ -140,6 +140,7 @@ type Disk struct {
 	Transport  string `json:"transport,omitempty"` // nvme, sata, sas
 	WWN        string `json:"wwn,omitempty"`
 	Vendor     string `json:"vendor,omitempty"`
+	ByPath     string `json:"by_path,omitempty"` // /dev/disk/by-path/… (stable; from udev)
 	Removable  bool   `json:"removable"`
 	PCIAddress string `json:"pci_address,omitempty"`
 	SMART      *SMART `json:"smart,omitempty"`

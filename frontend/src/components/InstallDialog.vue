@@ -512,14 +512,15 @@ async function submit(dispatch: boolean): Promise<void> {
               v-else-if="form.diskMode === 'by-path'"
               v-model="form.diskValue"
               filterable
+              allow-create
               style="width: 100%"
-              placeholder="选择磁盘路径"
+              placeholder="选择或输入磁盘路径"
             >
               <el-option
                 v-for="d in disks"
                 :key="d.path"
-                :label="`${d.path} · ${fmtBytes(d.size_bytes)}`"
-                :value="d.path"
+                :label="`${d.by_path || d.path} · ${fmtBytes(d.size_bytes)}`"
+                :value="d.by_path || d.path"
               />
             </el-select>
             <el-select

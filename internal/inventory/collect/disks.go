@@ -24,6 +24,12 @@ func collectDisks(ctx context.Context, r *inventory.Report) error {
 		if d.Removable {
 			continue
 		}
+		// Stable by-path symlink for the report (the install dialog's
+		// by-path picker). lsblk has no DEVLINKS column, so resolve it from
+		// the udev database; best-effort like the SMART probes below.
+		if lp := diskByPath(ctx, d.Path); lp != "" {
+			d.ByPath = lp
+		}
 		if sout, err := runCmd(ctx, 8*time.Second, "smartctl", "-j", "-a", d.Path); err == nil {
 			if s := parseSmartctl(sout); s != nil {
 				d.SMART = s
@@ -51,6 +57,28 @@ func collectDisks(ctx context.Context, r *inventory.Report) error {
 	}
 	r.Disks = disks
 	return nil
+}
+
+// diskByPath resolves the /dev/disk/by-path/… stable symlink via the udev
+// database (DEVLINKS). Empty string = unknown (udevadm absent / device not
+// in the database) — callers treat that as "no by-path reported".
+func diskByPath(ctx context.Context, devPath string) string {
+	out, err := runCmd(ctx, 4*time.Second, "udevadm", "info", "-q", "property", "-n", devPath)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		const key = "DEVLINKS="
+		if !strings.HasPrefix(line, key) {
+			continue
+		}
+		for _, link := range strings.Fields(line[len(key):]) {
+			if strings.HasPrefix(link, "/dev/disk/by-path/") {
+				return link
+			}
+		}
+	}
+	return ""
 }
 
 // lsblkOut mirrors `lsblk -J -O` shape. We keep only fields we read.

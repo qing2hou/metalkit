@@ -7,7 +7,8 @@
 //
 //   - smallest: smallest non-removable, non-readonly, transport != usb.
 //     Tie-break on Name for determinism.
-//   - by-path:  exact match on Disk.ByPath  (== sel.Value).
+//   - by-path:  match on Disk.ByPath (the /dev/disk/by-path/… symlink) with
+//     DevPath (/dev/sda) and Name (sda) fallbacks — see pickByPath.
 //   - by-wwn:   exact match on Disk.WWN.
 //   - by-model: exact match on Disk.Model.
 //
@@ -32,7 +33,10 @@ func PickDisk(disks []Disk, sel profiles.TargetDisk) (Disk, error) {
 	case "smallest", "":
 		return pickSmallest(disks)
 	case "by-path":
-		return pickByField(disks, "by-path", sel.Value, func(d Disk) string { return d.ByPath })
+		if sel.Value == "" {
+			return Disk{}, fmt.Errorf("install: target_disk.mode=%s requires a value", "by-path")
+		}
+		return pickByPath(disks, sel.Value)
 	case "by-wwn":
 		return pickByField(disks, "by-wwn", sel.Value, func(d Disk) string { return d.WWN })
 	case "by-model":
@@ -71,13 +75,40 @@ func pickSmallest(disks []Disk) (Disk, error) {
 	return candidates[0], nil
 }
 
-// pickByField is the shared body of the three by-* modes. modeName and
-// extract differ; everything else (empty value rejection, scan, error
-// shape) is the same.
+// pickByPath matches the selector value against each disk's stable by-path
+// symlink (Disk.ByPath). The value is normalised so the forms the UI and
+// operators naturally write all resolve to the same disk:
+//
+//   - /dev/disk/by-path/pci-…  → exact match on ByPath
+//   - /dev/sda                 → match on DevPath
+//   - sda                      → match on Name (kernel name)
+//
+// The DevPath/Name fallbacks are deliberate: they identify the same disk on
+// a machine whose boot order doesn't shuffle device names (no removable
+// media), and failing with "not found" when the operator picked a perfectly
+// visible /dev/sda from the machine's own report would be a foot-gun. Pick
+// the first disk that matches; on multi-path setups a later alias would
+// point at the same underlying device anyway.
+func pickByPath(disks []Disk, value string) (Disk, error) {
+	for _, d := range disks {
+		if d.ByPath == value || d.DevPath == value || d.Name == value {
+			return d, nil
+		}
+	}
+	return Disk{}, fmt.Errorf("install: disk not found: by-path=%q", value)
+}
+
+// pickByField is the shared body of the two by-* modes that compare a single
+// exact field. modeName and extract differ; everything else (empty value
+// rejection, scan, error shape) is the same.
 func pickByField(disks []Disk, modeName, value string, extract func(Disk) string) (Disk, error) {
 	if value == "" {
 		return Disk{}, fmt.Errorf("install: target_disk.mode=%s requires a value", modeName)
 	}
+	return scanByField(disks, modeName, value, extract)
+}
+
+func scanByField(disks []Disk, modeName, value string, extract func(Disk) string) (Disk, error) {
 	for _, d := range disks {
 		if extract(d) == value {
 			return d, nil

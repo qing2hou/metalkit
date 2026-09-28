@@ -220,9 +220,35 @@ func (l LsblkDiskLister) List(ctx context.Context) ([]Disk, error) {
 			Transport: d.Tran,
 			Model:     strings.TrimSpace(d.Model),
 			WWN:       strings.TrimSpace(d.WWN),
+			ByPath:    byPathFor(exe, ctx, path),
 		})
 	}
 	return disks, nil
+}
+
+// byPathFor resolves the /dev/disk/by-path/… stable symlink for a block
+// device. lsblk has no DEVLINKS column (util-linux 2.37 doesn't emit one),
+// so the udev database is the source for it. Best-effort: an empty string
+// (udevadm missing, device not in the database) means the Disk carries no
+// by-path and PickDisk's by-path mode reports it rather than matching
+// stale data from a previous boot.
+func byPathFor(exe Exec, ctx context.Context, devPath string) string {
+	out, err := exe.Run(ctx, "udevadm", "info", "-q", "property", "-n", devPath)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		const key = "DEVLINKS="
+		if !strings.HasPrefix(line, key) {
+			continue
+		}
+		for _, link := range strings.Fields(strings.TrimPrefix(line, key)) {
+			if strings.HasPrefix(link, "/dev/disk/by-path/") {
+				return link
+			}
+		}
+	}
+	return ""
 }
 
 // flexBool unmarshals true/false, 0/1, "0"/"1", "true"/"false". Older
