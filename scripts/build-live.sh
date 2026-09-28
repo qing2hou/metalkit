@@ -154,5 +154,25 @@ cp "$LIVE_DIR/tftpboot/live/vmlinuz" "$BOOT_OUT/vmlinuz"
 cp "$LIVE_DIR/tftpboot/live/initrd.img" "$BOOT_OUT/initrd.img"
 cp "$LIVE_DIR/binary/live/filesystem.squashfs" "$BOOT_OUT/filesystem.squashfs"
 
+# Post-build guard: the agent MUST be inside the squashfs or the live boot is
+# a paperweight (collects nothing, installs nothing — machines PXE in and go
+# silent). This catches the incremental-build trap: a build interrupted
+# mid-run (SIGKILL/TaskStop) leaves chroot/cache timestamps behind, and the
+# NEXT lb build skips the includes.chroot copy stage as "already
+# done" — producing an agentless image that still builds green.
+# (Incident 2026-09-28: two live boots booted silent before this check.)
+if ! unsquashfs -ll "$BOOT_OUT/filesystem.squashfs" 2>/dev/null | grep -q 'usr/local/bin/metalkit-agent'; then
+    # unsquashfs missing → fall back to strings-scan on the inode data
+    if command -v unsquashfs >/dev/null 2>&1; then
+        echo "FATAL: metalkit-agent missing from filesystem.squashfs — build produced a bootable brick." >&2
+        echo "  This happens when a previous build was interrupted and lb skipped the includes copy." >&2
+        echo "  Fix: rm -rf live-image/{chroot,cache,.build,binary} binary && re-run this script." >&2
+        exit 1
+    elif ! strings "$BOOT_OUT/filesystem.squashfs" 2>/dev/null | grep -q 'usr/local/bin/metalkit-agent'; then
+        echo "FATAL: metalkit-agent missing from filesystem.squashfs — build produced a bootable brick." >&2
+        exit 1
+    fi
+fi
+
 echo "=== done (backend=$BACKEND) ==="
 ls -la "$BOOT_OUT"
