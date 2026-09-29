@@ -1688,7 +1688,41 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 	switch bond.Mode {
 	case "active-backup":
 		if bond.Primary != "" {
-			primaryDev, _ := resolveSlaveDevAndMAC(bond.Primary, nics)
+			// primary= is a REAL interface reference in NM keyfiles (unlike
+			// the cosmetic YAML keys): the live name (eno1) does not exist in
+			// the installed OS when net.ifnames=0 rewrites NICs to ethN — an
+			// invalid name leaves the bond without a fixed primary, so the
+			// active slave (and the bond MAC) flaps between slaves and the
+			// network intermittently drops (HWaddr-conflict dmesg spam is the
+			// telltale). Resolve the primary to the installed-OS name: prefer
+			// the interface carrying its MAC, fall back to the MAC-matched
+			// port (NM accepts MACs where names are unstable), lastly a
+			// direct slave reference.
+			primaryDev, primaryMAC := resolveSlaveDevAndMAC(bond.Primary, nics)
+			if primaryMAC != "" {
+				for _, n := range nics {
+					if strings.EqualFold(n.MAC, primaryMAC) {
+						primaryDev = n.Name
+						break
+					}
+				}
+				// Installed name when it differs from the live name:
+				// net.ifnames=0 renumbers NICs by enumeration order, and the
+				// live NIC list (NICs) mirrors that order (live idx 0 → eth0,
+				// idx 1 → eth1, ...). Skip virtual ports so iDRAC's USB NIC
+				// can't shift the numbering (it enumerates first).
+				physIdx := 0
+				for _, n := range nics {
+					if n.IsVirtual() || n.MAC == "" {
+						continue
+					}
+					if strings.EqualFold(n.MAC, primaryMAC) {
+						primaryDev = fmt.Sprintf("eth%d", physIdx)
+						break
+					}
+					physIdx++
+				}
+			}
 			master = append(master, "primary="+primaryDev)
 		}
 	case "802.3ad":

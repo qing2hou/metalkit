@@ -1433,7 +1433,7 @@ func TestBuildSeed_NoCloudInit_Bond_NMKeyfiles(t *testing.T) {
 		"interface-name=bond0",
 		"mode=active-backup",
 		"miimon=100",
-		"primary=eno1",
+		"primary=eth0", // live eno1 = physical idx 0 under net.ifnames=0
 		"method=manual",
 		"address1=192.168.10.100/24",
 	} {
@@ -1668,5 +1668,59 @@ func TestBuildSeed_WritesVTInitService(t *testing.T) {
 	link := "/mnt/root/etc/systemd/system/getty.target.wants/metalkit-vt-init.service"
 	if !fs.Exists(link) {
 		t.Errorf("vt-init enable symlink missing: %s", link)
+	}
+}
+
+// TestBuildSeed_NM_Bond_PrimaryUsesInstalledName verifies primary= in the NM
+// bond keyfile references the INSTALLED-OS interface name (ethN under
+// net.ifnames=0), not the live name (eno1) — an invalid primary leaves
+// active-backup unfixed and the bond MAC flaps between slaves (intermittent
+// connectivity drop, incident 2026-09-29).
+func TestBuildSeed_NM_Bond_PrimaryUsesInstalledName(t *testing.T) {
+	fs := newMockFS()
+	exec := newMockExec()
+	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="rocky"` + "\n")
+	fs.files["/mnt/root/etc/shadow"] = []byte("root:$6$old:19000:0:99999:7:::\n")
+	deps := Deps{
+		Exec: exec,
+		FS:   fs,
+		NICs: []NICInfo{
+			{Name: "idrac", MAC: "64:00:6a:c2:bf:e3", Driver: "cdc_ether", Link: true}, // virtual, must not shift ethN numbering
+			{Name: "eno1", MAC: "AA:BB:CC:DD:EE:01", Driver: "tg3", Link: true},
+			{Name: "eno2", MAC: "AA:BB:CC:DD:EE:02", Driver: "tg3"},
+		},
+	}
+	spec := jobs.InstallSpec{
+		Profile: profiles.Profile{OSFamily: "rhel",
+			HostnameTemplate: "n-{uuid8}",
+			RootPasswordHash: "$6$hash",
+			Network: profiles.NetworkConfig{
+				Method:    "static",
+				PrefixLen: 24,
+				Gateway:   "172.16.40.1",
+				Bond: &profiles.BondConfig{
+					Mode:    "active-backup",
+					Miimon:  100,
+					Slaves:  []string{"by-name:eno1", "by-name:eno2"},
+					Primary: "by-name:eno1",
+				},
+			},
+		},
+		Binding: bindings.Binding{
+			MachineUUID:   "abcdef01-0000-0000-0000-000000000000",
+			StaticAddress: "172.16.40.2",
+		},
+	}
+
+	if err := BuildSeed(context.Background(), deps, spec, "/mnt/root"); err != nil {
+		t.Fatalf("BuildSeed failed: %v", err)
+	}
+	data, ok := fs.files["/mnt/root/etc/NetworkManager/system-connections/bond0.nmconnection"]
+	if !ok {
+		t.Fatal("bond0.nmconnection not written")
+	}
+	s := string(data)
+	if !strings.Contains(s, "primary=eth0") {
+		t.Fatalf("primary must be the installed-OS name eth0 (eno1 is physical idx 0, virtual idrac skipped), got:\n%s", s)
 	}
 }
