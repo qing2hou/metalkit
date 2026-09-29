@@ -39,9 +39,9 @@ import (
 // reporterHandler wraps an inner handler and forwards each record to a
 // Reporter via an async batched sink.
 type reporterHandler struct {
-	inner    slog.Handler
-	sink     *asyncLogSink
-	attrsMu  sync.Mutex // guards WithAttrs/WithGroup builder below
+	inner   slog.Handler
+	sink    *asyncLogSink
+	attrsMu sync.Mutex // guards WithAttrs/WithGroup builder below
 }
 
 // newReporterHandler returns a handler that writes to inner AND forwards
@@ -123,7 +123,7 @@ type asyncLogSink struct {
 }
 
 const (
-	asyncLogChannelCap = 1024
+	asyncLogChannelCap  = 1024
 	asyncLogConcurrency = 5
 )
 

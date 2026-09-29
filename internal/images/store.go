@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -28,7 +29,7 @@ const (
 	MaxImageSize      = int64(10 * 1024 * 1024 * 1024) // 10 GiB
 	DefaultChunkSize  = int64(10 * 1024 * 1024)        // 10 MiB
 	MaxChunkSize      = int64(64 * 1024 * 1024)        // 64 MiB
-	MaxUploadSessions = 32                              // running in parallel
+	MaxUploadSessions = 32                             // running in parallel
 )
 
 // Store is the catalog plus upload-session bookkeeping. It is layered onto a
@@ -55,28 +56,41 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger, dir string) 
 	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
 		return nil, fmt.Errorf("apply images schema: %w", err)
 	}
+	// Idempotent column adds for databases created before arch existed.
+	// "duplicate column name" is the expected (benign) failure.
+	for _, m := range migrations {
+		if _, err := db.ExecContext(ctx, m); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return nil, fmt.Errorf("apply images migration %q: %w", m, err)
+			}
+		}
+	}
 	s := &Store{db: db, logger: logger, dir: dir}
 	if err := s.ensureDirs(); err != nil {
 		return nil, err
 	}
+	// One-time: bring pre-filename-era rows/files onto the upload-name layout.
+	s.RewriteLegacyNames()
 	return s, nil
 }
 
 // Image is the public record of a finalized image.
 type Image struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Version      string    `json:"version,omitempty"`
-	Family       string    `json:"family,omitempty"`
-	Format       string    `json:"format"`
-	SizeBytes    int64     `json:"size_bytes"`
-	VirtualSize  int64     `json:"virtual_size,omitempty"`
-	SHA256       string    `json:"sha256"`
-	UploadedAt   time.Time `json:"uploaded_at"`
-	UploadedBy   string    `json:"uploaded_by"`
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	Version      string     `json:"version,omitempty"`
+	Family       string     `json:"family,omitempty"`
+	Arch         string     `json:"arch,omitempty"` // "amd64" | "arm64"
+	Format       string     `json:"format"`
+	SizeBytes    int64      `json:"size_bytes"`
+	VirtualSize  int64      `json:"virtual_size,omitempty"`
+	SHA256       string     `json:"sha256"`
+	Filename     string     `json:"filename,omitempty"` // on-disk file name (sanitized upload name)
+	UploadedAt   time.Time  `json:"uploaded_at"`
+	UploadedBy   string     `json:"uploaded_by"`
 	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
-	Notes        string    `json:"notes,omitempty"`
-	MetadataJSON string    `json:"metadata_json,omitempty"`
+	Notes        string     `json:"notes,omitempty"`
+	MetadataJSON string     `json:"metadata_json,omitempty"`
 }
 
 // UploadSession captures the state of an in-flight chunked upload.
@@ -85,6 +99,7 @@ type UploadSession struct {
 	Name           string    `json:"name"`
 	Version        string    `json:"version,omitempty"`
 	Family         string    `json:"family,omitempty"`
+	Arch           string    `json:"arch,omitempty"`
 	Notes          string    `json:"notes,omitempty"`
 	ExpectedSHA256 string    `json:"expected_sha256"`
 	TotalSize      int64     `json:"total_size"`
@@ -100,6 +115,7 @@ type CreateUploadInput struct {
 	Name           string
 	Version        string
 	Family         string
+	Arch           string
 	Notes          string
 	ExpectedSHA256 string
 	TotalSize      int64
@@ -173,10 +189,10 @@ func (s *Store) CreateUpload(ctx context.Context, in CreateUploadInput) (*Upload
 
 	if _, err := s.db.ExecContext(ctx, `
         INSERT INTO upload_sessions
-            (id, name, version, family, notes, expected_sha256, total_size,
+            (id, name, version, family, arch, notes, expected_sha256, total_size,
              chunk_size, num_chunks, uploaded_chunks, uploaded_by, started_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-		id, in.Name, in.Version, in.Family, in.Notes, in.ExpectedSHA256,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+		id, in.Name, in.Version, in.Family, in.Arch, in.Notes, in.ExpectedSHA256,
 		in.TotalSize, chunkSize, numChunks, in.UploadedBy, started,
 	); err != nil {
 		return nil, fmt.Errorf("insert upload session: %w", err)
@@ -187,6 +203,7 @@ func (s *Store) CreateUpload(ctx context.Context, in CreateUploadInput) (*Upload
 		Name:           in.Name,
 		Version:        in.Version,
 		Family:         in.Family,
+		Arch:           in.Arch,
 		Notes:          in.Notes,
 		ExpectedSHA256: in.ExpectedSHA256,
 		TotalSize:      in.TotalSize,
@@ -204,10 +221,10 @@ func (s *Store) GetUpload(ctx context.Context, id string) (*UploadSession, error
 	var started int64
 	var version, family, notes sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-        SELECT id, name, version, family, notes, expected_sha256, total_size,
+        SELECT id, name, version, family, COALESCE(arch,''), notes, expected_sha256, total_size,
                chunk_size, num_chunks, uploaded_chunks, uploaded_by, started_at
         FROM upload_sessions WHERE id = ?`, id).Scan(
-		&u.ID, &u.Name, &version, &family, &notes, &u.ExpectedSHA256, &u.TotalSize,
+		&u.ID, &u.Name, &version, &family, &u.Arch, &notes, &u.ExpectedSHA256, &u.TotalSize,
 		&u.ChunkSize, &u.NumChunks, &u.UploadedChunks, &u.UploadedBy, &started,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -261,6 +278,7 @@ func (s *Store) DeleteUpload(ctx context.Context, id string) error {
 // itself touch the filesystem; uploads.go does that and then calls this to
 // commit metadata + delete the now-redundant session row in one transaction.
 type FinalizeInput struct {
+	Arch         string
 	Name         string
 	Version      string
 	Family       string
@@ -277,11 +295,20 @@ type FinalizeInput struct {
 // FinalizeImage inserts the images row and deletes the session row in a single
 // transaction. Returns the populated Image. If the sha256 already exists in
 // the catalog the transaction rolls back and ErrDuplicate is returned.
+//
+// The on-disk filename is derived from the upload name (see sanitizeFilename);
+// if that name is already taken by a DIFFERENT sha in the catalog (two files
+// can legitimately share a name after re-upload of an edited image), a short
+// hash suffix is appended so both can coexist on disk.
 func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, error) {
 	if !sha256RE.MatchString(in.SHA256) {
 		return nil, errors.New("images: sha256 must be 64 lowercase hex chars")
 	}
 	id, err := newImageID()
+	if err != nil {
+		return nil, err
+	}
+	filename, err := s.uniqueFilename(ctx, in.Name, in.Format, in.SHA256)
 	if err != nil {
 		return nil, err
 	}
@@ -304,11 +331,11 @@ func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, er
 
 	if _, err := tx.ExecContext(ctx, `
         INSERT INTO images
-            (id, name, version, family, format, size_bytes, virtual_size,
-             sha256, uploaded_at, uploaded_by, notes, metadata_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, in.Name, in.Version, in.Family, in.Format, in.SizeBytes, in.VirtualSize,
-		in.SHA256, uploadedAt, in.UploadedBy, in.Notes, in.MetadataJSON,
+            (id, name, version, family, arch, format, size_bytes, virtual_size,
+             sha256, filename, uploaded_at, uploaded_by, notes, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, in.Name, in.Version, in.Family, in.Arch, in.Format, in.SizeBytes, in.VirtualSize,
+		in.SHA256, filename, uploadedAt, in.UploadedBy, in.Notes, in.MetadataJSON,
 	); err != nil {
 		return nil, fmt.Errorf("insert image: %w", err)
 	}
@@ -329,10 +356,12 @@ func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, er
 		Name:         in.Name,
 		Version:      in.Version,
 		Family:       in.Family,
+		Arch:         in.Arch,
 		Format:       in.Format,
 		SizeBytes:    in.SizeBytes,
 		VirtualSize:  in.VirtualSize,
 		SHA256:       in.SHA256,
+		Filename:     filename,
 		UploadedAt:   time.Unix(uploadedAt, 0).UTC(),
 		UploadedBy:   in.UploadedBy,
 		Notes:        in.Notes,
@@ -343,8 +372,9 @@ func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, er
 // ListImages returns all images, most-recently-uploaded first.
 func (s *Store) ListImages(ctx context.Context) ([]Image, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, name, COALESCE(version,''), COALESCE(family,''), format,
-               size_bytes, COALESCE(virtual_size, 0), sha256, uploaded_at,
+        SELECT id, name, COALESCE(version,''), COALESCE(family,''), COALESCE(arch,''), format,
+               size_bytes, COALESCE(virtual_size, 0), sha256,
+               COALESCE(filename,''), uploaded_at,
                uploaded_by, last_used_at, COALESCE(notes,''),
                COALESCE(metadata_json,'')
         FROM images
@@ -358,12 +388,12 @@ func (s *Store) ListImages(ctx context.Context) ([]Image, error) {
 	out := make([]Image, 0)
 	for rows.Next() {
 		var (
-			img             Image
-			uploadedAt      int64
-			lastUsedAt      sql.NullInt64
+			img        Image
+			uploadedAt int64
+			lastUsedAt sql.NullInt64
 		)
-		if err := rows.Scan(&img.ID, &img.Name, &img.Version, &img.Family, &img.Format,
-			&img.SizeBytes, &img.VirtualSize, &img.SHA256, &uploadedAt,
+		if err := rows.Scan(&img.ID, &img.Name, &img.Version, &img.Family, &img.Arch, &img.Format,
+			&img.SizeBytes, &img.VirtualSize, &img.SHA256, &img.Filename, &uploadedAt,
 			&img.UploadedBy, &lastUsedAt, &img.Notes, &img.MetadataJSON); err != nil {
 			return nil, fmt.Errorf("scan image: %w", err)
 		}
@@ -388,13 +418,15 @@ func (s *Store) GetImage(ctx context.Context, id string) (*Image, error) {
 		lastUsedAt sql.NullInt64
 	)
 	err := s.db.QueryRowContext(ctx, `
-        SELECT id, name, COALESCE(version,''), COALESCE(family,''), format,
-               size_bytes, COALESCE(virtual_size, 0), sha256, uploaded_at,
+        SELECT id, name, COALESCE(version,''), COALESCE(family,''), COALESCE(arch,''), format,
+               size_bytes, COALESCE(virtual_size, 0), sha256,
+               COALESCE(filename,''), uploaded_at,
                uploaded_by, last_used_at, COALESCE(notes,''),
                COALESCE(metadata_json,'')
         FROM images WHERE id = ?`, id).Scan(
-		&img.ID, &img.Name, &img.Version, &img.Family, &img.Format,
-		&img.SizeBytes, &img.VirtualSize, &img.SHA256, &uploadedAt,
+		&img.ID, &img.Name, &img.Version, &img.Family, &img.Arch, &img.Format,
+		&img.SizeBytes, &img.VirtualSize, &img.SHA256,
+		&img.Filename, &uploadedAt,
 		&img.UploadedBy, &lastUsedAt, &img.Notes, &img.MetadataJSON,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -428,7 +460,7 @@ func (s *Store) DeleteImage(ctx context.Context, id string) (*Image, error) {
 // Used by startup-time GC to clean up abandoned uploads.
 func (s *Store) ListStaleUploads(ctx context.Context, cutoff time.Time) ([]UploadSession, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, name, version, family, notes, expected_sha256, total_size,
+        SELECT id, name, version, family, COALESCE(arch,''), notes, expected_sha256, total_size,
                chunk_size, num_chunks, uploaded_chunks, uploaded_by, started_at
         FROM upload_sessions WHERE started_at < ?`, cutoff.Unix())
 	if err != nil {
@@ -441,7 +473,7 @@ func (s *Store) ListStaleUploads(ctx context.Context, cutoff time.Time) ([]Uploa
 		var u UploadSession
 		var started int64
 		var version, family, notes sql.NullString
-		if err := rows.Scan(&u.ID, &u.Name, &version, &family, &notes,
+		if err := rows.Scan(&u.ID, &u.Name, &version, &family, &u.Arch, &notes,
 			&u.ExpectedSHA256, &u.TotalSize, &u.ChunkSize, &u.NumChunks,
 			&u.UploadedChunks, &u.UploadedBy, &started); err != nil {
 			return nil, fmt.Errorf("scan stale upload: %w", err)

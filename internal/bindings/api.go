@@ -6,6 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"metalkit/internal/audit"
+	"metalkit/internal/sessions"
 )
 
 // API surface (all behind Basic Auth):
@@ -24,6 +27,15 @@ import (
 type API struct {
 	store  *Store
 	logger *slog.Logger
+	// audit, when set, receives high-value events (password viewed) that
+	// deserve richer records than the generic HTTP-level trail.
+	audit *audit.Store
+}
+
+// WithAudit wires an audit store for high-value event records.
+func (a *API) WithAudit(as *audit.Store) *API {
+	a.audit = as
+	return a
 }
 
 // NewAPI constructs an API.
@@ -90,7 +102,7 @@ func (a *API) upsert(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrImageUnknown), errors.Is(err, ErrProfileUnknown), errors.Is(err, ErrSubnetUnknown):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
-	case errors.Is(err, ErrFamilyMismatch):
+	case errors.Is(err, ErrFamilyMismatch), errors.Is(err, ErrArchMismatch):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	case err != nil:
@@ -123,6 +135,12 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 // pulled which password. Returns 404 if the binding has no password set
 // (the operator should rely on the profile default in that case).
 func (a *API) getPassword(w http.ResponseWriter, r *http.Request) {
+	// Password readback is admin-only: operator machines a fleet but must
+	// not be able to pull every machine's install password.
+	if !sessions.IsAdmin(r.Context()) {
+		writeError(w, http.StatusForbidden, "reading install passwords requires the admin role")
+		return
+	}
 	uuid := strings.ToLower(strings.TrimSpace(r.PathValue("uuid")))
 	pt, err := a.store.GetPassword(r.Context(), uuid)
 	if errors.Is(err, ErrNotFound) {
@@ -138,8 +156,15 @@ func (a *API) getPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "fetch failed")
 		return
 	}
+	actor := sessions.UserFromContext(r.Context())
+	if actor == "" {
+		actor = basicAuthUser(r)
+	}
 	a.logger.Info("binding password viewed",
-		"machine_uuid", uuid, "actor", basicAuthUser(r))
+		"machine_uuid", uuid, "actor", actor)
+	if a.audit != nil {
+		a.audit.Record(r.Context(), actor, "binding.password_view", uuid, "ok", nil)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"password": pt})
 }
 

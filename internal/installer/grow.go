@@ -144,6 +144,7 @@ func rootPartitionOf(ctx context.Context, deps Deps, devPath string) (string, st
 			_ = deps.Reporter.Log(ctx, "warn",
 				fmt.Sprintf("no partitions visible on %s, forcing partprobe + blockdev --rereadpt and retrying", devPath))
 		}
+		logRelease(ctx, deps, devPath, "no-partitions retry")
 		_, _ = deps.Exec.Run(ctx, "partprobe", devPath)
 		_, _ = deps.Exec.Run(ctx, "blockdev", "--rereadpt", devPath)
 		// Give udev a moment to settle and re-create device nodes.

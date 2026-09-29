@@ -45,13 +45,13 @@ type SubnetFetcher interface {
 
 // AgentAPI exposes the agent-facing slice of the jobs state machine:
 //
-//   GET  /api/v1/agent/jobs/current?machine_uuid=<uuid>   poll for assigned job
-//   GET  /api/v1/agent/jobs/{id}/spec?machine_uuid=<uuid> fetch full InstallSpec
-//   POST /api/v1/agent/jobs/{id}/claim                    pending → running
-//   POST /api/v1/agent/jobs/{id}/stage                    update stage marker
-//   POST /api/v1/agent/jobs/{id}/logs                     append log line
-//   POST /api/v1/agent/jobs/{id}/succeed                  running → succeeded
-//   POST /api/v1/agent/jobs/{id}/fail                     {pending|running} → failed
+//	GET  /api/v1/agent/jobs/current?machine_uuid=<uuid>   poll for assigned job
+//	GET  /api/v1/agent/jobs/{id}/spec?machine_uuid=<uuid> fetch full InstallSpec
+//	POST /api/v1/agent/jobs/{id}/claim                    pending → running
+//	POST /api/v1/agent/jobs/{id}/stage                    update stage marker
+//	POST /api/v1/agent/jobs/{id}/logs                     append log line
+//	POST /api/v1/agent/jobs/{id}/succeed                  running → succeeded
+//	POST /api/v1/agent/jobs/{id}/fail                     {pending|running} → failed
 //
 // Auth model: none. Live-boot agents have no credential store, so these paths
 // are exempt from Basic Auth (same as /api/v1/report and /api/v1/heartbeat/*).
@@ -203,6 +203,14 @@ func (a *AgentAPI) getSpec(w http.ResponseWriter, r *http.Request) {
 		profile.Network.NICSelector = binding.NICSelectorOverride
 	}
 
+	// Per-binding monitor implant override (agent_installed): when the
+	// install modal flipped the profile's default for this machine,
+	// substitute it into the profile copy so the installer's
+	// agent-implant stage sees the per-machine decision.
+	if binding.AgentInstalledOverride != nil {
+		profile.AgentInstalled = *binding.AgentInstalledOverride
+	}
+
 	// Subnet overlay (M2.3-12 phase ④): when the operator picked a subnet on
 	// the binding, the subnet is the source of truth for gateway/DNS/VLAN —
 	// not the profile. We overlay those fields onto the profile copy so the
@@ -274,6 +282,7 @@ func (a *AgentAPI) getSpec(w http.ResponseWriter, r *http.Request) {
 		ImageBlobURL:    "/api/v1/agent/images/" + image.ID + "/blob",
 		ImageSHA256:     image.SHA256,
 		ImageFormat:     image.Format,
+		ImageArch:       image.Arch,
 		Profile:         *profile,
 		Binding:         *binding,
 		NetworkRenderer: profile.NetworkRenderer,

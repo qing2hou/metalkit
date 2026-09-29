@@ -171,6 +171,29 @@ func (s *Store) UpsertReport(ctx context.Context, r *Report) (string, int64, err
 	return uuid, reportID, nil
 }
 
+// ReportedBMCIP returns the BMC IP from the machine's latest report; ""
+// when the machine, the report, or the BMC section is absent. Satisfies
+// bmc.ReportReader (interface declared on the bmc side to avoid an import
+// cycle).
+func (s *Store) ReportedBMCIP(ctx context.Context, uuid string) (string, error) {
+	uuid = strings.ToLower(strings.TrimSpace(uuid))
+	if uuid == "" {
+		return "", nil
+	}
+	var ip sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+        SELECT json_extract(r.body, '$.bmc.ip')
+        FROM machines m LEFT JOIN reports r ON r.id = m.latest_report
+        WHERE m.uuid = ?`, uuid).Scan(&ip)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reported bmc ip: %w", err)
+	}
+	return ip.String, nil
+}
+
 // Heartbeat advances last_seen and inserts a heartbeats row. It does not
 // create machines; an unknown uuid returns ErrNotFound so callers can
 // distinguish a missed registration from a transient error.
@@ -241,8 +264,18 @@ type MachineSummary struct {
 	LastSeen     time.Time `json:"last_seen"`
 	Status       string    `json:"status"`
 	LatestReport int64     `json:"latest_report"`
-	BMCIP        string    `json:"bmc_ip"`       // agent-reported BMC IP, parsed from latest report's JSON body
-	BMCManaged   bool      `json:"bmc_managed"`  // true if bmc_credentials row exists for this machine
+	BMCIP        string    `json:"bmc_ip"`      // agent-reported BMC IP, parsed from latest report's JSON body
+	BMCManaged   bool      `json:"bmc_managed"` // true if bmc_credentials row exists for this machine
+	// IPv4Addresses are the machine's configured IPv4s (no CIDR mask) from
+	// the latest report's nics[].addresses — the "business IP" an operator
+	// needs right after an install, without opening the full report.
+	IPv4Addresses []string `json:"ipv4_addresses,omitempty"`
+	// InstallIP is the static address the current binding installs onto the
+	// machine. It IS the business address for static installs: the final
+	// report during install comes from the live image on the provisioning
+	// network, so IPv4Addresses shows that temporary PXE address instead.
+	// UIs should prefer InstallIP when set.
+	InstallIP string `json:"install_ip,omitempty"`
 }
 
 // ListMachines returns all machines, most-recently-seen first.
@@ -252,7 +285,18 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
                m.first_seen, m.last_seen, m.status,
                COALESCE(m.latest_report, 0),
                COALESCE(json_extract(r.body, '$.bmc.ip'), ''),
-               EXISTS(SELECT 1 FROM bmc_credentials b WHERE b.machine_uuid = m.uuid)
+               EXISTS(SELECT 1 FROM bmc_credentials b WHERE b.machine_uuid = m.uuid),
+               -- Machine IPs: flatten nics[].addresses, keep dotted-quad
+               -- entries (agent reports them as "a.b.c.d/nn"; the mask is
+               -- stripped in Go), deduped.
+               COALESCE((
+                   SELECT group_concat(DISTINCT substr(a.value, 1, instr(a.value, '/') - 1))
+                   FROM json_each(r.body, '$.nics') n,
+                        json_each(n.value, '$.addresses') a
+                   WHERE a.value LIKE '%.%.%.%'   -- dotted quad (with mask)
+                     AND a.value NOT LIKE '%:%' -- drop IPv6
+                     AND a.value NOT LIKE '127.%'
+               ), '')
         FROM machines m
         LEFT JOIN reports r ON r.id = m.latest_report
         ORDER BY m.last_seen DESC
@@ -268,11 +312,11 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
 			m                    MachineSummary
 			firstSeen, lastSeen  int64
 			serial, mfr, product sql.NullString
-			bmcIP                sql.NullString
+			bmcIP, ipsCSV        sql.NullString
 			managed              bool
 		)
 		if err := rows.Scan(&m.UUID, &serial, &mfr, &product, &firstSeen, &lastSeen,
-			&m.Status, &m.LatestReport, &bmcIP, &managed); err != nil {
+			&m.Status, &m.LatestReport, &bmcIP, &managed, &ipsCSV); err != nil {
 			return nil, fmt.Errorf("scan machine: %w", err)
 		}
 		m.Serial = serial.String
@@ -282,12 +326,59 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
 		m.LastSeen = time.Unix(lastSeen, 0).UTC()
 		m.BMCIP = bmcIP.String
 		m.BMCManaged = managed
+		if ipsCSV.String != "" {
+			m.IPv4Addresses = strings.Split(ipsCSV.String, ",")
+		}
 		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate machines: %w", err)
 	}
+
+	// Fill InstallIP from the bindings catalog when it exists (separate
+	// schema package; its table may be absent in minimal/test DBs — the
+	// guard keeps ListMachines self-sufficient). One indexed scan per list
+	// call is cheap next to the machines scan itself.
+	ok, err := s.tableExists(ctx, "bindings")
+	if err != nil {
+		s.logger.Warn("check bindings table", "err", err)
+		return out, nil
+	}
+	if !ok {
+		return out, nil
+	}
+	bindIPs := make(map[string]string, len(out))
+	brows, err := s.db.QueryContext(ctx, `SELECT machine_uuid, static_address FROM bindings WHERE static_address IS NOT NULL AND static_address != ''`)
+	if err != nil {
+		s.logger.Warn("list binding addresses", "err", err)
+		return out, nil
+	}
+	for brows.Next() {
+		var uuid, ip string
+		if err := brows.Scan(&uuid, &ip); err == nil {
+			bindIPs[uuid] = ip
+		}
+	}
+	_ = brows.Close()
+	for i := range out {
+		if ip, ok := bindIPs[out[i].UUID]; ok {
+			out[i].InstallIP = ip
+		}
+	}
 	return out, nil
+}
+
+func (s *Store) tableExists(ctx context.Context, name string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?`, name).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // LatestReport returns the most recent Report for a machine, or ErrNotFound.

@@ -65,12 +65,22 @@ func TestIPXEScript(t *testing.T) {
 		"#!ipxe",
 		"kernel http://",
 		"boot=live",
-		"fetch=http://10.99.0.1:8080/boot/filesystem.squashfs",
+		"fetch=http://10.99.0.1:8080/boot/amd64/filesystem.squashfs",
+		// Keep LVM auto-activation out of the live boot: it holds the target
+		// disk's old partitions open and breaks the post-write partition
+		// table re-read (see installer/release.go).
+		"systemd.mask=lvm2-pvscan@.service",
 		"initrd http://",
 		"boot\n",
 	} {
 		if !strings.Contains(bs, want) {
 			t.Errorf("ipxe body missing %q\nfull body:\n%s", want, bs)
+		}
+	}
+	// fetch URL must be query-free for live-boot's extension sniffing.
+	if i := strings.Index(bs, "fetch="); i >= 0 {
+		if end := strings.IndexByte(bs[i:], ' '); end > 0 && strings.Contains(bs[i:i+end], "?") {
+			t.Errorf("fetch URL carries a query string: %s", bs[i:i+end])
 		}
 	}
 }
@@ -185,10 +195,10 @@ func TestStartShutdown(t *testing.T) {
 
 func TestDerivePortSuffix(t *testing.T) {
 	cases := map[string]string{
-		":8080":            ":8080",
-		"0.0.0.0:8080":     ":8080",
-		"127.0.0.1:1234":   ":1234",
-		"[::1]:9000":       ":9000",
+		":8080":          ":8080",
+		"0.0.0.0:8080":   ":8080",
+		"127.0.0.1:1234": ":1234",
+		"[::1]:9000":     ":9000",
 	}
 	for in, want := range cases {
 		got, err := derivePortSuffix(in)

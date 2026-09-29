@@ -80,7 +80,7 @@ func TestRun_HappyPath(t *testing.T) {
 	wantStages := []string{
 		StageBootDetect, StageDiskPick, StageDownload,
 		StageWrite, StageGrow, StageMount, StageSeed,
-		StageGrubInstall, StageUnmount,
+		StageAgentImplant, StageGrubInstall, StageUnmount,
 	}
 	got := h.reporter.Stages()
 	if len(got) != len(wantStages) {

@@ -2,21 +2,25 @@ package httpd
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"metalkit/internal/audit"
 	"metalkit/internal/authapi"
 	"metalkit/internal/bindings"
 	"metalkit/internal/bmc"
 	"metalkit/internal/images"
 	"metalkit/internal/inventory"
 	"metalkit/internal/jobs"
+	"metalkit/internal/monitor"
 	"metalkit/internal/profiles"
 	"metalkit/internal/sessions"
 	"metalkit/internal/settings"
@@ -66,6 +70,12 @@ type Config struct {
 	// consistency check as a foot-gun guard (not real authentication).
 	AgentJobs *jobs.AgentAPI
 
+	// Optional monitor API (metrics ingestion + UI queries). When set,
+	// mounts POST /api/v1/agent/metrics (open — implanted monitors have no
+	// credential store, same model as /api/v1/report) and the operator-side
+	// GET /api/v1/metrics* endpoints (behind normal auth).
+	Monitor *monitor.API
+
 	// Optional util API. When set, mounts /api/v1/util/* (currently just
 	// the SHA-512 crypt helper used by the operator UI).
 	Util *util.API
@@ -74,6 +84,10 @@ type Config struct {
 	// the UI to read and persist runtime DHCP config without rewriting
 	// config.yaml on disk.
 	Settings *settings.API
+
+	// Optional audit API. When set, mounts GET /api/v1/audit for the
+	// operator UI's audit page (who did what when).
+	Audit *audit.API
 
 	// Optional sessions store. When set, the auth middleware will accept
 	// a metalkit_session cookie in addition to Basic Auth. Required for the
@@ -89,13 +103,31 @@ type Config struct {
 	// Basic Auth credentials. Empty AdminPass disables auth (open mode).
 	AdminUser string
 	AdminPass string
+
+	// HTTPS, when non-nil, serves the listener over TLS. See HTTPSConfig.
+	HTTPS *HTTPSConfig
+
+	// Users are operator accounts (username + sha512crypt hash + role).
+	// When non-empty the auth middleware accepts them in addition to the
+	// legacy AdminUser/AdminPass basic-auth pair. Each has its own audit
+	// identity.
+	Users []OperatorUser
+}
+
+// OperatorUser is one operator account for the UI/API.
+type OperatorUser struct {
+	Username string
+	PassHash string // $6$ sha512crypt, verified by util.VerifyCrypt
+	Role     string // "admin" | "operator"
 }
 
 // Server serves the iPXE chain script and boot artifacts.
 type Server struct {
 	cfg      Config
-	httpAddr string // ":PORT" form used inside iPXE URLs
-	srv      *http.Server
+	httpAddr string       // ":PORT" form used inside iPXE URLs
+	srv      *http.Server // TLS listener when HTTPS is configured, else the only listener
+	httpSrv  *http.Server // plain-HTTP listener (machine channel) when HTTPS is configured
+	audit    *audit.Store
 }
 
 // New validates cfg and constructs a Server. ServerIP must be an IPv4 literal
@@ -119,7 +151,11 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("httpd: %w", err)
 	}
 
-	return &Server{cfg: cfg, httpAddr: httpAddr}, nil
+	var auditStore *audit.Store
+	if cfg.Audit != nil {
+		auditStore = cfg.Audit.Store()
+	}
+	return &Server{cfg: cfg, httpAddr: httpAddr, audit: auditStore}, nil
 }
 
 // derivePortSuffix returns ":PORT" from either ":PORT" or "HOST:PORT".
@@ -136,12 +172,97 @@ func derivePortSuffix(addr string) (string, error) {
 
 // Start runs the HTTP server until ctx is cancelled. It returns nil on a
 // clean shutdown; non-context errors are returned as-is.
+//
+// When cfg.HTTPS is set the listener speaks TLS (static operator-provided
+// keypair, or a self-signed certificate auto-generated on first boot).
+// PXE/iPXE clients keep working: the iPXE binaries shipped with metalkit
+// are built with TLS support and trust is not enforced on the boot path
+// (see handleIPXE) — operators requiring strict TLS on /boot/* should put
+// a real certificate in place.
 func (s *Server) Start(ctx context.Context) error {
 	mux := s.routes()
-	handler := sessionOrBasicAuth(s.cfg.AdminUser, s.cfg.AdminPass, s.cfg.Sessions, s.cfg.Logger, mux)
+	// Order matters for the audit trail: auth outermost, then logging.
+	// The auth middleware attaches the operator identity to the REQUEST
+	// context it passes inward (r.WithContext), so the logging layer must
+	// sit inside auth to see that identity — otherwise every audited call
+	// would be attributed to "anonymous".
+	handler := s.logMiddleware(sessionOrBasicAuth(s.cfg.AdminUser, s.cfg.AdminPass, s.cfg.Users, s.cfg.Sessions, s.cfg.Logger, s.auditMiddleware(mux)))
 	s.srv = &http.Server{
 		Addr:              s.cfg.ListenAddr,
-		Handler:           s.logMiddleware(handler),
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		// WriteTimeout intentionally 0: boot file downloads can be slow.
+	}
+
+	// --- Dual listeners when HTTPS is configured -------------------------------
+	// (see config.HTTPSConfig for rationale): TLS listener serves everything;
+	// the plain-HTTP listener keeps only the machine channel (PXE/iPXE and
+	// live-boot agents have no trust store) and redirects humans to TLS.
+	if s.cfg.HTTPS != nil {
+		h := *s.cfg.HTTPS
+		cert, err := ensureTLSMaterial(h, s.cfg.ServerIP, h.AutoDNSName, s.cfg.Logger)
+		if err != nil {
+			return err
+		}
+
+		// TLS server: full handler chain.
+		s.srv = &http.Server{
+			Addr:              h.HTTPSAddr,
+			Handler:           s.logMiddleware(sessionOrBasicAuth(s.cfg.AdminUser, s.cfg.AdminPass, s.cfg.Users, s.cfg.Sessions, s.cfg.Logger, s.auditMiddleware(mux))),
+			ReadHeaderTimeout: 10 * time.Second,
+			TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+		}
+
+		// Plain HTTP server: machine channel verbatim, humans redirected.
+		httpHandler := machineChannelOrRedirect(h.HTTPSAddr,
+			s.logMiddleware(sessionOrBasicAuth(s.cfg.AdminUser, s.cfg.AdminPass, s.cfg.Users, s.cfg.Sessions, s.cfg.Logger, s.auditMiddleware(s.routes()))))
+		s.httpSrv = &http.Server{
+			Addr:              s.cfg.ListenAddr,
+			Handler:           httpHandler,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+
+		errCh := make(chan error, 2)
+		s.cfg.Logger.Info("httpd listening", "addr", s.cfg.ListenAddr, "https_addr", h.HTTPSAddr, "server_ip", s.cfg.ServerIP, "boot_dir", s.cfg.BootDir, "tls", true)
+		if s.cfg.AdminPass == "" && len(s.cfg.Users) == 0 {
+			s.cfg.Logger.Warn("httpd auth disabled: no adminPass and no users — UI and /api/v1/* are open to the network")
+		}
+		run := func(srv *http.Server) {
+			var err error
+			if srv == s.srv {
+				err = srv.ListenAndServeTLS("", "") // certs come from TLSConfig
+			} else {
+				err = srv.ListenAndServe()
+			}
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+				return
+			}
+			errCh <- nil
+		}
+		go run(s.srv)
+		go run(s.httpSrv)
+
+		select {
+		case <-ctx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			for _, srv := range []*http.Server{s.srv, s.httpSrv} {
+				if err := srv.Shutdown(shutdownCtx); err != nil {
+					s.cfg.Logger.Warn("httpd shutdown error", "err", err)
+				}
+			}
+			<-errCh
+			return nil
+		case err := <-errCh:
+			return err
+		}
+	}
+
+	// --- Plain HTTP only (back-compat) -----------------------------------------
+	s.srv = &http.Server{
+		Addr:              s.cfg.ListenAddr,
+		Handler:           s.logMiddleware(sessionOrBasicAuth(s.cfg.AdminUser, s.cfg.AdminPass, s.cfg.Users, s.cfg.Sessions, s.cfg.Logger, s.auditMiddleware(mux))),
 		ReadHeaderTimeout: 10 * time.Second,
 		// WriteTimeout intentionally 0: boot file downloads can be slow.
 	}
@@ -149,8 +270,8 @@ func (s *Server) Start(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
 		s.cfg.Logger.Info("httpd listening", "addr", s.cfg.ListenAddr, "server_ip", s.cfg.ServerIP, "boot_dir", s.cfg.BootDir)
-		if s.cfg.AdminPass == "" {
-			s.cfg.Logger.Warn("httpd auth disabled: adminPass empty — UI and /api/v1/machines* are open to the network")
+		if s.cfg.AdminPass == "" && len(s.cfg.Users) == 0 {
+			s.cfg.Logger.Warn("httpd auth disabled: no adminPass and no users — UI and /api/v1/* are open to the network")
 		}
 		err := s.srv.ListenAndServe()
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -182,6 +303,11 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/boot/vmlinuz", s.bootFile("vmlinuz"))
 	mux.HandleFunc("/boot/initrd.img", s.bootFile("initrd.img"))
 	mux.HandleFunc("/boot/filesystem.squashfs", s.bootFile("filesystem.squashfs"))
+	// Path-style arch URLs (/boot/<arch>/vmlinuz) used by the iPXE script.
+	// Query-style (?arch=) stays for tests / manual curl. bootFile resolves
+	// the arch from either signal via clientArch.
+	mux.HandleFunc("/boot/amd64/", s.bootArchHandler("amd64"))
+	mux.HandleFunc("/boot/arm64/", s.bootArchHandler("arm64"))
 
 	if s.cfg.Store != nil {
 		inventory.RegisterRoutes(mux, s.cfg.Store, s.cfg.Logger.With("component", "api"))
@@ -210,11 +336,17 @@ func (s *Server) routes() *http.ServeMux {
 	if s.cfg.AgentJobs != nil {
 		s.cfg.AgentJobs.RegisterRoutes(mux)
 	}
+	if s.cfg.Monitor != nil {
+		s.cfg.Monitor.RegisterRoutes(mux)
+	}
 	if s.cfg.Util != nil {
 		s.cfg.Util.RegisterRoutes(mux)
 	}
 	if s.cfg.Settings != nil {
 		s.cfg.Settings.RegisterRoutes(mux)
+	}
+	if s.cfg.Audit != nil {
+		s.cfg.Audit.RegisterRoutes(mux)
 	}
 	if s.cfg.Auth != nil {
 		s.cfg.Auth.RegisterRoutes(mux)
@@ -256,7 +388,13 @@ func (s *Server) handleIPXE(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	body, err := renderIPXE(s.cfg.ServerIP, s.httpAddr)
+	// The chain-loaded iPXE tells us its build in the User-Agent (e.g.
+	// "iPXE/arm64-efi"). The DHCP layer already picked the matching
+	// bootfile (arm64-snponly.efi vs snponly.efi), so the UA is the
+	// reliable per-request arch signal here. Explicit ?arch= wins (tests,
+	// manual curl), legacy UAs fall back to amd64.
+	arch := clientArch(r)
+	body, err := renderIPXE(s.cfg.ServerIP, s.httpAddr, arch)
 	if err != nil {
 		s.cfg.Logger.Error("ipxe render failed", "err", err)
 		http.Error(w, "ipxe render failed", http.StatusInternalServerError)
@@ -267,18 +405,64 @@ func (s *Server) handleIPXE(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(body))
 }
 
+// clientArch reports the requesting machine's CPU arch: explicit ?arch=
+// first (tests / curl), then the iPXE User-Agent ("iPXE/arm64-efi" etc.),
+// then amd64 (back-compat — pre-multi-arch clients are x86 by definition).
+func clientArch(r *http.Request) string {
+	if a := strings.TrimSpace(r.URL.Query().Get("arch")); a == "amd64" || a == "arm64" {
+		return a
+	}
+	ua := strings.ToLower(r.UserAgent())
+	if strings.Contains(ua, "arm64") || strings.Contains(ua, "aarch64") {
+		return "arm64"
+	}
+	return "amd64"
+}
+
 // bootFile returns a handler that serves a single named file from BootDir.
 // Uses http.ServeFile so Range/If-Modified-Since/etc. just work.
+//
+// The file is picked from boot/<arch>/ where arch comes from ?arch= or the
+// iPXE User-Agent (see clientArch). For back-compat with single-arch
+// deployments the flat layout (BootDir/<name> directly) is used when the
+// arch subdirectory has no such file: an operator who unpacked an amd64-only
+// tarball keeps working without moving files.
+// bootArchHandler serves /boot/<arch>/<name> — the path-style arch URLs the
+// iPXE script emits (see ipxe.go for why fetch URLs must stay query-free).
+func (s *Server) bootArchHandler(arch string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/boot/"+arch+"/")
+		switch name {
+		case "vmlinuz", "initrd.img", "filesystem.squashfs":
+			s.serveBootFile(w, r, arch, name)
+		default:
+			http.NotFound(w, r)
+		}
+	}
+}
+
 func (s *Server) bootFile(name string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		path := filepath.Join(s.cfg.BootDir, name)
-		w.Header().Set("Content-Type", "application/octet-stream")
-		http.ServeFile(w, r, path)
+		s.serveBootFile(w, r, clientArch(r), name)
 	}
+}
+
+func (s *Server) serveBootFile(w http.ResponseWriter, r *http.Request, arch, name string) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := filepath.Join(s.cfg.BootDir, arch, name)
+	if _, err := os.Stat(path); err != nil {
+		// Fall back to the flat single-arch layout.
+		path = filepath.Join(s.cfg.BootDir, name)
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeFile(w, r, path)
 }
 
 // statusRecorder wraps http.ResponseWriter to capture the status code and
@@ -321,5 +505,49 @@ func (s *Server) logMiddleware(h http.Handler) http.Handler {
 			"bytes", rec.bytes,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
+
+		// Mutating operator API calls are audited by the inner
+		// auditMiddleware (mounted inside the auth middleware so it sees
+		// the authenticated actor); this outer layer only writes the
+		// access log above.
 	})
+}
+
+// auditMiddleware wraps the mux and records every mutating operator API
+// call into the audit store. It sits INSIDE the auth middleware so
+// r.Context() carries the authenticated username (sessions.WithUser),
+// which is exactly what the audit trail needs to attribute actions.
+func (s *Server) auditMiddleware(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.audit == nil || r.Method == http.MethodGet || r.Method == http.MethodHead ||
+			!strings.HasPrefix(r.URL.Path, "/api/v1/") ||
+			strings.HasPrefix(r.URL.Path, "/api/v1/agent/") ||
+			strings.HasPrefix(r.URL.Path, "/api/v1/report") {
+			h.ServeHTTP(w, r)
+			return
+		}
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		h.ServeHTTP(rec, r)
+		outcome := "ok"
+		if rec.status >= 400 {
+			outcome = "failed"
+		}
+		actor := sessions.UserFromContext(r.Context())
+		if actor == "" {
+			actor = "anonymous" // e.g. failed login attempt itself
+		}
+		s.audit.Record(r.Context(), actor, r.Method+" "+r.URL.Path, "", outcome, map[string]any{
+			"status": rec.status,
+			"remote": remoteIP(r),
+		})
+	})
+}
+
+// remoteIP strips the port from RemoteAddr for audit records.
+func remoteIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }

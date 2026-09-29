@@ -30,11 +30,11 @@ func (f *fakeBMC) GetWithPassword(_ context.Context, m string) (BMCCredential, e
 
 // fakeIPMI records calls and lets tests inject failures.
 type fakeIPMI struct {
-	mu             sync.Mutex
-	bootForPXE     []string // machine_uuid+ip per call
-	finalize       []string
-	bootForPXEErr  error
-	finalizeErr    error
+	mu            sync.Mutex
+	bootForPXE    []string // machine_uuid+ip per call
+	finalize      []string
+	bootForPXEErr error
+	finalizeErr   error
 }
 
 func (f *fakeIPMI) BootForPXE(_ context.Context, cred BMCCredential) error {
@@ -159,6 +159,135 @@ func TestOrchestratorTickIdempotent(t *testing.T) {
 
 	if got := len(f.ipmi.bootForPXE); got != 1 {
 		t.Errorf("ticks created %d BootForPXE calls, want 1", got)
+	}
+}
+
+// seedLiveReport makes the machine look like it's sitting in the live system:
+// a fresh last_seen plus a latest report whose kernel_cmdline boots via
+// boot=live.
+func (f *orchFixture) seedLiveReport(t *testing.T, muuid string) {
+	t.Helper()
+	now := time.Now().Unix()
+	res, err := f.db.ExecContext(context.Background(),
+		`INSERT INTO reports (uuid, ts, body) VALUES (?, ?, ?)`,
+		muuid, now,
+		`{"system":{"kernel_cmdline":"boot=live fetch=http://192.168.10.11:9090/boot/amd64/filesystem.squashfs"}}`)
+	if err != nil {
+		t.Fatalf("seed report: %v", err)
+	}
+	rid, _ := res.LastInsertId()
+	if _, err := f.db.ExecContext(context.Background(),
+		`UPDATE machines SET last_seen = ?, latest_report = ? WHERE uuid = ?`,
+		now, rid, muuid); err != nil {
+		t.Fatalf("seed machine live: %v", err)
+	}
+}
+
+// seedInstalledReport makes the machine look like it booted an installed OS:
+// fresh heartbeat but the report has no boot=live in the cmdline.
+func (f *orchFixture) seedInstalledReport(t *testing.T, muuid string) {
+	t.Helper()
+	now := time.Now().Unix()
+	res, err := f.db.ExecContext(context.Background(),
+		`INSERT INTO reports (uuid, ts, body) VALUES (?, ?, ?)`,
+		muuid, now,
+		`{"system":{"kernel_cmdline":"root=UUID=1111 ro quiet splash"}}`)
+	if err != nil {
+		t.Fatalf("seed report: %v", err)
+	}
+	rid, _ := res.LastInsertId()
+	if _, err := f.db.ExecContext(context.Background(),
+		`UPDATE machines SET last_seen = ?, latest_report = ? WHERE uuid = ?`,
+		now, rid, muuid); err != nil {
+		t.Fatalf("seed machine installed: %v", err)
+	}
+}
+
+func TestOrchestratorLiveMachineSkipsPXEReboot(t *testing.T) {
+	f := newOrchFixture(t)
+	muuid := f.seedMachine(t, 10)
+	imageID := f.seedImage(t)
+	profileID := f.seedProfile(t)
+	f.seedBinding(t, muuid, imageID, profileID, "reinstall")
+	f.bmc.creds[muuid] = BMCCredential{IP: "10.0.0.10", Password: "p"}
+	f.seedLiveReport(t, muuid)
+
+	f.orch.tick(context.Background())
+
+	if got := len(f.ipmi.bootForPXE); got != 0 {
+		t.Fatalf("BootForPXE called %d times, want 0 (machine already in live)", got)
+	}
+	j, err := f.store.CurrentForMachine(context.Background(), muuid)
+	if err != nil {
+		t.Fatalf("CurrentForMachine: %v", err)
+	}
+	if j.Status != "running" {
+		t.Errorf("status=%q want running", j.Status)
+	}
+	if j.Stage != "waiting_agent" {
+		t.Errorf("stage=%q want waiting_agent", j.Stage)
+	}
+	logs, _ := f.store.Logs(context.Background(), j.ID, 0, 100)
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l.Message, "no reboot") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'no reboot' log line, got %+v", logs)
+	}
+}
+
+func TestOrchestratorStaleHeartbeatFallsBackToPXE(t *testing.T) {
+	f := newOrchFixture(t)
+	muuid := f.seedMachine(t, 11)
+	imageID := f.seedImage(t)
+	profileID := f.seedProfile(t)
+	f.seedBinding(t, muuid, imageID, profileID, "install")
+	f.bmc.creds[muuid] = BMCCredential{IP: "10.0.0.11", Password: "p"}
+	// boot=live report but the heartbeat is older than LiveFreshness — the
+	// agent is gone (machine has moved on), so we must PXE again.
+	res, err := f.db.ExecContext(context.Background(),
+		`INSERT INTO reports (uuid, ts, body) VALUES (?, ?, ?)`,
+		muuid, time.Now().Unix(),
+		`{"system":{"kernel_cmdline":"boot=live fetch=..."}}`)
+	if err != nil {
+		t.Fatalf("seed report: %v", err)
+	}
+	rid, _ := res.LastInsertId()
+	if _, err := f.db.ExecContext(context.Background(),
+		`UPDATE machines SET last_seen = ?, latest_report = ? WHERE uuid = ?`,
+		time.Now().Add(-10*time.Minute).Unix(), rid, muuid); err != nil {
+		t.Fatalf("stale last_seen: %v", err)
+	}
+
+	f.orch.tick(context.Background())
+
+	if got := len(f.ipmi.bootForPXE); got != 1 {
+		t.Fatalf("BootForPXE=%d want 1 (stale heartbeat must fall back to PXE)", got)
+	}
+	j, _ := f.store.CurrentForMachine(context.Background(), muuid)
+	if j.Stage != "pxe_booting" {
+		t.Errorf("stage=%q want pxe_booting", j.Stage)
+	}
+}
+
+func TestOrchestratorInstalledOSFallsBackToPXE(t *testing.T) {
+	f := newOrchFixture(t)
+	muuid := f.seedMachine(t, 12)
+	imageID := f.seedImage(t)
+	profileID := f.seedProfile(t)
+	f.seedBinding(t, muuid, imageID, profileID, "reinstall")
+	f.bmc.creds[muuid] = BMCCredential{IP: "10.0.0.12", Password: "p"}
+	// Fresh heartbeat but the machine runs an installed OS (report cmd line
+	// has no boot=live). The live agent isn't there; PXE reboot is required.
+	f.seedInstalledReport(t, muuid)
+
+	f.orch.tick(context.Background())
+
+	if got := len(f.ipmi.bootForPXE); got != 1 {
+		t.Fatalf("BootForPXE=%d want 1 (installed OS must fall back to PXE)", got)
 	}
 }
 

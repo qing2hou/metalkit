@@ -57,9 +57,9 @@ func newStoreWithClock(t *testing.T, clk *fakeClock) *sessions.Store {
 
 type fakeClock struct{ now time.Time }
 
-func (c *fakeClock) Now() time.Time            { return c.now }
-func (c *fakeClock) Advance(d time.Duration)   { c.now = c.now.Add(d) }
-func (c *fakeClock) Set(t time.Time)           { c.now = t }
+func (c *fakeClock) Now() time.Time          { return c.now }
+func (c *fakeClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
+func (c *fakeClock) Set(t time.Time)         { c.now = t }
 
 func TestNewStoreIdempotent(t *testing.T) {
 	db := openTestDB(t)

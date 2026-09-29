@@ -636,8 +636,12 @@ got, err := bmcStore.GetWithPassword(ctx, machineUUID)
 controller 进程内有一个 5s tick 的 reconciliation loop：
 
 1. **install 触发**：扫描 `bindings.desired_state ∈ {install, reinstall}` 且无在飞 job 的行，
-   创建 pending job，取 BMC 凭据，调用 ipmitool `chassis bootdev pxe + chassis power cycle`，
-   把 job 推入 `running` 并打 `stage=pxe_booting`。
+   创建 pending job，然后二选一：
+   - **机器已在 live 系统**（心跳 90s 内 + 最新上报的 `system.kernel_cmdline` 含
+     `boot=live`）：跳过 BMC 重启，job 直接 `running` + `stage=waiting_agent`，
+     由本机 agent 轮询认领后原地装机——省一轮电源循环和 600MB live 镜像下载；
+   - **否则**：取 BMC 凭据，调用 ipmitool `chassis bootdev pxe + chassis power cycle`，
+     把 job 推入 `running` 并打 `stage=pxe_booting`。
 2. **finalize**：扫描 `status=succeeded` 但 `bindings.desired_state != none` 的 job：
    ipmitool `chassis bootdev disk`（防止下次启动又 PXE 回 live），然后清掉
    `desired_state` 为 `none`。
@@ -718,11 +722,15 @@ POST /api/v1/agent/jobs/{id}/logs     {machine_uuid, level:"info", message:"..."
 POST /api/v1/agent/jobs/{id}/stage    {machine_uuid, stage:"installed"}
 POST /api/v1/agent/jobs/{id}/succeed  {machine_uuid}
     # 失败时改 POST /fail {machine_uuid, error:"..."}，orchestrator 不自动重试
+    # 终态（succeed/fail/cancelled）后 agent 回到 loop 继续轮询——
+    # 失败重试的 job 无需 IPMI 重启，直接被同一个 live boot 认领；
+    # succeed 后 orchestrator 的 finalize tick 会 power cycle 掉 agent。
 ```
 
 succeed 后 orchestrator 下一 tick 触发 finalize（`ipmitool chassis bootdev disk`
 + power cycle）；fail 不自动重试，admin 需要 POST `/api/v1/bindings/<muuid>`
-重置 `desired_state` 才会再生成新 job。
+重置 `desired_state` 才会再生成新 job——若机器仍在 live（心跳新鲜 +
+cmdline 含 `boot=live`），新 job 免重启直接派给本机 agent（见 §12.3）。
 
 ## 14. Agent Install Spec & Image Blob（M2.3-7 新增）
 

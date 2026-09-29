@@ -205,21 +205,33 @@
 
 ## 11. Web UI
 
-> 服务端渲染的 SPA-lite,所有页面在 `internal/webui/assets/`。
+> Vue 3 单页应用(源码 `frontend/`,Vite 构建到 `internal/webui/assets/` 后 `//go:embed` 进 binary)。
+> 技术栈:Vue 3 + TypeScript + Element Plus + Pinia + Vue Router(history 模式,base `/ui/`)。
 
-| 路径 | 页面 | 主要功能 |
+| 路径 | 视图组件 | 主要功能 |
 |---|---|---|
-| `/ui/` | `index.html` | machine 列表 + 在线状态 + 关键硬件摘要 |
-| `/ui/m/{uuid}` | `detail.html` | 单机详情:硬件、报告历史、BMC、binding、装机控制 |
-| `/ui/images` | `images.html` | 镜像目录:上传、family/format 编辑、删除 |
-| `/ui/profiles` | `profiles.html` | profile 编辑、cloud-init 模板 |
-| `/ui/subnets` | `subnets.html` | 子网 CRUD |
-| `/ui/bmc` | `bmc.html` | BMC 凭据集中视图 + 批量电源操作 |
-| `/ui/jobs` | `jobs.html` | job 列表,带过滤(状态、机器) |
-| `/ui/jobs/{id}` | `job.html` | 单 job 详情:阶段、日志流(autorefresh) |
-| `/ui/login` | `login.html` | 登录页(submit → `/api/v1/auth/login` → cookie) |
+| `/ui/` | `MachinesView` | machine 列表 + 在线状态 + 过滤(URL query 同步)+ 30s 轮询 |
+| `/ui/m/{uuid}` | `MachineDetailView` | 单机详情:装机面板、最近作业、报告历史、硬件报告折叠区、原始 JSON |
+| `/ui/images` | `ImagesView` | 镜像目录:分块上传(8MiB/块)、family 预填、删除 |
+| `/ui/profiles` | `ProfilesView` | profile CRUD:目标盘、root 密码(crypt-sha512)、组件选择 |
+| `/ui/subnets` | `SubnetsView` | 子网 CRUD(网关不得为网络/广播地址) |
+| `/ui/bmc` | `BmcView` | BMC 凭据 + 电源操作(危险操作需输入「确认」)+ PXE 纳管 + CSV 导入 |
+| `/ui/jobs` | `JobsView` | job 列表:状态过滤、取消、一键清除已完成、5s 轮询 |
+| `/ui/jobs/{id}` | `JobDetailView` | 单 job 详情:阶段、增量日志 tail(since_id)、导出、自适应轮询 |
+| `/ui/settings` | `SettingsView` | DHCP 设置：模式(proxy/full)、绑定网卡(下拉选择,含 IP/状态,变更需重启)、地址池(起止/掩码/网关)、DNS、租期、排除 IP;网段类改动热重载生效 |
+| `/ui/login` | `LoginView` | 登录页(submit → `/api/v1/auth/login` → cookie,支持 `?next=` 回跳) |
 
-辅助 JS:`assets/common.js`(fetch 封装)、`assets/app.js`(全局),静态资源都通过 `//go:embed` 进 binary。
+前端构建:改 `frontend/` 后运行 `make frontend`(node 环境构建并提交产物到 `internal/webui/assets/`);只有 Go 环境的机器可直接 `make build`。dev 模式 `cd frontend && npm run dev`(API 代理到 127.0.0.1:8080)。
+
+**生产强化(2026-09)**:
+
+| 能力 | 说明 |
+|---|---|
+| HTTPS | `https:` 双监听:`httpsAddr`(默认 :8443)承载 TLS 全量;原 `httpAddr` 仅保留机器通道(/boot、/healthz、report/heartbeat/agent),人用路径 308 重定向到 TLS(保留方法与 body)。自签证书自动生成或静态证书文件;cookie 自动 Secure |
+| 多用户 | `users:` 配置命名账号(sha512crypt hash),登录/Basic-Auth 双轨;操作者身份进审计 |
+| 审计 | 变更类 API 全量记录(方法/路径/状态码/操作者/IP);装机密码查看单独记录;`/ui/audit` 页可按操作者/动作过滤 |
+| 镜像上传 | 8MiB 分块+断点续传(会话幂等续传)+逐块 SHA-256+扩展名预检 |
+| 轮询健康 | 机器/作业/详情页连续 2 次拉取失败显示常驻错误横幅(数据过期可见) |
 
 ---
 

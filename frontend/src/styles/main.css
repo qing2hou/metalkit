@@ -1,0 +1,160 @@
+/* MetalKit WebUI 全局样式。
+   基于 Element Plus 组件库，通过 CSS 变量把旧的 design token（accent 色、
+   圆角、字体）映射进来，保持与原版一致的视觉基调。 */
+
+:root {
+  --mk-accent: #2563eb;
+  --mk-radius: 8px;
+  --mk-font:
+    -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    sans-serif;
+  --mk-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--mk-font);
+  font-size: 14px;
+  color: var(--el-text-color-primary);
+  background: var(--el-bg-color-page);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Element Plus 主色对齐旧 --accent */
+:root {
+  --el-color-primary: var(--mk-accent);
+}
+
+/* 布局 */
+.mk-page {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 20px 24px 48px;
+}
+
+.mk-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.mk-page-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.mk-muted {
+  color: var(--el-text-color-secondary);
+}
+
+.mk-subtle {
+  color: var(--el-text-color-placeholder);
+  font-size: 12px;
+}
+
+.mono {
+  font-family: var(--mk-mono);
+  font-size: 12px;
+}
+
+/* 可复制文本 */
+.mk-copyable {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.mk-copyable:hover {
+  color: var(--el-color-primary);
+}
+
+/* 作业日志终端 */
+.mk-terminal {
+  background: #0b0e11;
+  color: #d4d7dc;
+  border-radius: var(--mk-radius);
+  padding: 12px 14px;
+  font-family: var(--mk-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  overflow: auto;
+  max-height: 480px;
+  min-height: 160px;
+}
+
+html.dark .mk-terminal {
+  background: #07090b;
+}
+
+.mk-terminal .log-error {
+  color: #f87171;
+}
+
+.mk-terminal .log-warn {
+  color: #fbbf24;
+}
+
+.mk-terminal .log-debug {
+  color: #6b7780;
+}
+
+.mk-terminal .log-info {
+  color: #d4d7dc;
+}
+
+.mk-terminal .log-ts {
+  color: #565e66;
+}
+
+/* 卡片间距 */
+.mk-card + .mk-card {
+  margin-top: 16px;
+}
+
+/* 表格内小操作按钮对齐 */
+.mk-inline-actions .el-button + .el-button {
+  margin-left: 8px;
+}
+
+/* 详情页 KV 表述 */
+.mk-kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px 24px;
+}
+
+.mk-kv-grid .mk-kv {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.mk-kv-grid .mk-kv dt {
+  color: var(--el-text-color-secondary);
+  min-width: 96px;
+  flex-shrink: 0;
+}
+
+.mk-kv-grid .mk-kv dd {
+  margin: 0;
+  word-break: break-all;
+}

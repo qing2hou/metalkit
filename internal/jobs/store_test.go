@@ -32,15 +32,22 @@ func newFixture(t *testing.T) *fixture {
 	t.Cleanup(func() { _ = db.Close() })
 
 	// Stub the FK targets (machines, images, profiles). We don't bring those
-	// packages in to keep the test focused on jobs behaviour.
+	// packages in to keep the test focused on jobs behaviour. machines carries
+	// the live-detection columns the orchestrator reads (last_seen,
+	// latest_report) even though the jobs store itself never touches them.
 	for _, ddl := range []string{
-		`CREATE TABLE machines (uuid TEXT PRIMARY KEY)`,
+		`CREATE TABLE machines (uuid TEXT PRIMARY KEY, last_seen INTEGER NOT NULL DEFAULT 0, latest_report INTEGER)`,
 		`CREATE TABLE images   (id TEXT PRIMARY KEY)`,
 		`CREATE TABLE profiles (id TEXT PRIMARY KEY)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), ddl); err != nil {
 			t.Fatalf("ddl %q: %v", ddl, err)
 		}
+	}
+	// reports is read by the orchestrator's live-detection JOIN.
+	if _, err := db.ExecContext(context.Background(),
+		`CREATE TABLE reports (id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT NOT NULL, ts INTEGER NOT NULL, body TEXT NOT NULL)`); err != nil {
+		t.Fatalf("reports ddl: %v", err)
 	}
 
 	s, err := NewStore(context.Background(), db, logger)

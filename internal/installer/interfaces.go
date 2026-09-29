@@ -115,6 +115,33 @@ type Reporter interface {
 type NICInfo struct {
 	Name string
 	MAC  string
+	// Driver is the kernel driver of the NIC in the live system (ethtool -i),
+	// e.g. "tg3", "i40e" — or "cdc_ether"/"r8152"/"ax88179_178a" for USB
+	// adapters, which includes the BMC's virtual NIC (iDRAC/ILO/CIMC expose it
+	// as a USB CDC ethernet device). Used to keep auto NIC-picking off
+	// management virtual ports; see IsVirtual.
+	Driver string
+	// Link mirrors report.NIC.Link (ethtool operational state UP). The
+	// auto picker prefers a link-up NIC: a port with no cable will never
+	// carry the business network even if its name sorts first.
+	Link bool
+}
+
+// IsVirtual reports whether the NIC is a virtual/mgmt port that must never
+// carry the machine's business network: BMC USB NICs (iDRAC/ILO/CIMC),
+// USB dongles, InfiniBand VNICs. Interface NAMES are useless for this
+// detection across distros (net.ifnames=0 renames everything to ethN and the
+// USB CDC device often lands on eth0 BEFORE the real PCI NICs), but the
+// kernel driver is stable across every distro and naming scheme.
+func (n NICInfo) IsVirtual() bool {
+	switch n.Driver {
+	case "cdc_ether", "cdc_ncm", "rndis_host", "r8152", "ax88179_178a",
+		"ax88772b", "smsc75xx", "smsc95xx", "asix", "ipheth", "sr9700":
+		return true
+	}
+	// Dell iDRAC / HPE ILO virtual NICs also enumerate under the "idrac"/"ilo"
+	// interface names in the live system before any net.ifnames rewrite.
+	return n.Name == "idrac" || n.Name == "ilo" || n.Name == "bmc"
 }
 
 // Deps is the bag of injected dependencies threaded through every stage.

@@ -317,9 +317,66 @@ func TestRenderNetworkConfig_Auto(t *testing.T) {
 		NICSelector: "auto",
 	}
 	b := bindings.Binding{StaticAddress: "10.0.0.5"}
+	// No NIC inventory → wildcard name fallback stays.
 	got := renderNetworkConfig(nc, b, nil, false)
 	if !strings.Contains(got, `name: "en*"`) {
 		t.Fatalf("auto selector must produce en* match:\n%s", got)
+	}
+}
+
+// TestRenderNetworkConfig_AutoPinsPhysicalMAC is the regression test for the
+// 2026-09-28 incident: auto NIC selection hardcoded a name matcher, and with
+// net.ifnames=0 the iDRAC USB NIC (cdc_ether) enumerated as eth0 before the
+// real PCI NICs — the business VLAN+static IP landed on the management
+// passthrough port. With NIC inventory present, auto must pin a physical
+// NIC's MAC and never match the virtual one.
+func TestRenderNetworkConfig_AutoPinsPhysicalMAC(t *testing.T) {
+	nc := profiles.NetworkConfig{
+		Method:      "static",
+		PrefixLen:   24,
+		Gateway:     "10.0.0.1",
+		NICSelector: "auto",
+	}
+	b := bindings.Binding{StaticAddress: "10.0.0.5"}
+	nics := []NICInfo{
+		{Name: "idrac", MAC: "64:00:6a:c2:bf:e3", Driver: "cdc_ether", Link: true}, // BMC virtual
+		{Name: "eno1", MAC: "f8:bc:12:50:53:c0", Driver: "tg3", Link: true},        // physical, link-up
+		{Name: "eno2", MAC: "f8:bc:12:50:53:c1", Driver: "tg3"},                    // physical, no link
+	}
+	got := renderNetworkConfig(nc, b, nics, false)
+	if !strings.Contains(got, `macaddress: "f8:bc:12:50:53:c0"`) {
+		t.Fatalf("auto must pin the link-up physical NIC's MAC:\n%s", got)
+	}
+	if strings.Contains(got, "64:00:6a") {
+		t.Fatalf("auto must never match the BMC virtual NIC:\n%s", got)
+	}
+}
+
+func TestPickPhysicalNIC_SkipsVirtualAndPrefersLinkUp(t *testing.T) {
+	nics := []NICInfo{
+		{Name: "idrac", MAC: "64:00:6a:c2:bf:e3", Driver: "cdc_ether", Link: true},
+		{Name: "eno1", MAC: "aa:aa:aa:aa:aa:01", Driver: "tg3"},             // first physical, no link
+		{Name: "eno2", MAC: "aa:aa:aa:aa:aa:02", Driver: "tg3", Link: true}, // link-up physical
+	}
+	got, ok := pickPhysicalNIC(nics)
+	if !ok {
+		t.Fatal("expected a pick from mixed inventory")
+	}
+	if got.MAC != "aa:aa:aa:aa:aa:02" {
+		t.Fatalf("want link-up eno2, got %+v", got)
+	}
+
+	// No link anywhere → first physical wins, still not the virtual one.
+	nics[2].Link = false
+	got, _ = pickPhysicalNIC(nics)
+	if got.MAC != "aa:aa:aa:aa:aa:01" {
+		t.Fatalf("want first physical eno1 when no link, got %+v", got)
+	}
+
+	// Virtual-only inventory → no pick (caller falls back to wildcard).
+	got, ok = pickPhysicalNIC([]NICInfo{{Name: "idrac", MAC: "64:00:6a:c2:bf:e3", Driver: "cdc_ether"}})
+	if ok {
+		t.Fatalf("virtual-only inventory must not pick, got %+v", got)
 	}
 }
 
@@ -1376,7 +1433,6 @@ func TestBuildSeed_NoCloudInit_Bond_NMKeyfiles(t *testing.T) {
 		"interface-name=bond0",
 		"mode=active-backup",
 		"miimon=100",
-		"primary=eno1",
 		"method=manual",
 		"address1=192.168.10.100/24",
 	} {
@@ -1401,8 +1457,293 @@ func TestBuildSeed_NoCloudInit_Bond_NMKeyfiles(t *testing.T) {
 		if !strings.Contains(content, "mac-address="+mac) {
 			t.Errorf("slave %d missing mac-address=%s:\n%s", i, mac, content)
 		}
+		// NO interface-name: ethN prediction is enumeration-order roulette
+		// (iDRAC USB NIC can take eth0); MAC-only matching binds before the
+		// kernel bond collapses the slave MACs, so it is unambiguous.
 		if strings.Contains(content, "interface-name=") {
-			t.Errorf("slave %d should NOT have interface-name:\n%s", i, content)
+			t.Errorf("slave %d must not pin interface-name (ethN unreliable):\n%s", i, content)
+		}
+	}
+}
+
+// TestBuildSeed_NM_Bond_VLAN_MasterL2Only is the regression test for the
+// 2026-09-28 Rocky incident: with a VLAN on top of the bond, the bond master
+// keyfile must NOT carry the static IP — the IP lives on the VLAN keyfile.
+// Duplicate IP on bond0 AND bond0.40 wedged routing (gateway unreachable).
+func TestBuildSeed_NM_Bond_VLAN_MasterL2Only(t *testing.T) {
+	fs := newMockFS()
+	exec := newMockExec()
+	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="rocky"` + "\n")
+	fs.files["/mnt/root/etc/shadow"] = []byte("root:$6$old:19000:0:99999:7:::\n")
+	deps := Deps{
+		Exec: exec,
+		FS:   fs,
+		NICs: []NICInfo{
+			{Name: "eno1", MAC: "AA:BB:CC:DD:EE:01"},
+			{Name: "eno2", MAC: "AA:BB:CC:DD:EE:02"},
+		},
+	}
+
+	spec := jobs.InstallSpec{
+		Profile: profiles.Profile{OSFamily: "rhel",
+			HostnameTemplate: "node-{uuid8}",
+			RootPasswordHash: "$6$hash",
+			Network: profiles.NetworkConfig{
+				Method:    "static",
+				PrefixLen: 24,
+				Gateway:   "172.16.40.1",
+				DNS:       []string{"223.5.5.5"},
+				VLAN:      40,
+				Bond: &profiles.BondConfig{
+					Mode:   "802.3ad",
+					Slaves: []string{"by-name:eno1", "by-name:eno2"},
+				},
+			},
+		},
+		Binding: bindings.Binding{
+			MachineUUID:   "abcdef01-0000-0000-0000-000000000000",
+			StaticAddress: "172.16.40.2",
+		},
+	}
+
+	if err := BuildSeed(context.Background(), deps, spec, "/mnt/root"); err != nil {
+		t.Fatalf("BuildSeed failed: %v", err)
+	}
+
+	bondData, ok := fs.files["/mnt/root/etc/NetworkManager/system-connections/bond0.nmconnection"]
+	if !ok {
+		t.Fatal("bond0.nmconnection not written")
+	}
+	bondStr := string(bondData)
+	if strings.Contains(bondStr, "address1=") {
+		t.Errorf("bond0 master must not carry the static IP when a VLAN sits on top:\n%s", bondStr)
+	}
+	for _, sub := range []string{"[ipv4]", "method=disabled", "[ipv6]", "mode=802.3ad"} {
+		// note: method=disabled appears under BOTH [ipv4] and [ipv6]; one
+		// Contains check covers both (same literal).
+		if !strings.Contains(bondStr, sub) {
+			t.Errorf("bond0 master missing explicit %q (ipv4 defaults to DHCP when omitted):\n%s", sub, bondStr)
+		}
+	}
+
+	vlanData, ok := fs.files["/mnt/root/etc/NetworkManager/system-connections/bond0.40.nmconnection"]
+	if !ok {
+		t.Fatal("bond0.40.nmconnection (VLAN) not written")
+	}
+	vlanStr := string(vlanData)
+	for _, sub := range []string{"type=vlan", "parent=bond0", "id=40", "address1=172.16.40.2/24", "gateway=172.16.40.1", "wait-device-timeout=30000"} {
+		if !strings.Contains(vlanStr, sub) {
+			t.Errorf("bond0.40 VLAN keyfile missing %q:\n%s", sub, vlanStr)
+		}
+	}
+}
+
+// TestBuildSeed_Sysconfig_Bond_VLAN verifies the RHEL7 ifcfg bond path: with
+// a VLAN, the master ifcfg-bond0 stays L2-only and ifcfg-bond0.<vlan> carries
+// the static IP.
+func TestBuildSeed_Sysconfig_Bond_VLAN(t *testing.T) {
+	fs := newMockFS()
+	if err := fs.MkdirAll("/mnt/root/etc", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fs.files["/mnt/root/etc/os-release"] = []byte("ID=\"centos\"\nVERSION_ID=\"7\"\n")
+	deps := Deps{
+		Exec: newMockExec(),
+		FS:   fs,
+		NICs: []NICInfo{
+			{Name: "eno1", MAC: "aa:bb:cc:dd:ee:01"},
+			{Name: "eno2", MAC: "aa:bb:cc:dd:ee:02"},
+		},
+	}
+	spec := jobs.InstallSpec{
+		Profile: profiles.Profile{OSFamily: "rhel7",
+			HostnameTemplate: "c7-{uuid8}",
+			RootPasswordHash: "$6$h$" + strings.Repeat("b", 86),
+			Network: profiles.NetworkConfig{
+				Method:    "static",
+				PrefixLen: 24,
+				Gateway:   "172.16.40.1",
+				VLAN:      40,
+				Bond: &profiles.BondConfig{
+					Mode:   "active-backup",
+					Slaves: []string{"eno1", "eno2"},
+				},
+			},
+		},
+		Binding: bindings.Binding{
+			MachineUUID:   "deadbeef000000000000000000000000",
+			StaticAddress: "172.16.40.5",
+		},
+	}
+
+	if err := BuildSeed(context.Background(), deps, spec, "/mnt/root"); err != nil {
+		t.Fatalf("BuildSeed failed: %v", err)
+	}
+
+	sysDir := "/mnt/root/etc/sysconfig/network-scripts"
+	master, ok := fs.files[sysDir+"/ifcfg-bond0"]
+	if !ok {
+		t.Fatal("ifcfg-bond0 not written")
+	}
+	if strings.Contains(string(master), "IPADDR=") {
+		t.Errorf("bond0 master ifcfg must not carry IPADDR with VLAN on top:\n%s", master)
+	}
+
+	vlan, ok := fs.files[sysDir+"/ifcfg-bond0.40"]
+	if !ok {
+		t.Fatal("ifcfg-bond0.40 (VLAN) not written")
+	}
+	for _, sub := range []string{"VLAN=yes", "PHYSDEV=bond0", "IPADDR=172.16.40.5", "GATEWAY=172.16.40.1"} {
+		if !strings.Contains(string(vlan), sub) {
+			t.Errorf("ifcfg-bond0.40 missing %q:\n%s", sub, vlan)
+		}
+	}
+}
+
+// TestWriteENIInterfacesBond_VLAN verifies the ENI bond path writes the VLAN
+// stanza and keeps the bond master L2-only.
+func TestWriteENIInterfacesBond_VLAN(t *testing.T) {
+	fs := newMockFS()
+	deps := Deps{FS: fs}
+	nc := profiles.NetworkConfig{
+		Method:    "static",
+		PrefixLen: 24,
+		Gateway:   "172.16.40.1",
+		DNS:       []string{"223.5.5.5"},
+		VLAN:      40,
+		Bond: &profiles.BondConfig{
+			Mode:   "802.3ad",
+			Slaves: []string{"eno1", "eno2"},
+		},
+	}
+	b := bindings.Binding{StaticAddress: "172.16.40.9"}
+
+	writeENIInterfacesBond(deps, "/mnt/root", nc, b, nil)
+
+	data, ok := fs.files["/mnt/root/etc/network/interfaces"]
+	if !ok {
+		t.Fatal("interfaces not written")
+	}
+	content := string(data)
+	if !strings.Contains(content, "iface bond0 inet manual") {
+		t.Errorf("bond0 must be inet manual (L2-only) with VLAN on top:\n%s", content)
+	}
+	if strings.Contains(content, "iface bond0 inet static") {
+		t.Errorf("bond0 must not hold the static IP:\n%s", content)
+	}
+	for _, sub := range []string{"auto bond0.40", "iface bond0.40 inet static", "address 172.16.40.9", "gateway 172.16.40.1", "vlan-raw-device bond0"} {
+		if !strings.Contains(content, sub) {
+			t.Errorf("ENI bond VLAN stanza missing %q:\n%s", sub, content)
+		}
+	}
+}
+
+// TestBuildSeed_WritesVTInitService verifies the installed system gets the
+// same iDRAC vKVM Scroll_Lock shield the live image ships: the unit file
+// plus the getty.target.wants enable symlink.
+func TestBuildSeed_WritesVTInitService(t *testing.T) {
+	fs := newMockFS()
+	exec := newMockExec()
+	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="rocky"` + "\n")
+	fs.files["/mnt/root/etc/shadow"] = []byte("root:$6$old:19000:0:99999:7:::\n")
+	deps := Deps{Exec: exec, FS: fs, NICs: []NICInfo{{Name: "eno1", MAC: "aa:bb:cc:dd:ee:01"}}}
+	spec := jobs.InstallSpec{
+		Profile: profiles.Profile{OSFamily: "rhel",
+			HostnameTemplate: "n-{uuid8}",
+			RootPasswordHash: "$6$hash",
+			Network:          profiles.NetworkConfig{Method: "dhcp", NICSelector: "auto"},
+		},
+		Binding: bindings.Binding{MachineUUID: "abcdef01-0000-0000-0000-000000000000"},
+	}
+
+	if err := BuildSeed(context.Background(), deps, spec, "/mnt/root"); err != nil {
+		t.Fatalf("BuildSeed failed: %v", err)
+	}
+
+	unit, ok := fs.files["/mnt/root/etc/systemd/system/metalkit-vt-init.service"]
+	if !ok {
+		t.Fatal("metalkit-vt-init.service not written to installed rootfs")
+	}
+	for _, sub := range []string{"keycode 70 = VoidSymbol", "setleds", "WantedBy=getty.target"} {
+		if !strings.Contains(string(unit), sub) {
+			t.Errorf("vt-init unit missing %q:\n%s", sub, unit)
+		}
+	}
+	link := "/mnt/root/etc/systemd/system/getty.target.wants/metalkit-vt-init.service"
+	if !fs.Exists(link) {
+		t.Errorf("vt-init enable symlink missing: %s", link)
+	}
+}
+
+// TestBuildSeed_NM_Bond_NoUnreliableNameRefs pins the 2026-09-29 lesson:
+// neither slave keyfiles nor the bond master may reference interfaces by a
+// predicted installed-OS name (ethN). Enumeration order (USB iDRAC vs PCI
+// NICs) varies per boot, so a pinned name can target the wrong device
+// (slave on eth0=iDRAC, or an eth1+MAC combo matching nothing — bond stuck
+// activating with zero slaves). Slaves match by MAC (bound before the
+// kernel bond collapses slave MACs); active-backup writes no primary= and
+// lets the kernel pin the first carrier-up slave.
+func TestBuildSeed_NM_Bond_NoUnreliableNameRefs(t *testing.T) {
+	fs := newMockFS()
+	exec := newMockExec()
+	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="rocky"` + "\n")
+	fs.files["/mnt/root/etc/shadow"] = []byte("root:$6$old:19000:0:99999:7:::\n")
+	deps := Deps{
+		Exec: exec,
+		FS:   fs,
+		NICs: []NICInfo{
+			{Name: "idrac", MAC: "64:00:6a:c2:bf:e3", Driver: "cdc_ether", Link: true}, // virtual; must never be referenced
+			{Name: "eno1", MAC: "AA:BB:CC:DD:EE:01", Driver: "tg3", Link: true},
+			{Name: "eno2", MAC: "AA:BB:CC:DD:EE:02", Driver: "tg3"},
+		},
+	}
+	spec := jobs.InstallSpec{
+		Profile: profiles.Profile{OSFamily: "rhel",
+			HostnameTemplate: "n-{uuid8}",
+			RootPasswordHash: "$6$hash",
+			Network: profiles.NetworkConfig{
+				Method:    "static",
+				PrefixLen: 24,
+				Gateway:   "172.16.40.1",
+				Bond: &profiles.BondConfig{
+					Mode:    "active-backup",
+					Miimon:  100,
+					Slaves:  []string{"by-name:eno1", "by-name:eno2"},
+					Primary: "by-name:eno1",
+				},
+			},
+		},
+		Binding: bindings.Binding{
+			MachineUUID:   "abcdef01-0000-0000-0000-000000000000",
+			StaticAddress: "172.16.40.2",
+		},
+	}
+
+	if err := BuildSeed(context.Background(), deps, spec, "/mnt/root"); err != nil {
+		t.Fatalf("BuildSeed failed: %v", err)
+	}
+	data, ok := fs.files["/mnt/root/etc/NetworkManager/system-connections/bond0.nmconnection"]
+	if !ok {
+		t.Fatal("bond0.nmconnection not written")
+	}
+	s := string(data)
+	if strings.Contains(s, "primary=") {
+		t.Errorf("bond master must not write primary= (name refs unreliable):\n%s", s)
+	}
+	if strings.Contains(s, "64:00:6a") {
+		t.Errorf("bond master must never reference the virtual NIC:\n%s", s)
+	}
+	for i := 0; i < 2; i++ {
+		path := fmt.Sprintf("/mnt/root/etc/NetworkManager/system-connections/bond0-slave-%d.nmconnection", i)
+		slave, ok := fs.files[path]
+		if !ok {
+			t.Fatalf("%s not written", path)
+		}
+		if strings.Contains(string(slave), "interface-name=") {
+			t.Errorf("slave %d must not pin interface-name:\n%s", i, slave)
+		}
+		if strings.Contains(string(slave), "64:00:6a") {
+			t.Errorf("slave %d must never match the virtual NIC:\n%s", i, slave)
 		}
 	}
 }

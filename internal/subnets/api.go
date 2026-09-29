@@ -30,6 +30,10 @@ type API struct {
 	store        *Store
 	logger       *slog.Logger
 	refCountFunc BindingRefCounter
+	// dhcpReload runs after a successful create/update/delete so the DHCP
+	// server's relay pools track the catalog without a controller restart.
+	// Optional; nil keeps tests simple.
+	dhcpReload func(ctx context.Context) error
 }
 
 func NewAPI(store *Store, logger *slog.Logger) *API {
@@ -42,6 +46,24 @@ func NewAPI(store *Store, logger *slog.Logger) *API {
 func (a *API) WithBindingRefCount(fn BindingRefCounter) *API {
 	a.refCountFunc = fn
 	return a
+}
+
+// WithDHCPReload registers the post-mutation DHCP pool refresh hook.
+func (a *API) WithDHCPReload(fn func(ctx context.Context) error) *API {
+	a.dhcpReload = fn
+	return a
+}
+
+// reloadDHCP is best-effort: a catalog write already succeeded, so a reload
+// failure is logged (the next successful mutation or settings PUT retries)
+// rather than failing the HTTP response after the fact.
+func (a *API) reloadDHCP(ctx context.Context, action string) {
+	if a.dhcpReload == nil {
+		return
+	}
+	if err := a.dhcpReload(ctx); err != nil {
+		a.logger.Warn("dhcp pool reload after subnet change", "action", action, "err", err)
+	}
 }
 
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
@@ -81,6 +103,7 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	a.reloadDHCP(r.Context(), "create")
 	writeJSON(w, http.StatusCreated, sn)
 }
 
@@ -125,6 +148,7 @@ func (a *API) update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	a.reloadDHCP(r.Context(), "update")
 	writeJSON(w, http.StatusOK, sn)
 }
 
@@ -155,6 +179,7 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "delete failed")
 		return
 	}
+	a.reloadDHCP(r.Context(), "delete")
 	w.WriteHeader(http.StatusNoContent)
 }
 

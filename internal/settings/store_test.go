@@ -3,8 +3,10 @@ package settings
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -218,5 +220,169 @@ func TestApplyOverridesToConfig_OverlaysPool(t *testing.T) {
 	}
 	if cfg.DHCPPool.Start != "10.0.0.50" || cfg.DHCPPool.End != "10.0.0.150" || cfg.DHCPPool.LeaseHours != 48 {
 		t.Errorf("pool overlay failed: %+v", cfg.DHCPPool)
+	}
+}
+
+func TestAPI_InterfaceFieldLifecycle(t *testing.T) {
+	s := newTestStore(t)
+	// lo always exists on every test host; use it as the "other" NIC.
+	lo, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Skip("no loopback interface")
+	}
+	cfg := &config.Config{
+		ServerIP:  "192.168.10.120",
+		Interface: "not-the-real-one", // differs from what we PUT
+		DHCPMode:  config.DHCPModeProxy,
+	}
+	api := NewAPI(s, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// PUT switching the NIC → saved, and restart_required even though the
+	// reloader (nil here → "failed" path) is irrelevant: interface changes
+	// can never hot-apply.
+	body := fmt.Sprintf(`{"mode":"proxy","interface":%q}`, lo.Name)
+	req, _ := http.NewRequest("PUT", srv.URL+"/api/v1/settings/dhcp", strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, raw)
+	}
+	var got DHCPSettingsResponse
+	_ = json.NewDecoder(resp.Body).Decode(&got)
+	if got.Interface != lo.Name {
+		t.Errorf("interface echo = %q, want %q", got.Interface, lo.Name)
+	}
+	if !got.RestartRequired {
+		t.Error("restart_required = false, want true (NIC change needs restart)")
+	}
+
+	// GET reflects the override.
+	resp2, err := http.Get(srv.URL + "/api/v1/settings/dhcp")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp2.Body.Close()
+	var got2 DHCPSettings
+	_ = json.NewDecoder(resp2.Body).Decode(&got2)
+	if got2.Interface != lo.Name {
+		t.Errorf("GET interface = %q, want %q", got2.Interface, lo.Name)
+	}
+
+	// Interfaces list marks the current one.
+	resp3, err := http.Get(srv.URL + "/api/v1/settings/interfaces")
+	if err != nil {
+		t.Fatalf("GET interfaces: %v", err)
+	}
+	defer resp3.Body.Close()
+	var ifaces []InterfaceInfo
+	_ = json.NewDecoder(resp3.Body).Decode(&ifaces)
+	found := false
+	for _, i := range ifaces {
+		if i.Name == lo.Name {
+			found = true
+			if !i.IsCurrent {
+				t.Errorf("%s should be marked current", lo.Name)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("loopback missing from interfaces list (%d entries)", len(ifaces))
+	}
+
+	// PUT naming a nonexistent NIC → 400 at save time.
+	req, _ = http.NewRequest("PUT", srv.URL+"/api/v1/settings/dhcp",
+		strings.NewReader(`{"mode":"proxy","interface":"definitely-not-a-nic-xyz"}`))
+	resp4, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT bad nic: %v", err)
+	}
+	defer resp4.Body.Close()
+	if resp4.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad nic status = %d, want 400", resp4.StatusCode)
+	}
+}
+
+func TestAPI_PutProxyZeroesPoolFields(t *testing.T) {
+	s := newTestStore(t)
+	// First store a full-mode pool so there IS stale data to clear.
+	cfg := &config.Config{ServerIP: "192.168.10.120", Interface: "", DHCPMode: config.DHCPModeFull}
+	api := NewAPI(s, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	if err := s.SetMany(context.Background(), map[string]string{
+		KeyDHCPMode:       "full",
+		KeyDHCPStart:      "192.168.10.100",
+		KeyDHCPEnd:        "192.168.10.200",
+		KeyDHCPNetmask:    "255.255.255.0",
+		KeyDHCPGateway:    "192.168.10.1",
+		KeyDHCPDNS:        "8.8.8.8",
+		KeyDHCPLeaseHours: "48",
+		KeyDHCPExclude:    "192.168.10.9",
+	}, "test"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Switch to proxy WITH stale pool values still in the request body —
+	// they must be zeroed, not persisted.
+	body := `{
+		"mode": "proxy",
+		"start": "10.99.99.100",
+		"end": "10.99.99.200",
+		"netmask": "255.0.0.0",
+		"gateway": "10.99.99.1",
+		"dns": ["8.8.4.4"],
+		"lease_hours": 96,
+		"exclude": ["10.99.99.9"]
+	}`
+	req, _ := http.NewRequest("PUT", srv.URL+"/api/v1/settings/dhcp", strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, raw)
+	}
+
+	// Every pool key must now read blank/zero in the store — the stale
+	// seeded values AND the request's garbage values both gone.
+	for key, want := range map[string]string{
+		KeyDHCPStart: "", KeyDHCPEnd: "", KeyDHCPNetmask: "", KeyDHCPGateway: "",
+		KeyDHCPDNS: "", KeyDHCPLeaseHours: "0", KeyDHCPExclude: "",
+	} {
+		got, err := s.Get(context.Background(), key)
+		if err != nil {
+			t.Fatalf("Get %s: %v", key, err)
+		}
+		if got != want {
+			t.Errorf("%s = %q, want %q (pool leaked into proxy mode)", key, got, want)
+		}
+	}
+	if mode, _ := s.Get(context.Background(), KeyDHCPMode); mode != "proxy" {
+		t.Errorf("mode = %q, want proxy", mode)
+	}
+
+	// GET shows blank pool and empty interface (config had none).
+	resp2, err := http.Get(srv.URL + "/api/v1/settings/dhcp")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp2.Body.Close()
+	var got DHCPSettings
+	_ = json.NewDecoder(resp2.Body).Decode(&got)
+	if got.Start != "" || got.LeaseHours != 0 || len(got.DNS) != 0 {
+		t.Errorf("GET after proxy switch: %+v — pool should read blank", got)
 	}
 }

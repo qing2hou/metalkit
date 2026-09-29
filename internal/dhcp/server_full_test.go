@@ -296,12 +296,14 @@ func TestReload_SwapsPoolAtomically(t *testing.T) {
 	fake := &fakeLeaseStore{allocIP: "10.0.0.5"}
 	srv := newServerFull(t, fake)
 
-	newPool, err := NewPool("10.0.0.1", "10.0.0.50", "255.255.255.0",
-		"10.0.0.254", []string{"1.1.1.1"}, 7200, nil)
+	newPools, err := NewSubnetPools([]SubnetPoolInput{{
+		Start: "10.0.0.1", End: "10.0.0.50", Netmask: "255.255.255.0",
+		Gateway: "10.0.0.254", DNS: []string{"1.1.1.1"}, LeaseSec: 7200,
+	}})
 	if err != nil {
-		t.Fatalf("NewPool: %v", err)
+		t.Fatalf("NewSubnetPools: %v", err)
 	}
-	if err := srv.Reload(ModeFull, newPool, fake); err != nil {
+	if err := srv.Reload(ModeFull, newPools, fake); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
 
@@ -328,8 +330,8 @@ func TestReload_RejectsInvalidConfig(t *testing.T) {
 	if err := srv.Reload(ModeFull, nil, fake); err == nil {
 		t.Error("expected error for full mode without Pool")
 	}
-	if err := srv.Reload(ModeFull, srv.pool, nil); err == nil {
-		t.Error("expected error for full mode without Leases")
+	if err := srv.Reload(ModeFull, nil, nil); err == nil {
+		t.Error("expected error for full mode without Pools or Leases")
 	}
 	// Old state must still work after the rejected reloads.
 	req := mustReq(t, dhcpv4.MessageTypeDiscover)
@@ -338,4 +340,3 @@ func TestReload_RejectsInvalidConfig(t *testing.T) {
 		t.Fatalf("post-failed-reload DISCOVER broken: err=%v reply=%v", err, reply)
 	}
 }
-

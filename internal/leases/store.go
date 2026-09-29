@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"sync"
 	"time"
 )
 
@@ -37,6 +38,14 @@ type Store struct {
 	db     *sql.DB
 	logger *slog.Logger
 	now    func() time.Time
+
+	// allocMu serialises Allocate: the read-taken-set → pick-free → write
+	// sequence is not atomic, and PXE bursts (a rack powering on) land
+	// several DISCOVERs in the same millisecond — without the lock every
+	// concurrent caller reads the same "free" IP and the UNIQUE(ip)
+	// constraint is defeated by the DELETE-first eviction step. One DHCP
+	// server means one process; an in-process mutex is sufficient.
+	allocMu sync.Mutex
 }
 
 func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger) (*Store, error) {
@@ -64,15 +73,22 @@ type Lease struct {
 	UpdatedAt time.Time
 }
 
-// AllocateInput is what dhcp.handler passes to Allocate. Pool bounds are
+// Range is one inclusive pool segment [Start, End]. A pool may consist of
+// several disjoint ranges (e.g. .100-.150 and .180-.200); allocation walks
+// them in order.
+type Range struct {
+	Start netip.Addr
+	End   netip.Addr
+}
+
+// AllocateInput is what dhcp.handler passes to Allocate. Pool ranges are
 // passed per call (rather than stored on the Store) so the operator can
-// edit config.yaml and reload without a migration step — and so tests can
-// vary pools cheaply.
+// edit pools and reload without a migration step — and so tests can vary
+// pools cheaply.
 type AllocateInput struct {
 	MAC      string
 	Hostname string
-	Start    netip.Addr
-	End      netip.Addr
+	Ranges   []Range             // one or more inclusive segments, in scan order
 	Exclude  map[string]struct{} // canonical IPv4 strings
 	LeaseDur time.Duration
 }
@@ -82,17 +98,25 @@ type AllocateInput struct {
 // the caller must follow up with Confirm() on REQUEST/ACK to extend it.
 //
 // Sticky behaviour: if we already have a row for the MAC whose IP is still
-// inside the pool and not excluded, we reuse it (refresh expires_at). This
-// is what makes a reboot keep the same address.
+// inside one of the pool ranges and not excluded, we reuse it (refresh
+// expires_at). This is what makes a reboot keep the same address.
 func (s *Store) Allocate(ctx context.Context, in AllocateInput) (*Lease, error) {
+	s.allocMu.Lock()
+	defer s.allocMu.Unlock()
+
 	if in.MAC == "" {
 		return nil, errors.New("leases: mac required")
 	}
-	if !in.Start.Is4() || !in.End.Is4() {
-		return nil, errors.New("leases: pool bounds must be IPv4")
+	if len(in.Ranges) == 0 {
+		return nil, errors.New("leases: at least one pool range required")
 	}
-	if in.Start.Compare(in.End) > 0 {
-		return nil, fmt.Errorf("leases: start %s > end %s", in.Start, in.End)
+	for i, r := range in.Ranges {
+		if !r.Start.Is4() || !r.End.Is4() {
+			return nil, fmt.Errorf("leases: range %d bounds must be IPv4", i)
+		}
+		if r.Start.Compare(r.End) > 0 {
+			return nil, fmt.Errorf("leases: range %d start %s > end %s", i, r.Start, r.End)
+		}
 	}
 	if in.LeaseDur <= 0 {
 		in.LeaseDur = 24 * time.Hour
@@ -102,9 +126,9 @@ func (s *Store) Allocate(ctx context.Context, in AllocateInput) (*Lease, error) 
 	now := s.now().UTC()
 	mac := normalizeMAC(in.MAC)
 
-	// Sticky path: existing row for this MAC, IP still in range and not excluded.
+	// Sticky path: existing row for this MAC, IP still inside a range and not excluded.
 	if existing, err := s.getByMAC(ctx, mac); err == nil {
-		if ipInRange(existing.IP, in.Start, in.End) && !excluded(in.Exclude, existing.IP) {
+		if ipInRanges(existing.IP, in.Ranges) && !excluded(in.Exclude, existing.IP) {
 			expires := now.Add(offerDur)
 			if _, err := s.db.ExecContext(ctx, `
                 UPDATE leases SET state='offered', expires_at=?, updated_at=?, hostname=?
@@ -135,7 +159,7 @@ func (s *Store) Allocate(ctx context.Context, in AllocateInput) (*Lease, error) 
 		return nil, err
 	}
 
-	chosen, ok := nextFree(in.Start, in.End, in.Exclude, taken)
+	chosen, ok := nextFreeRanges(in.Ranges, in.Exclude, taken)
 	if !ok {
 		return nil, ErrPoolEmpty
 	}
@@ -291,26 +315,38 @@ func (s *Store) takenSet(ctx context.Context, now time.Time) (map[string]struct{
 // nextFree scans [start,end] inclusive and returns the lowest IP that's
 // neither in `taken` nor in `exclude`. The scan is bounded by the pool
 // size which in practice is at most a few thousand addresses — cheap.
-func nextFree(start, end netip.Addr, exclude, taken map[string]struct{}) (netip.Addr, bool) {
-	for ip := start; ip.Compare(end) <= 0; ip = ip.Next() {
-		s := ip.String()
-		if _, bad := exclude[s]; bad {
-			continue
+// nextFreeRanges walks each range's [start,end] in order and returns the
+// first IP neither excluded nor currently leased. Ranges are scanned in the
+// order given so an operator's preferred segment fills first.
+func nextFreeRanges(ranges []Range, exclude, taken map[string]struct{}) (netip.Addr, bool) {
+	for _, r := range ranges {
+		for ip := r.Start; ip.Compare(r.End) <= 0; ip = ip.Next() {
+			s := ip.String()
+			if _, bad := exclude[s]; bad {
+				continue
+			}
+			if _, bad := taken[s]; bad {
+				continue
+			}
+			return ip, true
 		}
-		if _, bad := taken[s]; bad {
-			continue
-		}
-		return ip, true
 	}
 	return netip.Addr{}, false
 }
 
-func ipInRange(ip string, start, end netip.Addr) bool {
+// ipInRanges reports whether the dotted-quad ip falls inside any range.
+// Used by the sticky-lease path; ranges need not be sorted.
+func ipInRanges(ip string, ranges []Range) bool {
 	a, err := netip.ParseAddr(ip)
 	if err != nil {
 		return false
 	}
-	return a.Compare(start) >= 0 && a.Compare(end) <= 0
+	for _, r := range ranges {
+		if a.Compare(r.Start) >= 0 && a.Compare(r.End) <= 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func excluded(ex map[string]struct{}, ip string) bool {

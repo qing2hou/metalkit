@@ -59,13 +59,18 @@ type BindingUpdater interface {
 
 // OrchestratorConfig configures NewOrchestrator.
 type OrchestratorConfig struct {
-	Store          *Store
-	BMC            BMCFetcher
-	IPMI           IPMIClient
-	Bindings       BindingUpdater
-	Logger         *slog.Logger
-	TickInterval   time.Duration // default 5s
-	BMCActor       string        // who to record as updated_by on cleared bindings; default "orchestrator"
+	Store        *Store
+	BMC          BMCFetcher
+	IPMI         IPMIClient
+	Bindings     BindingUpdater
+	Logger       *slog.Logger
+	TickInterval time.Duration // default 5s
+	BMCActor     string        // who to record as updated_by on cleared bindings; default "orchestrator"
+	// LiveFreshness is how recent a machine's last heartbeat must be for the
+	// orchestrator to consider the machine "already in the live system" and
+	// skip the BMC PXE reboot. Default 90s (agent heartbeats every 30s; the
+	// slack covers one missed beat plus the report cadence).
+	LiveFreshness time.Duration
 }
 
 // Orchestrator runs the binding→job→BMC reconciliation loop.
@@ -91,6 +96,9 @@ func NewOrchestrator(cfg OrchestratorConfig) (*Orchestrator, error) {
 	}
 	if cfg.BMCActor == "" {
 		cfg.BMCActor = "orchestrator"
+	}
+	if cfg.LiveFreshness <= 0 {
+		cfg.LiveFreshness = 90 * time.Second
 	}
 	return &Orchestrator{cfg: cfg, db: cfg.Store.db}, nil
 }
@@ -192,6 +200,26 @@ func (o *Orchestrator) startJobForBinding(ctx context.Context, muuid, imageID, p
 	}
 	logger = logger.With("job_id", job.ID)
 
+	// If the machine is ALREADY running the live system (fresh heartbeat +
+	// last report booted via `boot=live`), skip the BMC reboot entirely: the
+	// on-machine agent polls /agent/jobs/current every 10s and will pick
+	// this job up directly. This saves a full power cycle plus re-downloading
+	// the ~600MB live image on reinstall-from-live flows. Stale heartbeat or
+	// an installed-OS report falls through to the classic PXE path.
+	if o.machineInLive(ctx, muuid) {
+		if _, err := o.cfg.Store.Claim(ctx, job.ID); err != nil {
+			// The agent may have beaten us to the claim — that's the happy
+			// path, not an error.
+			logger.Info("orchestrator: agent already claiming live job", "err", err)
+		}
+		if err := o.cfg.Store.UpdateStage(ctx, job.ID, "waiting_agent"); err != nil {
+			logger.Warn("orchestrator: stage update", "err", err)
+		}
+		_ = o.cfg.Store.AppendLog(ctx, job.ID, "info", "machine already in live system; dispatching job to local agent (no reboot)")
+		logger.Info("orchestrator: started job in live system (no PXE reboot)")
+		return
+	}
+
 	// If we have no BMC/IPMI wiring yet, leave the job pending — the agent
 	// might still poll for it via M2.3-6 ("manual reboot" path).
 	if o.cfg.BMC == nil || o.cfg.IPMI == nil {
@@ -228,6 +256,29 @@ func (o *Orchestrator) startJobForBinding(ctx context.Context, muuid, imageID, p
 	}
 	_ = o.cfg.Store.AppendLog(ctx, job.ID, "info", "PXE boot initiated; waiting for agent")
 	logger.Info("orchestrator: started job")
+}
+
+// machineInLive reports whether the machine is currently running the
+// metalkit live system and its agent is reachable: the last heartbeat is
+// within cfg.LiveFreshness AND the machine's most recent report booted via
+// `boot=live` (the installed system's kernel cmdline never contains it).
+// Any doubt — missing rows, stale heartbeat, parse errors — reads as false
+// so the orchestrator falls back to the BMC PXE reboot path.
+func (o *Orchestrator) machineInLive(ctx context.Context, muuid string) bool {
+	var lastSeen int64
+	var body string
+	err := o.db.QueryRowContext(ctx, `
+        SELECT m.last_seen, COALESCE(r.body, '')
+        FROM machines m
+        LEFT JOIN reports r ON r.id = m.latest_report
+        WHERE m.uuid = ?`, muuid).Scan(&lastSeen, &body)
+	if err != nil {
+		return false
+	}
+	if time.Since(time.Unix(lastSeen, 0)) > o.cfg.LiveFreshness {
+		return false
+	}
+	return strings.Contains(body, `"kernel_cmdline"`) && strings.Contains(body, "boot=live")
 }
 
 // handleSucceededJobs walks jobs that succeeded but whose binding is still

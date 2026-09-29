@@ -21,13 +21,13 @@ import (
 // the network params out of profile.network so they can be shared. To avoid
 // breaking existing rows, the controller startup pass:
 //
-//   1. Selects every binding row where static_address IS NOT NULL AND
-//      subnet_id IS NULL — those need migrating.
-//   2. For each, looks up the profile's network_json (method/prefix_len/gateway/dns).
-//      Rows with method=dhcp (no network params to migrate) are skipped.
-//   3. Computes the network address by masking static_address with prefix_len,
-//      finds or creates a subnet row named "auto-<cidr_slug>", and points the
-//      binding at it.
+//  1. Selects every binding row where static_address IS NOT NULL AND
+//     subnet_id IS NULL — those need migrating.
+//  2. For each, looks up the profile's network_json (method/prefix_len/gateway/dns).
+//     Rows with method=dhcp (no network params to migrate) are skipped.
+//  3. Computes the network address by masking static_address with prefix_len,
+//     finds or creates a subnet row named "auto-<cidr_slug>", and points the
+//     binding at it.
 //
 // Re-runs find the binding already has subnet_id set and skip. The synthetic
 // name is deterministic so two bindings sharing a network reuse the same row.

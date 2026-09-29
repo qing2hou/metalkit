@@ -64,9 +64,9 @@ func TestParseSDR_Empty(t *testing.T) {
 
 func TestParseReading(t *testing.T) {
 	cases := []struct {
-		in     string
-		val    float64
-		unit   string
+		in   string
+		val  float64
+		unit string
 	}{
 		{"35 degrees C", 35, "degrees C"},
 		{"4800 RPM", 4800, "RPM"},

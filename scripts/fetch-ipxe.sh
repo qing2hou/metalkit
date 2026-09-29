@@ -12,6 +12,7 @@ declare -A FILES=(
     ["undionly.kpxe"]="undionly.kpxe"
     ["snponly.efi"]="x86_64-efi/snponly.efi"
     ["ipxe.efi"]="x86_64-efi/ipxe.efi"
+    ["arm64-snponly.efi"]="arm64-efi/snponly.efi"
 )
 for name in "${!FILES[@]}"; do
     src="${FILES[$name]}"

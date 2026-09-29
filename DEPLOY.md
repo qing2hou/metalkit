@@ -285,3 +285,26 @@ sudo systemctl restart metalkit-controller
 - 查看日志：`journalctl -u metalkit-controller -f`
 - 运行自检：`/opt/metalkit/bin/metalkit-controller doctor -config /etc/metalkit/config.yaml`
 - 查看配置：`cat /etc/metalkit/config.yaml`
+
+
+## 多架构部署（x86_64 + ARM64）
+
+controller 二进制与运行宿主机架构无关（通常部署在 x86 管理机上）。按目标机型分别构建 live 引导件：
+
+```bash
+# x86（默认）
+make agent ARCH=amd64 && ./scripts/build-live.sh --arch amd64   # 产物 boot/amd64/
+
+# ARM64（需 binfmt+qemu-user-static，或 docker 自动用 arm64 容器）
+make agent GOARCH=arm64 && ./scripts/build-live.sh --arch arm64  # 产物 boot/arm64/
+```
+
+两棵 boot 树可并存。PXE 链路按客户端固件自动分发：DHCP option 93 = UEFI ARM64 (0x000B)
+的机器拿到 arm64-snponly.efi → /boot/*?arch=arm64 → boot/arm64/ 的内核与 squashfs；
+x86 机器路径不变。arm64 串口控制台自动使用 ttyAMA0。
+
+镜像按架构入库：上传时文件名含 amd64/x86_64/arm64/aarch64 自动识别（可手动指定）；
+把 arm64 镜像绑定到 amd64 机器（或反之）会被 422 拒绝。
+
+**注意**：更换/新增 arm64 iPXE 二进制后需重跑 `make ipxe` 并重新编译 controller
+（`internal/ipxebin/assets/arm64-snponly.efi` 会随 go:embed 打包）。

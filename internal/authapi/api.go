@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"metalkit/internal/sessions"
+	"metalkit/internal/util"
 )
 
 // CookieName is the browser session cookie name. The auth middleware in
@@ -25,16 +26,31 @@ const CookieName = "metalkit_session"
 // 4 KB limit kills accidental floods without rejecting any legitimate input.
 const maxLoginBody = 4 * 1024
 
-// API mounts the auth endpoints. AdminUser/AdminPass are the single static
-// credential pair the controller compares against; SecureFlag toggles the
-// cookie's Secure attribute (off on plain HTTP, on once we serve HTTPS).
+// API mounts the auth endpoints. AdminUser/AdminPass are the legacy static
+// credential pair; Users are named operator accounts (username + sha512crypt
+// hash). At least one credential source must be configured for login to be
+// enabled. SecureFlag toggles the cookie's Secure attribute (off on plain
+// HTTP, on when serving HTTPS).
 type API struct {
 	Sessions   *sessions.Store
 	AdminUser  string
 	AdminPass  string
+	Users      []Operator
 	CookieTTL  time.Duration
 	SecureFlag bool
 	Logger     *slog.Logger
+
+	// throttle blunts per-IP brute force on the login endpoint (and the
+	// Basic-Auth path shares the per-IP counter via httpd's own instance —
+	// this one only guards JSON login).
+	throttle *loginThrottle
+}
+
+// Operator is one named operator account accepted by login / basic auth.
+type Operator struct {
+	Username string
+	PassHash string // $6$ sha512crypt
+	Role     string // admin | operator
 }
 
 // RegisterRoutes attaches the auth endpoints to mux.
@@ -53,13 +69,31 @@ type loginResponse struct {
 	Username string `json:"username"`
 }
 
+// dummyVerifyHash is a syntactically valid sha512crypt hash of an
+// unguessable random value. When an unknown username is submitted we run a
+// verification against it anyway, so the response time is dominated by the
+// same mkpasswd fork whether or not the account exists — closing the
+// username-enumeration timing side channel.
+const dummyVerifyHash = `$6$fixedsalt123$hWfVjXzu1Ia7IE9o2bqMSxIyjTx4TaD.rLuSo11.BVcWwbXQxjbmVtroursOVAjIofVa2p1bhJjq4DdGRYu9X/`
+
 func (a *API) login(w http.ResponseWriter, r *http.Request) {
-	if a.AdminPass == "" {
-		// No password configured → no login flow. The middleware's "open mode"
-		// already lets unauthenticated requests through, so a cookie buys
-		// nothing. Surface the misconfiguration loudly rather than silently
-		// minting useless sessions.
+	if a.AdminPass == "" && len(a.Users) == 0 {
+		// No credentials configured → no login flow. The middleware's "open
+		// mode" already lets unauthenticated requests through, so a cookie
+		// buys nothing. Surface the misconfiguration loudly rather than
+		// silently minting useless sessions.
 		writeError(w, http.StatusServiceUnavailable, "auth disabled")
+		return
+	}
+
+	if a.throttle == nil {
+		// Wire-up safety: tests construct &API{} literals. 10 fails / 5 min
+		// matches the documented operator guidance.
+		a.throttle = newLoginThrottle(10, 5*time.Minute)
+	}
+	if a.throttle.blocked(r) {
+		a.logFailure(strings.TrimSpace(""))
+		writeError(w, http.StatusTooManyRequests, "too many failed attempts; retry later")
 		return
 	}
 
@@ -76,19 +110,50 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	username := strings.TrimSpace(in.Username)
 	password := in.Password
 
-	// Compare both fields unconditionally and combine — branching on the
-	// first mismatch would leak which field was wrong via timing. We still
-	// short-circuit the "empty field" case with the same 401 so the client
-	// can't tell empty from wrong either.
-	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(a.AdminUser))
-	passOK := subtle.ConstantTimeCompare([]byte(password), []byte(a.AdminPass))
-	if username == "" || password == "" || userOK != 1 || passOK != 1 {
+	authenticated := ""
+	// Legacy static pair: compare both fields unconditionally and combine.
+	if a.AdminPass != "" {
+		userOK := subtle.ConstantTimeCompare([]byte(username), []byte(a.AdminUser))
+		passOK := subtle.ConstantTimeCompare([]byte(password), []byte(a.AdminPass))
+		if username != "" && password != "" && userOK == 1 && passOK == 1 {
+			authenticated = a.AdminUser
+		}
+	}
+	// Named operator accounts: sha512crypt verification (forks mkpasswd;
+	// login is a cold path).
+	if authenticated == "" {
+		matched := false
+		for _, u := range a.Users {
+			if subtle.ConstantTimeCompare([]byte(username), []byte(u.Username)) != 1 {
+				continue
+			}
+			matched = true
+			ok, err := util.VerifyCryptSHA512(r.Context(), password, u.PassHash)
+			if err != nil && a.Logger != nil {
+				a.Logger.Error("auth login: verify", "user", u.Username, "err", err)
+			}
+			if ok {
+				authenticated = u.Username
+			}
+			break // a username matches at most one account; wrong pass → reject
+		}
+		// Unknown username: burn the same mkpasswd fork against a dummy hash
+		// so the 401 latency can't distinguish "no such user" (fast) from
+		// "wrong password" (fork, slow).
+		if !matched {
+			_, _ = util.VerifyCryptSHA512(r.Context(), password, dummyVerifyHash)
+		}
+	}
+
+	if authenticated == "" {
+		a.throttle.noteFailure(r)
 		a.logFailure(username)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+	a.throttle.noteSuccess(r)
 
-	sess, err := a.Sessions.Create(r.Context(), a.AdminUser, a.CookieTTL)
+	sess, err := a.Sessions.Create(r.Context(), authenticated, a.CookieTTL)
 	if err != nil {
 		if a.Logger != nil {
 			a.Logger.Error("auth login: session create failed", "err", err)
@@ -110,12 +175,12 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	if a.Logger != nil {
 		// session_id_prefix is enough to correlate with the audit log without
 		// leaking the full token (which is bearer-equivalent).
-		a.Logger.Info("auth login ok", "username", a.AdminUser, "session_id_prefix", sess.ID[:8])
+		a.Logger.Info("auth login ok", "username", authenticated, "session_id_prefix", sess.ID[:8])
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(loginResponse{Username: a.AdminUser})
+	_ = json.NewEncoder(w).Encode(loginResponse{Username: authenticated})
 }
 
 func (a *API) logout(w http.ResponseWriter, r *http.Request) {

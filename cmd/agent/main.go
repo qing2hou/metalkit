@@ -97,11 +97,14 @@ func run() int {
 	}
 	logger.Info("agent: report accepted", "uuid", uuid)
 
-	// Convert inventory NICs to installer NICInfo for bond slave MAC resolution.
+	// Convert inventory NICs to installer NICInfo for bond slave MAC resolution
+	// and auto NIC-picking. Driver matters: BMC virtual NICs (iDRAC etc.) are
+	// USB CDC devices whose names collide with kernel ethN numbering in the
+	// installed OS, so the installer skips them via IsVirtual().
 	installerNICs := make([]installer.NICInfo, 0, len(report.NICs))
 	for _, n := range report.NICs {
 		if n.Name != "" && n.MAC != "" {
-			installerNICs = append(installerNICs, installer.NICInfo{Name: n.Name, MAC: n.MAC})
+			installerNICs = append(installerNICs, installer.NICInfo{Name: n.Name, MAC: n.MAC, Driver: n.Driver, Link: n.Link})
 		}
 	}
 
@@ -282,9 +285,15 @@ func (r *agentReporter) Fail(ctx context.Context, errMsg string) error {
 }
 
 // installLoop polls /api/v1/agent/jobs/current; when a job appears it claims
-// the job, fetches its InstallSpec, and runs the installer pipeline. Exits
-// after one install completes (success or fail) — a live boot installs at
-// most once, the orchestrator's finalize tick reboots into the new system.
+// the job, fetches its InstallSpec, and runs the installer pipeline.
+//
+// The loop keeps polling across job boundaries (failed, cancelled, or terminal
+// orphan jobs don't stop it) so an operator can dispatch a follow-up job —
+// e.g. a retry after a disk-pick failure — to the same live boot and the
+// agent picks it up without another PXE reboot (the orchestrator's
+// dispatch-in-place path). The only exit is ctx cancellation: on success the
+// orchestrator's finalize tick power-cycles the machine via BMC, and the
+// kernel kills this process before the next poll would matter.
 func installLoop(ctx context.Context, logger *slog.Logger, baseURL, uuid string, nics []installer.NICInfo) {
 	cli := agentclient.New(baseURL, uuid, logger.With("component", "agentclient"))
 	for {
@@ -298,10 +307,7 @@ func installLoop(ctx context.Context, logger *slog.Logger, baseURL, uuid string,
 		case err != nil:
 			logger.Warn("agent: poll current job", "err", err)
 		default:
-			done := handleJob(ctx, logger, cli, baseURL, uuid, job, nics)
-			if done {
-				return
-			}
+			handleJob(ctx, logger, cli, baseURL, uuid, job, nics)
 		}
 		select {
 		case <-ctx.Done():
@@ -311,17 +317,16 @@ func installLoop(ctx context.Context, logger *slog.Logger, baseURL, uuid string,
 	}
 }
 
-// handleJob walks one job through claim → spec → install. Returns true when
-// the caller should stop polling (terminal outcome or fatal pre-install
-// error). Returns false to keep polling (e.g. transient claim failure where
-// we expect the controller to settle).
-func handleJob(ctx context.Context, logger *slog.Logger, cli *agentclient.Client, baseURL, uuid string, job *jobs.Job, nics []installer.NICInfo) bool {
+// handleJob walks one job through claim → spec → install. It never stops
+// the caller's loop: every outcome is a completed job, and the next poll
+// either finds nothing (idle live boot) or the operator's retry.
+func handleJob(ctx context.Context, logger *slog.Logger, cli *agentclient.Client, baseURL, uuid string, job *jobs.Job, nics []installer.NICInfo) {
 	// If the job is already in a terminal status, bail — we should not have
 	// gotten it from /current, but be defensive.
 	switch job.Status {
 	case "succeeded", "failed", "cancelled":
 		logger.Info("agent: skipping terminal job", "job_id", job.ID, "status", job.Status)
-		return true
+		return
 	}
 
 	// Claim is the pending → running transition. If we already restarted
@@ -330,7 +335,7 @@ func handleJob(ctx context.Context, logger *slog.Logger, cli *agentclient.Client
 	if job.Status == "pending" {
 		if _, err := cli.Claim(ctx, job.ID); err != nil {
 			logger.Warn("agent: claim failed", "job_id", job.ID, "err", err)
-			return false
+			return
 		}
 		logger.Info("agent: claimed job", "job_id", job.ID)
 	}
@@ -339,7 +344,7 @@ func handleJob(ctx context.Context, logger *slog.Logger, cli *agentclient.Client
 	if err != nil {
 		logger.Error("agent: fetch spec", "job_id", job.ID, "err", err)
 		_ = cli.Fail(ctx, job.ID, fmt.Sprintf("fetch spec: %v", err))
-		return true
+		return
 	}
 
 	// Wrap the stderr logger so every installer log line also lands in
@@ -373,9 +378,8 @@ func handleJob(ctx context.Context, logger *slog.Logger, cli *agentclient.Client
 	if err := installer.Run(ctx, deps, *spec); err != nil {
 		logger.Error("agent: install failed", "job_id", job.ID, "err", err)
 		rh.Flush()
-		return true
+		return
 	}
 	logger.Info("agent: install succeeded; awaiting BMC reboot to disk", "job_id", job.ID)
 	rh.Flush()
-	return true
 }

@@ -5,9 +5,9 @@
 //
 // Adding a new OS family requires three steps:
 //
-//   1. Add the family to the rendererMap/bootloaderMap below.
-//   2. Add filename-detection rules in internal/images/detect.go.
-//   3. Register the family in internal/profiles/validate.go validOSFamilies.
+//  1. Add the family to the rendererMap/bootloaderMap below.
+//  2. Add filename-detection rules in internal/images/detect.go.
+//  3. Register the family in internal/profiles/validate.go validOSFamilies.
 //
 // No database schema changes are needed — the profile's network_renderer
 // and bootloader columns are free-form TEXT validated against this registry.
@@ -165,17 +165,17 @@ var bootloaderMap = map[string][]ComponentOption{
 
 // allRendererIDs is the closed set of valid network_renderer values.
 var allRendererIDs = map[string]bool{
-	"netplan":          true,
-	"network-manager":  true,
-	"sysconfig":        true,
-	"eni":              true,
-	"wicked":           true,
+	"netplan":         true,
+	"network-manager": true,
+	"sysconfig":       true,
+	"eni":             true,
+	"wicked":          true,
 }
 
 // allBootloaderIDs is the closed set of valid bootloader values.
 var allBootloaderIDs = map[string]bool{
-	"grub-host-debian":  true,
-	"grub-chroot-rhel":  true,
+	"grub-host-debian":   true,
+	"grub-chroot-rhel":   true,
 	"grub-host-fallback": true,
 }
 

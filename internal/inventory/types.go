@@ -17,18 +17,18 @@ type Report struct {
 	CollectedAt          time.Time `json:"collected_at"`
 	CollectionDurationMS int64     `json:"collection_duration_ms"`
 
-	Machine      Machine        `json:"machine"`
-	Firmware     Firmware       `json:"firmware"`
-	CPU          CPU            `json:"cpu"`
-	Memory       Memory         `json:"memory"`
-	Disks        []Disk         `json:"disks"`
-	NICs         []NIC          `json:"nics"`
-	PCIDevices   []PCIDevice    `json:"pci_devices"`
-	Accelerators []Accelerator  `json:"accelerators"`
-	BMC          *BMC           `json:"bmc,omitempty"`
-	Sensors      []Sensor       `json:"sensors"`
-	System       System         `json:"system"`
-	Agent        AgentMeta      `json:"agent"`
+	Machine      Machine       `json:"machine"`
+	Firmware     Firmware      `json:"firmware"`
+	CPU          CPU           `json:"cpu"`
+	Memory       Memory        `json:"memory"`
+	Disks        []Disk        `json:"disks"`
+	NICs         []NIC         `json:"nics"`
+	PCIDevices   []PCIDevice   `json:"pci_devices"`
+	Accelerators []Accelerator `json:"accelerators"`
+	BMC          *BMC          `json:"bmc,omitempty"`
+	Sensors      []Sensor      `json:"sensors"`
+	System       System        `json:"system"`
+	Agent        AgentMeta     `json:"agent"`
 }
 
 // Machine — top-level identity from SMBIOS.
@@ -61,10 +61,10 @@ type Chassis struct {
 
 // Firmware — BIOS, UEFI mode, Secure Boot, TPM.
 type Firmware struct {
-	BIOS        BIOS    `json:"bios"`
-	UEFIMode    bool    `json:"uefi_mode"`
-	SecureBoot  *bool   `json:"secure_boot,omitempty"`
-	TPM         *TPM    `json:"tpm,omitempty"`
+	BIOS       BIOS  `json:"bios"`
+	UEFIMode   bool  `json:"uefi_mode"`
+	SecureBoot *bool `json:"secure_boot,omitempty"`
+	TPM        *TPM  `json:"tpm,omitempty"`
 }
 
 type BIOS struct {
@@ -93,16 +93,16 @@ type CPU struct {
 }
 
 type CPUEntry struct {
-	Socket       string `json:"socket"`
-	Model        string `json:"model,omitempty"`
-	Cores        int    `json:"cores"`
-	Threads      int    `json:"threads"`
-	BaseFreqMHz  int    `json:"base_freq_mhz,omitempty"`
-	MaxFreqMHz   int    `json:"max_freq_mhz,omitempty"`
-	Microcode    string `json:"microcode,omitempty"`
-	L1KB         int    `json:"l1_kb,omitempty"`
-	L2KB         int    `json:"l2_kb,omitempty"`
-	L3KB         int    `json:"l3_kb,omitempty"`
+	Socket      string `json:"socket"`
+	Model       string `json:"model,omitempty"`
+	Cores       int    `json:"cores"`
+	Threads     int    `json:"threads"`
+	BaseFreqMHz int    `json:"base_freq_mhz,omitempty"`
+	MaxFreqMHz  int    `json:"max_freq_mhz,omitempty"`
+	Microcode   string `json:"microcode,omitempty"`
+	L1KB        int    `json:"l1_kb,omitempty"`
+	L2KB        int    `json:"l2_kb,omitempty"`
+	L3KB        int    `json:"l3_kb,omitempty"`
 }
 
 // Memory — total + per-DIMM.
@@ -114,36 +114,37 @@ type Memory struct {
 }
 
 type DIMM struct {
-	Locator             string `json:"locator"`
-	Bank                string `json:"bank,omitempty"`
-	SizeBytes           uint64 `json:"size_bytes"`
-	Type                string `json:"type,omitempty"`
-	SpeedMTS            int    `json:"speed_mts,omitempty"`
-	ConfiguredSpeedMTS  int    `json:"configured_speed_mts,omitempty"`
-	Manufacturer        string `json:"manufacturer,omitempty"`
-	Serial              string `json:"serial,omitempty"`
-	PartNumber          string `json:"part_number,omitempty"`
-	Rank                int    `json:"rank,omitempty"`
-	VoltageV            string `json:"voltage,omitempty"`
+	Locator            string `json:"locator"`
+	Bank               string `json:"bank,omitempty"`
+	SizeBytes          uint64 `json:"size_bytes"`
+	Type               string `json:"type,omitempty"`
+	SpeedMTS           int    `json:"speed_mts,omitempty"`
+	ConfiguredSpeedMTS int    `json:"configured_speed_mts,omitempty"`
+	Manufacturer       string `json:"manufacturer,omitempty"`
+	Serial             string `json:"serial,omitempty"`
+	PartNumber         string `json:"part_number,omitempty"`
+	Rank               int    `json:"rank,omitempty"`
+	VoltageV           string `json:"voltage,omitempty"`
 }
 
 // Disk — one entry per block device (NVMe / SATA / SAS / virtio).
 type Disk struct {
-	KName       string  `json:"kname"`
-	Path        string  `json:"path"`
-	Type        string  `json:"type"` // disk, part, lvm, md
-	SizeBytes   uint64  `json:"size_bytes"`
-	Model       string  `json:"model,omitempty"`
-	Serial      string  `json:"serial,omitempty"`
-	Firmware    string  `json:"firmware,omitempty"`
-	Rotational  bool    `json:"rotational"`
-	Transport   string  `json:"transport,omitempty"` // nvme, sata, sas
-	WWN         string  `json:"wwn,omitempty"`
-	Vendor      string  `json:"vendor,omitempty"`
-	Removable   bool    `json:"removable"`
-	PCIAddress  string  `json:"pci_address,omitempty"`
-	SMART       *SMART  `json:"smart,omitempty"`
-	NVMe        *NVMe   `json:"nvme,omitempty"`
+	KName      string `json:"kname"`
+	Path       string `json:"path"`
+	Type       string `json:"type"` // disk, part, lvm, md
+	SizeBytes  uint64 `json:"size_bytes"`
+	Model      string `json:"model,omitempty"`
+	Serial     string `json:"serial,omitempty"`
+	Firmware   string `json:"firmware,omitempty"`
+	Rotational bool   `json:"rotational"`
+	Transport  string `json:"transport,omitempty"` // nvme, sata, sas
+	WWN        string `json:"wwn,omitempty"`
+	Vendor     string `json:"vendor,omitempty"`
+	ByPath     string `json:"by_path,omitempty"` // /dev/disk/by-path/… (stable; from udev)
+	Removable  bool   `json:"removable"`
+	PCIAddress string `json:"pci_address,omitempty"`
+	SMART      *SMART `json:"smart,omitempty"`
+	NVMe       *NVMe  `json:"nvme,omitempty"`
 }
 
 type SMART struct {
@@ -250,13 +251,13 @@ type Sensor struct {
 
 // System — kernel + OS state.
 type System struct {
-	KernelRelease    string   `json:"kernel_release"`
-	KernelCmdline    string   `json:"kernel_cmdline,omitempty"`
-	Hostname         string   `json:"hostname,omitempty"`
-	BootTime         int64    `json:"boot_time,omitempty"`
-	UptimeSeconds    int64    `json:"uptime_seconds"`
-	LiveImageVersion string   `json:"live_image_version,omitempty"`
-	Mounts           []Mount  `json:"mounts,omitempty"`
+	KernelRelease    string  `json:"kernel_release"`
+	KernelCmdline    string  `json:"kernel_cmdline,omitempty"`
+	Hostname         string  `json:"hostname,omitempty"`
+	BootTime         int64   `json:"boot_time,omitempty"`
+	UptimeSeconds    int64   `json:"uptime_seconds"`
+	LiveImageVersion string  `json:"live_image_version,omitempty"`
+	Mounts           []Mount `json:"mounts,omitempty"`
 }
 
 type Mount struct {

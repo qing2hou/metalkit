@@ -29,11 +29,15 @@ func newTestStore(t *testing.T) *Store {
 }
 
 func validInput(name string) CreateInput {
+	return validInputCIDR(name, "192.168.10.0/24", "192.168.10.1")
+}
+
+func validInputCIDR(name, cidr, gw string) CreateInput {
 	return CreateInput{
 		Name:        name,
 		Description: "test subnet",
-		CIDR:        "192.168.10.0/24",
-		Gateway:     "192.168.10.1",
+		CIDR:        cidr,
+		Gateway:     gw,
 		DNS:         []string{"1.1.1.1", "8.8.8.8"},
 		VLANID:      0,
 		CreatedBy:   "admin",
@@ -261,5 +265,54 @@ func TestDelete(t *testing.T) {
 	}
 	if err := s.Delete(ctx, sn.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("second Delete: got %v, want ErrNotFound", err)
+	}
+}
+
+// Regression: the UI's edit dialog always sends the name field; the PUT
+// decoder used to reject it with `unknown field "name"` (observed in
+// production 2026-09-16). Rename must work, dupes must not.
+func TestUpdateRename(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	sn, err := s.Create(ctx, validInput("old-name"))
+	if err != nil {
+		t.Fatalf("Create old-name: %v", err)
+	}
+
+	newName := "new-name"
+	up, err := s.Update(ctx, sn.ID, UpdateInput{Name: &newName, UpdatedBy: "admin"})
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if up.Name != "new-name" {
+		t.Errorf("name = %q, want new-name", up.Name)
+	}
+	got, _ := s.Get(ctx, sn.ID)
+	if got.Name != "new-name" {
+		t.Errorf("persisted name = %q", got.Name)
+	}
+
+	// Renaming to another subnet's name is rejected with a clear error.
+	if _, err := s.Create(ctx, validInputCIDR("other", "10.20.0.0/24", "10.20.0.1")); err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+	dup := "other"
+	if _, err := s.Update(ctx, sn.ID, UpdateInput{Name: &dup, UpdatedBy: "admin"}); err == nil {
+		t.Fatal("rename to a taken name must fail")
+	} else if !strings.Contains(err.Error(), "already used") {
+		t.Errorf("error = %v, want duplicate-name message", err)
+	}
+
+	// nil keeps the name; invalid names are rejected.
+	keep, err := s.Update(ctx, sn.ID, UpdateInput{UpdatedBy: "admin"})
+	if err != nil {
+		t.Fatalf("nil-name update: %v", err)
+	}
+	if keep.Name != "new-name" {
+		t.Errorf("nil Name changed the name to %q", keep.Name)
+	}
+	bad := "not ok!"
+	if _, err := s.Update(ctx, sn.ID, UpdateInput{Name: &bad, UpdatedBy: "admin"}); err == nil {
+		t.Fatal("invalid name must be rejected")
 	}
 }

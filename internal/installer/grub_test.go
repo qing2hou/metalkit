@@ -676,7 +676,7 @@ func TestRegisterEFIBootEntryRHEL_OpenEuler_BootMountPoint(t *testing.T) {
 	fs.files["/proc/mounts"] = []byte("/dev/sda1 /mnt/root/boot vfat rw 0 0\n")
 	deps := Deps{Exec: exec, FS: fs}
 
-	err := registerEFIBootEntryRHEL(context.Background(), deps, "/mnt/root", "/dev/sda", "openEuler")
+	err := registerEFIBootEntryRHEL(context.Background(), deps, "/mnt/root", "/dev/sda", "openEuler", []string{"shimx64.efi", "shim.efi", "grubx64.efi"})
 	if err != nil {
 		t.Fatalf("expected EFI dir at /boot/EFI/openEuler to be found, got err: %v", err)
 	}
@@ -803,7 +803,7 @@ GRUB_TIMEOUT=1
 	exec := newMockExec()
 	deps := Deps{FS: fs, Exec: exec, Logger: testLogger(t)}
 
-	fixRHELGrubCmdline(context.Background(), deps, "/mnt")
+	fixRHELGrubCmdline(context.Background(), deps, "/mnt", []string{"ttyS0"})
 
 	data, _ := fs.ReadFile("/mnt/etc/default/grub")
 	if strings.Contains(string(data), "ttyS0") {
@@ -840,7 +840,7 @@ options console=ttyS0,115200n8 no_timer_check root=UUID=abc
 	exec.On["find"] = mockExecResult{Out: []byte("/mnt/boot/loader/entries/abc-6.12.conf")}
 	deps := Deps{FS: fs, Exec: exec, Logger: testLogger(t)}
 
-	fixRHELGrubCmdline(context.Background(), deps, "/mnt")
+	fixRHELGrubCmdline(context.Background(), deps, "/mnt", []string{"ttyS0"})
 
 	data, _ := fs.ReadFile("/mnt/boot/loader/entries/abc-6.12.conf")
 	if strings.Contains(string(data), "ttyS0") {

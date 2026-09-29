@@ -2,17 +2,17 @@ package jobs
 
 // SQLite schema for install/reinstall jobs and their log streams. Tables:
 //
-//   jobs       — one row per install attempt; lifetime row, terminal states
-//                are succeeded/failed/cancelled.
-//   job_logs   — append-only line stream from the agent, used by the UI for
-//                live tailing (SSE) and post-mortem.
+//	jobs       — one row per install attempt; lifetime row, terminal states
+//	             are succeeded/failed/cancelled.
+//	job_logs   — append-only line stream from the agent, used by the UI for
+//	             live tailing (SSE) and post-mortem.
 //
 // State machine (enforced in code):
 //
-//     pending → running → succeeded
-//                       ↘ failed
-//                       ↘ cancelled
-//     pending           ↘ cancelled
+//	pending → running → succeeded
+//	                  ↘ failed
+//	                  ↘ cancelled
+//	pending           ↘ cancelled
 //
 // The UNIQUE partial index `idx_jobs_one_inflight_per_machine` is the
 // per-machine mutex: only one row with status ∈ {pending, running} can exist

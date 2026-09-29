@@ -17,7 +17,7 @@ func TestNormalizeESPLayout_NoOpWhenTargetHasLoader(t *testing.T) {
 	fs.files["/mnt/esp/efi/EFI/openEuler/grubx64.efi"] = []byte("nested efi")
 	deps := Deps{Exec: exec, FS: fs, Reporter: &mockReporter{}}
 
-	normalizeESPLayout(context.Background(), deps, "/mnt/esp", "openEuler")
+	normalizeESPLayout(context.Background(), deps, "/mnt/esp", "openEuler", []string{"shimx64.efi", "shim.efi", "grubx64.efi"}, "BOOTX64.EFI")
 
 	for _, c := range exec.Calls() {
 		if c.Name == "cp" {
@@ -35,7 +35,7 @@ func TestNormalizeESPLayout_CopiesFromNested(t *testing.T) {
 	rep := &mockReporter{}
 	deps := Deps{Exec: exec, FS: fs, Reporter: rep}
 
-	normalizeESPLayout(context.Background(), deps, "/mnt/esp", "openEuler")
+	normalizeESPLayout(context.Background(), deps, "/mnt/esp", "openEuler", []string{"shimx64.efi", "shim.efi", "grubx64.efi"}, "BOOTX64.EFI")
 
 	var sawCp bool
 	for _, c := range exec.Calls() {
@@ -66,7 +66,7 @@ func TestNormalizeESPLayout_NoOpWhenNoSource(t *testing.T) {
 	fs := newMockFS()
 	deps := Deps{Exec: exec, FS: fs, Reporter: &mockReporter{}}
 
-	normalizeESPLayout(context.Background(), deps, "/mnt/esp", "openEuler")
+	normalizeESPLayout(context.Background(), deps, "/mnt/esp", "openEuler", []string{"shimx64.efi", "shim.efi", "grubx64.efi"}, "BOOTX64.EFI")
 
 	for _, c := range exec.Calls() {
 		if c.Name == "cp" {
@@ -79,8 +79,8 @@ func TestNormalizeESPLayout_EmptyArgsNoOp(t *testing.T) {
 	exec := newMockExec()
 	deps := Deps{Exec: exec, FS: newMockFS(), Reporter: &mockReporter{}}
 
-	normalizeESPLayout(context.Background(), deps, "", "openEuler")
-	normalizeESPLayout(context.Background(), deps, "/mnt/esp", "")
+	normalizeESPLayout(context.Background(), deps, "", "openEuler", []string{"shimx64.efi"}, "BOOTX64.EFI")
+	normalizeESPLayout(context.Background(), deps, "/mnt/esp", "", []string{"shimx64.efi"}, "BOOTX64.EFI")
 
 	for _, c := range exec.Calls() {
 		if c.Name == "cp" {
@@ -99,7 +99,7 @@ func TestNormalizeESPLayout_CopiesBOOTFallback(t *testing.T) {
 	fs.files["/mnt/esp/efi/EFI/BOOT/BOOTX64.EFI"] = []byte("boot efi")
 	deps := Deps{Exec: exec, FS: fs, Reporter: &mockReporter{}}
 
-	normalizeESPLayout(context.Background(), deps, "/mnt/esp", "openEuler")
+	normalizeESPLayout(context.Background(), deps, "/mnt/esp", "openEuler", []string{"shimx64.efi", "shim.efi", "grubx64.efi"}, "BOOTX64.EFI")
 
 	// Should have called cp for BOOT fallback too.
 	bootCopies := 0
@@ -125,7 +125,7 @@ func TestNormalizeESPLayout_CpFailureLogsWarn(t *testing.T) {
 	deps := Deps{Exec: exec, FS: fs, Reporter: rep}
 
 	// Must not panic.
-	normalizeESPLayout(context.Background(), deps, "/mnt/esp", "openEuler")
+	normalizeESPLayout(context.Background(), deps, "/mnt/esp", "openEuler", []string{"shimx64.efi", "shim.efi", "grubx64.efi"}, "BOOTX64.EFI")
 
 	// cp was attempted (and failed); no normalize log should appear.
 	for _, l := range rep.logs {

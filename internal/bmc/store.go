@@ -4,11 +4,11 @@
 // Two read paths exist by design:
 //
 //   - Get(ctx, uuid)              — returns metadata only (no password). Used
-//                                   by the HTTP GET handler so passwords never
-//                                   leave the controller process.
+//     by the HTTP GET handler so passwords never
+//     leave the controller process.
 //   - GetWithPassword(ctx, uuid)  — returns metadata + decrypted password.
-//                                   Used in-process by the future ipmitool
-//                                   wrapper (M2.3-4).
+//     Used in-process by the future ipmitool
+//     wrapper (M2.3-4).
 //
 // Bindings does its own machine_uuid existence check before referencing this
 // table; we mirror that pattern (raw SQL against machines) so a delete of
@@ -448,6 +448,60 @@ func (s *Store) FindByIP(ctx context.Context, ip string) (string, error) {
 		return "", fmt.Errorf("find bmc by ip: %w", err)
 	}
 	return uuid, nil
+}
+
+// ReconcileToMachine moves whatever credential currently owns bmcIP onto
+// realUUID (deleting that machine's placeholder stub if the credential hung
+// on one), regardless of where the credential is attached today. It is the
+// manual counterpart of ReconcilePlaceholder: the machine-detail "同步 BMC"
+// button uses it to pair a reported machine with its BMC-menu entry without
+// rebooting the host into the live image.
+//
+// Returns ErrNotFound when no credential is registered for the IP, and a nil
+// error with migrated=false when the credential already belongs to realUUID.
+func (s *Store) ReconcileToMachine(ctx context.Context, realUUID, bmcIP string) (migrated bool, err error) {
+	realUUID = strings.ToLower(strings.TrimSpace(realUUID))
+	if !smbiosUUIDRE.MatchString(realUUID) {
+		return false, fmt.Errorf("reconcile: real uuid %q is not a SMBIOS UUID", realUUID)
+	}
+	ip, err := validateIP(bmcIP)
+	if err != nil {
+		return false, err
+	}
+	uuid, err := s.FindByIP(ctx, ip)
+	if errors.Is(err, ErrNotFound) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	if uuid == realUUID {
+		return false, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("reconcile: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE bmc_credentials SET machine_uuid = ? WHERE machine_uuid = ?`,
+		realUUID, uuid); err != nil {
+		return false, fmt.Errorf("reconcile: migrate credential: %w", err)
+	}
+	// The old owner was a placeholder stub (BMC-only, no reports of its own)?
+	// Drop it so the machines table stays one-row-per-physical-host. A real
+	// machine row is left alone — deleting it could cascade reports away.
+	if IsPlaceholderUUID(uuid) {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM machines WHERE uuid = ?`, uuid); err != nil {
+			return false, fmt.Errorf("reconcile: drop placeholder machine: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("reconcile: commit: %w", err)
+	}
+	return true, nil
 }
 
 // ReconcilePlaceholder is called from inventory.UpsertReport when an agent

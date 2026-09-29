@@ -12,6 +12,7 @@
 package bindings
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -34,7 +35,11 @@ var (
 	ErrProfileUnknown = errors.New("bindings: profile_id not in catalog")
 	ErrSubnetUnknown  = errors.New("bindings: subnet_id not in catalog")
 	ErrFamilyMismatch = errors.New("bindings: image family incompatible with profile os_family")
-	ErrInUse          = errors.New("bindings: in use") // for RefCount* helpers
+	// ErrArchMismatch is returned when the image's target CPU architecture
+	// conflicts with the machine's reported CPU architecture. Machines that
+	// never reported a CPU arch (legacy data) skip the check.
+	ErrArchMismatch = errors.New("bindings: image arch incompatible with machine cpu arch")
+	ErrInUse        = errors.New("bindings: in use") // for RefCount* helpers
 )
 
 // Store reads and writes bindings rows. Shares the *sql.DB with the rest of
@@ -43,6 +48,7 @@ type Store struct {
 	db     *sql.DB
 	logger *slog.Logger
 	cipher *crypto.Cipher
+	prober IPProber // liveness probe used when auto-allocating static IPs
 }
 
 // NewStore applies the bindings schema and returns a Store. The schema must
@@ -72,7 +78,23 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger, cipher *cryp
 			}
 		}
 	}
-	return &Store{db: db, logger: logger, cipher: cipher}, nil
+	// ARP first (authoritative on the local L2), ICMP layered on top for
+	// routed subnets and ARP-isolated segments — see CompositeProber.
+	s := &Store{
+		db: db, logger: logger, cipher: cipher,
+		prober: &CompositeProber{ARP: &ARPProber{}, ICMP: &ICMPProber{}, Logger: logger},
+	}
+	return s, nil
+}
+
+// WithProber swaps the liveness prober used by IP auto-allocation. Returns
+// the store for chaining. Tests inject a deterministic fake; production keeps
+// the ARP prober installed by NewStore.
+func (s *Store) WithProber(p IPProber) *Store {
+	if p != nil {
+		s.prober = p
+	}
+	return s
 }
 
 // Binding is the JSON-friendly record.
@@ -109,9 +131,14 @@ type Binding struct {
 	// into the profile copy before producing the agent spec. Accepts the same
 	// shapes as profile.network.nic_selector: "auto", "by-mac:..", "by-name:..".
 	// Empty / NULL = inherit profile.
-	NICSelectorOverride string    `json:"nic_selector_override,omitempty"`
-	UpdatedAt           time.Time `json:"updated_at"`
-	UpdatedBy           string    `json:"updated_by"`
+	NICSelectorOverride string `json:"nic_selector_override,omitempty"`
+	// AgentInstalledOverride is the per-binding override for
+	// profile.agent_installed. nil = inherit profile (JSON omitted);
+	// set = the jobs spec endpoint substitutes it into the profile copy
+	// before sending the spec (implant / don't-implant the monitor).
+	AgentInstalledOverride *bool     `json:"agent_installed_override,omitempty"`
+	UpdatedAt              time.Time `json:"updated_at"`
+	UpdatedBy              string    `json:"updated_by"`
 }
 
 // UpsertInput is what the PUT handler accepts.
@@ -156,7 +183,12 @@ type UpsertInput struct {
 	//   ""  → explicit clear (NULL = inherit profile)
 	//   set → validate same shapes as profile.network.nic_selector and store
 	NICSelectorOverride *string `json:"nic_selector_override,omitempty"`
-	UpdatedBy           string  `json:"-"` // injected by handler
+	// AgentInstalledOverride is three-state via *bool:
+	//   nil  → keep existing
+	//   set  → true = implant the monitor into this machine, false = never;
+	//          stored as 1/0, NULL (both nil-cases) = inherit profile
+	AgentInstalledOverride *bool  `json:"agent_installed_override,omitempty"`
+	UpdatedBy              string `json:"-"` // injected by handler
 }
 
 // Upsert validates the input (including cross-table referential checks and
@@ -206,6 +238,13 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 	if err := familyCompatible(profileFam, imageFam); err != nil {
 		return nil, err
 	}
+	imageArch, err := s.fetchImageArch(ctx, imageID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.archCompatible(ctx, muuid, imageArch); err != nil {
+		return nil, err
+	}
 
 	addr, err := validateStaticAddress(in.StaticAddress, networkMethod)
 	if err != nil {
@@ -222,14 +261,16 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 	keepExistingSubnet := in.SubnetID == nil
 	keepExistingVLAN := in.VLANOverride == nil
 	keepExistingNICSel := in.NICSelectorOverride == nil
+	keepExistingAgentInstalled := in.AgentInstalledOverride == nil
 
 	var existingSubnet sql.NullString
 	var existingVLAN sql.NullInt64
 	var existingNICSel sql.NullString
-	if keepExistingSubnet || keepExistingVLAN || keepExistingNICSel {
+	var existingAgentInstalled sql.NullInt64
+	if keepExistingSubnet || keepExistingVLAN || keepExistingNICSel || keepExistingAgentInstalled {
 		_ = s.db.QueryRowContext(ctx,
-			`SELECT subnet_id, vlan_override, nic_selector_override FROM bindings WHERE machine_uuid = ?`, muuid).
-			Scan(&existingSubnet, &existingVLAN, &existingNICSel)
+			`SELECT subnet_id, vlan_override, nic_selector_override, agent_installed_override FROM bindings WHERE machine_uuid = ?`, muuid).
+			Scan(&existingSubnet, &existingVLAN, &existingNICSel, &existingAgentInstalled)
 	}
 
 	var subnetIDSQL any
@@ -286,7 +327,7 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 	// from. validateStaticAddress used to error here; we deferred the check so
 	// the auto-allocate path above could run when a subnet IS bound.
 	if networkMethod == "static" && addr == "" {
-		return nil, errors.New("static_address: required when profile.network.method=static and no subnet is bound (bind a subnet to auto-allocate)")
+		return nil, errors.New("静态方式需要指定 IP，或先绑定子网以便自动分配空闲地址")
 	}
 
 	var vlanSQL any
@@ -317,6 +358,21 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 		if sel != "" {
 			nicSelectorSQL = sel
 		}
+	}
+
+	// agent_installed_override: NULL = inherit profile, 0/1 = override.
+	// Note the explicit false branch: Go's zero value for bool would also
+	// produce 0, but we must not conflate "false" with "unset" — a nil
+	// pointer already handled by keepExistingAgentInstalled above.
+	var agentInstalledSQL any
+	if keepExistingAgentInstalled {
+		if existingAgentInstalled.Valid {
+			agentInstalledSQL = existingAgentInstalled.Int64
+		}
+	} else if *in.AgentInstalledOverride {
+		agentInstalledSQL = 1
+	} else {
+		agentInstalledSQL = 0
 	}
 
 	now := time.Now().Unix()
@@ -422,23 +478,24 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
             (machine_uuid, image_id, profile_id, desired_state,
              static_address, hostname, root_password_enc, target_disk_override,
              bond_override, subnet_id, vlan_override, nic_selector_override,
-             updated_at, updated_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             agent_installed_override, updated_at, updated_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(machine_uuid) DO UPDATE SET
-            image_id              = excluded.image_id,
-            profile_id            = excluded.profile_id,
-            desired_state         = excluded.desired_state,
-            static_address        = excluded.static_address,
-            hostname              = excluded.hostname,
-            root_password_enc     = excluded.root_password_enc,
-            target_disk_override  = excluded.target_disk_override,
-            bond_override         = excluded.bond_override,
-            subnet_id             = excluded.subnet_id,
-            vlan_override         = excluded.vlan_override,
-            nic_selector_override = excluded.nic_selector_override,
-            updated_at            = excluded.updated_at,
-            updated_by            = excluded.updated_by`,
-		muuid, imageID, profileID, desired, addrSQL, hostnameSQL, ctSQL, tdSQL, bondSQL, subnetIDSQL, vlanSQL, nicSelectorSQL, now, in.UpdatedBy,
+            image_id                   = excluded.image_id,
+            profile_id                 = excluded.profile_id,
+            desired_state              = excluded.desired_state,
+            static_address             = excluded.static_address,
+            hostname                   = excluded.hostname,
+            root_password_enc          = excluded.root_password_enc,
+            target_disk_override       = excluded.target_disk_override,
+            bond_override              = excluded.bond_override,
+            subnet_id                  = excluded.subnet_id,
+            vlan_override              = excluded.vlan_override,
+            nic_selector_override      = excluded.nic_selector_override,
+            agent_installed_override   = excluded.agent_installed_override,
+            updated_at                 = excluded.updated_at,
+            updated_by                 = excluded.updated_by`,
+		muuid, imageID, profileID, desired, addrSQL, hostnameSQL, ctSQL, tdSQL, bondSQL, subnetIDSQL, vlanSQL, nicSelectorSQL, agentInstalledSQL, now, in.UpdatedBy,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("upsert binding: %w", err)
@@ -455,17 +512,17 @@ func (s *Store) Get(ctx context.Context, machineUUID string) (*Binding, error) {
 	}
 	var b Binding
 	var addr, hostname, tdJSON, bondJSON, subnetID, nicSelOverride sql.NullString
-	var vlanOverride sql.NullInt64
+	var vlanOverride, agentInstalledOverride sql.NullInt64
 	var updatedAt int64
 	var passwordCT []byte
 	err = s.db.QueryRowContext(ctx, `
         SELECT machine_uuid, image_id, profile_id, desired_state,
                static_address, hostname, root_password_enc, target_disk_override,
                bond_override, subnet_id, vlan_override, nic_selector_override,
-               updated_at, updated_by
+               agent_installed_override, updated_at, updated_by
         FROM bindings WHERE machine_uuid = ?`, muuid).Scan(
 		&b.MachineUUID, &b.ImageID, &b.ProfileID, &b.DesiredState,
-		&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &updatedAt, &b.UpdatedBy,
+		&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &agentInstalledOverride, &updatedAt, &b.UpdatedBy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -497,6 +554,10 @@ func (s *Store) Get(ctx context.Context, machineUUID string) (*Binding, error) {
 	if nicSelOverride.Valid {
 		b.NICSelectorOverride = nicSelOverride.String
 	}
+	if agentInstalledOverride.Valid {
+		v := agentInstalledOverride.Int64 != 0
+		b.AgentInstalledOverride = &v
+	}
 	b.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 	return &b, nil
 }
@@ -508,7 +569,7 @@ func (s *Store) List(ctx context.Context) ([]Binding, error) {
         SELECT machine_uuid, image_id, profile_id, desired_state,
                static_address, hostname, root_password_enc, target_disk_override,
                bond_override, subnet_id, vlan_override, nic_selector_override,
-               updated_at, updated_by
+               agent_installed_override, updated_at, updated_by
         FROM bindings ORDER BY machine_uuid`)
 	if err != nil {
 		return nil, fmt.Errorf("list bindings: %w", err)
@@ -518,11 +579,11 @@ func (s *Store) List(ctx context.Context) ([]Binding, error) {
 	for rows.Next() {
 		var b Binding
 		var addr, hostname, tdJSON, bondJSON, subnetID, nicSelOverride sql.NullString
-		var vlanOverride sql.NullInt64
+		var vlanOverride, agentInstalledOverride sql.NullInt64
 		var updatedAt int64
 		var passwordCT []byte
 		if err := rows.Scan(&b.MachineUUID, &b.ImageID, &b.ProfileID, &b.DesiredState,
-			&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &updatedAt, &b.UpdatedBy); err != nil {
+			&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &agentInstalledOverride, &updatedAt, &b.UpdatedBy); err != nil {
 			return nil, fmt.Errorf("scan binding: %w", err)
 		}
 		b.StaticAddress = addr.String
@@ -548,6 +609,10 @@ func (s *Store) List(ctx context.Context) ([]Binding, error) {
 		}
 		if nicSelOverride.Valid {
 			b.NICSelectorOverride = nicSelOverride.String
+		}
+		if agentInstalledOverride.Valid {
+			v := agentInstalledOverride.Int64 != 0
+			b.AgentInstalledOverride = &v
 		}
 		b.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 		out = append(out, b)
@@ -797,6 +862,60 @@ func (s *Store) fetchImageFamily(ctx context.Context, id string) (string, error)
 	return strings.ToLower(strings.TrimSpace(fam.String)), nil
 }
 
+// fetchImageArch returns the image's target arch (lowercase; "" if unset —
+// legacy images uploaded before the arch column existed). ErrImageUnknown if
+// the row is missing.
+func (s *Store) fetchImageArch(ctx context.Context, id string) (string, error) {
+	var arch sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(arch,'') FROM images WHERE id = ?`, id).Scan(&arch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("%w: %s", ErrImageUnknown, id)
+	}
+	if err != nil {
+		return "", fmt.Errorf("fetch image arch: %w", err)
+	}
+	return strings.ToLower(strings.TrimSpace(arch.String)), nil
+}
+
+// archCompatible rejects bindings that would flash an image built for one
+// CPU architecture onto a machine reporting another. Either side may be
+// unknown (""): legacy images carry no arch, and machines that never
+// PXE-booted into the live agent have no report — in those cases the check
+// passes (soft until data exists on both ends).
+func (s *Store) archCompatible(ctx context.Context, muuid, imageArch string) error {
+	if imageArch == "" {
+		return nil // legacy image, no opinion
+	}
+	var machineArch sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+        SELECT json_extract(r.body, '$.cpu.arch')
+        FROM machines m
+        LEFT JOIN reports r ON r.id = m.latest_report
+        WHERE m.uuid = ?`, muuid).Scan(&machineArch)
+	if err != nil {
+		return fmt.Errorf("fetch machine arch: %w", err)
+	}
+	mArch := strings.ToLower(strings.TrimSpace(machineArch.String))
+	if mArch == "" {
+		return nil // machine never reported its arch — can't judge
+	}
+	// The report uses Go's runtime.GOARCH / uname -m vocabulary: amd64 or
+	// arm64 on our agent builds. Normalise the x86_64/aarch64 aliases just
+	// in case a future collector changes sources.
+	switch mArch {
+	case "x86_64", "amd64":
+		mArch = "amd64"
+	case "aarch64", "arm64":
+		mArch = "arm64"
+	}
+	if mArch != imageArch {
+		return fmt.Errorf("%w: image is %q, machine reports %q",
+			ErrArchMismatch, imageArch, mArch)
+	}
+	return nil
+}
+
 // familyCompatible returns nil when an image with imageFam can be installed
 // using a profile with profileFam. The rules:
 //   - profile "any" accepts any image (profile is OS-agnostic by design).
@@ -834,67 +953,239 @@ func familyCompatible(profileFam, imageFam string) error {
 	return fmt.Errorf("%w: profile expects %q, image is %q", ErrFamilyMismatch, p, i)
 }
 
-// allocateIPFromSubnet finds an unused IP address within the subnet's CIDR range.
-// It excludes the network address, broadcast address, gateway, and any IPs already
-// assigned to other bindings. Returns the first available IP in the range.
+// allocateIPFromSubnet picks an unused IPv4 address for machineUUID inside the
+// subnet's CIDR. Reservation sources, in order of authority:
+//
+//   - network / broadcast / gateway
+//   - other bindings' static_address
+//   - the controller host's own addresses (a controller may not lease itself)
+//   - non-expired DHCP leases (same SQLite DB; pool clients hold these)
+//   - the configured DHCP pool range when it overlaps this subnet — handing a
+//     pool address out statically would let the DHCP server promise it to
+//     somebody else later
+//
+// Surviving candidates are then probed for liveness on the local L2 segment
+// (see IPProber): a device that answers ARP owns the address even if it is
+// absent from every catalog. Probing is best-effort — when the controller has
+// no interface in the subnet (a VLAN it is not attached to) or raw sockets
+// are unavailable, allocation proceeds unprobed and says so in the log.
+//
+// The machine's own previously allocated address is kept ("sticky"): editing
+// a binding must not silently move the host to a different IP.
 func (s *Store) allocateIPFromSubnet(ctx context.Context, machineUUID, cidr, gateway string) (string, error) {
-	// Parse CIDR to get network range
 	_, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return "", fmt.Errorf("parse CIDR %q: %w", cidr, err)
 	}
+	network := ipnet.IP.Mask(ipnet.Mask)
 
-	// Get all IPs currently assigned in bindings (excluding this machine)
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT static_address FROM bindings WHERE static_address IS NOT NULL AND machine_uuid != ?`,
-		machineUUID)
-	if err != nil {
-		return "", fmt.Errorf("query existing IPs: %w", err)
-	}
-	defer rows.Close()
-
-	usedIPs := make(map[string]bool)
-	for rows.Next() {
-		var ip string
-		if err := rows.Scan(&ip); err != nil {
-			return "", fmt.Errorf("scan IP: %w", err)
+	// Sticky: a re-PUT without an explicit address keeps the existing one when
+	// it is still inside this subnet and not a special address.
+	var own string
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(static_address, '') FROM bindings WHERE machine_uuid = ?`, machineUUID).
+		Scan(&own)
+	if own != "" {
+		if ip := net.ParseIP(own).To4(); ip != nil && ipnet.Contains(ip) &&
+			!ip.Equal(network) && !isBroadcast(ip, ipnet) {
+			s.logger.Info("ip allocation: keeping existing address",
+				"machine_uuid", machineUUID, "ip", own)
+			return own, nil
 		}
-		usedIPs[ip] = true
 	}
-	if err := rows.Err(); err != nil {
+
+	used, err := s.reservedIPs(ctx, machineUUID, ipnet, gateway)
+	if err != nil {
 		return "", err
 	}
 
-	// Mark gateway as used
-	usedIPs[gateway] = true
-
-	// Iterate through the subnet range to find first available IP
-	ip := ipnet.IP.Mask(ipnet.Mask)
-	for ipnet.Contains(ip) {
-		candidate := ip.String()
-
-		// Skip network address (first IP)
-		if ip.Equal(ipnet.IP) {
-			ip = nextIP(ip)
-			continue
-		}
-
-		// Skip broadcast address (last IP)
+	candidates := make([]net.IP, 0, 64)
+	for ip := nextIP(network); ipnet.Contains(ip); ip = nextIP(ip) {
 		if isBroadcast(ip, ipnet) {
 			break
 		}
-
-		// Skip if already used
-		if usedIPs[candidate] {
-			ip = nextIP(ip)
+		c := ip.String()
+		if used[c] {
 			continue
 		}
-
-		// Found an available IP
-		return candidate, nil
+		candidates = append(candidates, append(net.IP(nil), ip...))
+		if len(candidates) >= maxAllocCandidates {
+			break
+		}
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no available IP addresses in %s (all %d scanned addresses reserved)",
+			cidr, maxAllocCandidates)
 	}
 
-	return "", errors.New("no available IP addresses in subnet range")
+	// Probe in batches; the first candidate that stays silent is ours.
+	if s.prober != nil {
+		probed, skipped := 0, 0
+		for i := 0; i < len(candidates) && probed < maxProbeCandidates; i += probeBatchSize {
+			end := i + probeBatchSize
+			if end > len(candidates) {
+				end = len(candidates)
+			}
+			if end-i > maxProbeCandidates-probed {
+				end = i + (maxProbeCandidates - probed)
+			}
+			batch := candidates[i:end]
+			probed += len(batch)
+			live, perr := s.prober.InUseBatch(ctx, batch)
+			if perr != nil {
+				s.logger.Warn("ip allocation: liveness probe unavailable, assigning without probe",
+					"subnet", cidr, "err", perr)
+				return batch[0].String(), nil
+			}
+			for _, c := range batch {
+				if !live[c.String()] {
+					if skipped > 0 {
+						s.logger.Info("ip allocation: skipped live addresses",
+							"subnet", cidr, "skipped", skipped, "allocated", c.String())
+					}
+					return c.String(), nil
+				}
+				skipped++
+			}
+		}
+		if probed >= maxProbeCandidates {
+			return "", fmt.Errorf(
+				"no free address found in %s after probing %d candidates (all answered ARP); set a static address manually",
+				cidr, probed)
+		}
+		return "", fmt.Errorf("no available IP addresses in %s (every candidate answered ARP)", cidr)
+	}
+	return candidates[0].String(), nil
+}
+
+// Bounds for a single allocation run: candidates to enumerate and how many
+// share one probe window. A /24 exhausts far below these; they only matter
+// for very large CIDRs where scanning everything would stall the request.
+const (
+	// maxAllocCandidates bounds how many addresses a single allocation may
+	// enumerate (a /24 exhausts far below this; it only matters for large CIDRs).
+	maxAllocCandidates = 512
+	// probeBatchSize is how many candidates share one ARP window; each window
+	// costs ~0.9s, so bigger batches keep worst-case latency down.
+	probeBatchSize = 16
+	// maxProbeCandidates caps liveness probing. Beyond it the allocator errors
+	// out (with the count) instead of stalling: an operator who needs an
+	// address in a dense range can set it by hand.
+	maxProbeCandidates = 128
+)
+
+// reservedIPs collects every address that must not be handed out: gateway,
+// other bindings' static addresses, the controller's own addresses, live
+// leases, and the DHCP pool range when it overlaps ipnet.
+func (s *Store) reservedIPs(ctx context.Context, machineUUID string, ipnet *net.IPNet, gateway string) (map[string]bool, error) {
+	used := make(map[string]bool)
+	if gateway != "" {
+		used[gateway] = true
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT static_address FROM bindings
+          WHERE static_address IS NOT NULL AND static_address != '' AND machine_uuid != ?`,
+		machineUUID)
+	if err != nil {
+		return nil, fmt.Errorf("query existing IPs: %w", err)
+	}
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan IP: %w", err)
+		}
+		used[ip] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	// The controller's own addresses (serverIP, DHCP/TFTP listener host).
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok {
+				if v4 := n.IP.To4(); v4 != nil {
+					used[v4.String()] = true
+				}
+			}
+		}
+	}
+
+	// Leases still in force. Rows live in the same DB (shared connection) so
+	// this is a plain read; a missing table (DHCP never ran) is not an error.
+	leaseRows, err := s.db.QueryContext(ctx,
+		`SELECT ip FROM leases WHERE expires_at > ?`, time.Now().Unix())
+	if err != nil {
+		if !strings.Contains(err.Error(), "no such table") {
+			return nil, fmt.Errorf("query leases: %w", err)
+		}
+	} else {
+		for leaseRows.Next() {
+			var ip string
+			if err := leaseRows.Scan(&ip); err != nil {
+				leaseRows.Close()
+				return nil, err
+			}
+			used[ip] = true
+		}
+		if err := leaseRows.Err(); err != nil {
+			leaseRows.Close()
+			return nil, err
+		}
+		leaseRows.Close()
+	}
+
+	// Dynamic pool: skip it when configured on this subnet. Keys match
+	// settings.KeyDHCPStart/End — read directly to keep the bindings package
+	// free of a settings dependency (values are plain text rows).
+	var mode, start, end string
+	poolRows, err := s.db.QueryContext(ctx,
+		`SELECT key, value FROM settings WHERE key IN ('dhcp.mode', 'dhcp.pool.start', 'dhcp.pool.end')`)
+	if err != nil {
+		if !strings.Contains(err.Error(), "no such table") {
+			return nil, fmt.Errorf("query settings: %w", err)
+		}
+	} else {
+		for poolRows.Next() {
+			var k, v string
+			if err := poolRows.Scan(&k, &v); err != nil {
+				poolRows.Close()
+				return nil, err
+			}
+			switch k {
+			case "dhcp.mode":
+				mode = v
+			case "dhcp.pool.start":
+				start = v
+			case "dhcp.pool.end":
+				end = v
+			}
+		}
+		if err := poolRows.Err(); err != nil {
+			poolRows.Close()
+			return nil, err
+		}
+		poolRows.Close()
+	}
+	if mode == "full" {
+		if sip, eip := net.ParseIP(start).To4(), net.ParseIP(end).To4(); sip != nil && eip != nil {
+			if ipnet.Contains(sip) {
+				for ip := sip; ipnet.Contains(ip) && !ipGT(ip, eip); ip = nextIP(ip) {
+					used[ip.String()] = true
+				}
+			}
+		}
+	}
+	return used, nil
+}
+
+// ipGT reports whether a > b for two IPv4 addresses.
+func ipGT(a, b net.IP) bool {
+	return bytes.Compare(a.To4(), b.To4()) > 0
 }
 
 // nextIP returns the next IP address
@@ -912,10 +1203,12 @@ func nextIP(ip net.IP) net.IP {
 
 // isBroadcast checks if an IP is the broadcast address for the given network
 func isBroadcast(ip net.IP, ipnet *net.IPNet) bool {
+	if ip = ip.To4(); ip == nil {
+		return false
+	}
 	broadcast := make(net.IP, len(ip))
 	for i := range ip {
 		broadcast[i] = ip[i] | ^ipnet.Mask[i]
 	}
 	return ip.Equal(broadcast)
 }
-

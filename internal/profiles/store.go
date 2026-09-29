@@ -103,9 +103,16 @@ type Profile struct {
 	// distro mirrors for kernel-modules installation, etc.). Empty list
 	// means "use installer defaults" (223.5.5.5 + 114.114.114.114).
 	ChrootDNS []string `json:"chroot_dns,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	CreatedBy string    `json:"created_by"`
+	// AgentInstalled requests implanting the metalkit monitor (the
+	// metrics-only agent, see cmd/monitor) into the installed system.
+	// The install pipeline's agent-implant stage copies the binary +
+	// a systemd unit into the target so it starts on first boot and
+	// reports metrics to this controller. False = leave the installed
+	// system untouched.
+	AgentInstalled bool      `json:"agent_installed,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	CreatedBy      string    `json:"created_by"`
 }
 
 // CreateInput is what the create handler accepts. JSON sub-objects come in
@@ -124,8 +131,11 @@ type CreateInput struct {
 	// ChrootDNS is a comma-or-whitespace-separated list of DNS server IPs
 	// to write into /etc/resolv.conf in the target rootfs during install.
 	// Empty = use installer defaults. Validated as IPv4/IPv6 literals.
-	ChrootDNS        string          `json:"chroot_dns,omitempty"`
-	CreatedBy        string          `json:"-"` // injected by handler
+	ChrootDNS string `json:"chroot_dns,omitempty"`
+	// AgentInstalled implants the metrics-only monitor into the installed
+	// system (see Profile.AgentInstalled).
+	AgentInstalled bool   `json:"agent_installed,omitempty"`
+	CreatedBy      string `json:"-"` // injected by handler
 }
 
 // UpdateInput is what the update handler accepts. All fields are optional;
@@ -150,6 +160,9 @@ type UpdateInput struct {
 	// ChrootDNS is three-state via *string: nil = unchanged, "" = use
 	// installer defaults, non-empty = comma-separated DNS IPs.
 	ChrootDNS *string `json:"chroot_dns,omitempty"`
+	// AgentInstalled is three-state via *bool: nil = unchanged, false =
+	// disable implanting the monitor, true = implant it.
+	AgentInstalled *bool `json:"agent_installed,omitempty"`
 }
 
 // Create validates input and inserts a new profile row.
@@ -219,12 +232,12 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Profile, error) {
         INSERT INTO profiles
             (id, name, description, hostname_template, root_password_hash,
              target_disk_json, network_json, os_family, subnet_id,
-             network_renderer, bootloader, chroot_dns,
+             network_renderer, bootloader, chroot_dns, agent_installed,
              created_at, updated_at, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, in.Name, in.Description, in.HostnameTemplate, in.RootPasswordHash,
 		string(tdBlob), string(ncBlob), osFamily, subnetID,
-		in.NetworkRenderer, in.Bootloader, chrootDNS,
+		in.NetworkRenderer, in.Bootloader, chrootDNS, in.AgentInstalled,
 		now, now, in.CreatedBy,
 	)
 	if err != nil {
@@ -247,6 +260,7 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Profile, error) {
 		NetworkRenderer:  in.NetworkRenderer,
 		Bootloader:       in.Bootloader,
 		ChrootDNS:        parseChrootDNS(chrootDNS),
+		AgentInstalled:   in.AgentInstalled,
 		CreatedAt:        time.Unix(now, 0).UTC(),
 		UpdatedAt:        time.Unix(now, 0).UTC(),
 		CreatedBy:        in.CreatedBy,
@@ -256,14 +270,15 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (*Profile, error) {
 // Get returns the profile with the given id, or ErrNotFound.
 func (s *Store) Get(ctx context.Context, id string) (*Profile, error) {
 	var (
-		p           Profile
-		description sql.NullString
-		tdBlob, ncBlob string
-		osFamily    sql.NullString
-		subnetID    sql.NullString
-		networkRenderer sql.NullString
-		bootloader  sql.NullString
-		chrootDNS   sql.NullString
+		p                    Profile
+		description          sql.NullString
+		tdBlob, ncBlob       string
+		osFamily             sql.NullString
+		subnetID             sql.NullString
+		networkRenderer      sql.NullString
+		bootloader           sql.NullString
+		chrootDNS            sql.NullString
+		agentInstalled       bool
 		createdAt, updatedAt int64
 	)
 	err := s.db.QueryRowContext(ctx, `
@@ -271,12 +286,12 @@ func (s *Store) Get(ctx context.Context, id string) (*Profile, error) {
                root_password_hash, target_disk_json, network_json,
                COALESCE(os_family,'any'), COALESCE(subnet_id,''),
                COALESCE(network_renderer,''), COALESCE(bootloader,''),
-               COALESCE(chroot_dns,''),
+               COALESCE(chroot_dns,''), COALESCE(agent_installed,0),
                created_at, updated_at, created_by
         FROM profiles WHERE id = ?`, id).Scan(
 		&p.ID, &p.Name, &description, &p.HostnameTemplate, &p.RootPasswordHash,
 		&tdBlob, &ncBlob, &osFamily, &subnetID, &networkRenderer, &bootloader,
-		&chrootDNS,
+		&chrootDNS, &agentInstalled,
 		&createdAt, &updatedAt, &p.CreatedBy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -297,6 +312,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Profile, error) {
 	p.NetworkRenderer = networkRenderer.String
 	p.Bootloader = bootloader.String
 	p.ChrootDNS = parseChrootDNS(chrootDNS.String)
+	p.AgentInstalled = agentInstalled
 	p.CreatedAt = time.Unix(createdAt, 0).UTC()
 	p.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 	return &p, nil
@@ -309,7 +325,7 @@ func (s *Store) List(ctx context.Context) ([]Profile, error) {
                root_password_hash, target_disk_json, network_json,
                COALESCE(os_family,'any'), COALESCE(subnet_id,''),
                COALESCE(network_renderer,''), COALESCE(bootloader,''),
-               COALESCE(chroot_dns,''),
+               COALESCE(chroot_dns,''), COALESCE(agent_installed,0),
                created_at, updated_at, created_by
         FROM profiles
         ORDER BY created_at DESC, id DESC`)
@@ -321,19 +337,20 @@ func (s *Store) List(ctx context.Context) ([]Profile, error) {
 	out := make([]Profile, 0)
 	for rows.Next() {
 		var (
-			p              Profile
-			description    sql.NullString
-			tdBlob, ncBlob string
-			osFamily       sql.NullString
-			subnetID       sql.NullString
-			networkRenderer sql.NullString
-			bootloader     sql.NullString
-			chrootDNS      sql.NullString
+			p                    Profile
+			description          sql.NullString
+			tdBlob, ncBlob       string
+			osFamily             sql.NullString
+			subnetID             sql.NullString
+			networkRenderer      sql.NullString
+			bootloader           sql.NullString
+			chrootDNS            sql.NullString
+			agentInstalled       bool
 			createdAt, updatedAt int64
 		)
 		if err := rows.Scan(&p.ID, &p.Name, &description, &p.HostnameTemplate, &p.RootPasswordHash,
 			&tdBlob, &ncBlob, &osFamily, &subnetID, &networkRenderer, &bootloader,
-			&chrootDNS,
+			&chrootDNS, &agentInstalled,
 			&createdAt, &updatedAt, &p.CreatedBy); err != nil {
 			return nil, fmt.Errorf("scan profile: %w", err)
 		}
@@ -349,6 +366,7 @@ func (s *Store) List(ctx context.Context) ([]Profile, error) {
 		p.NetworkRenderer = networkRenderer.String
 		p.Bootloader = bootloader.String
 		p.ChrootDNS = parseChrootDNS(chrootDNS.String)
+		p.AgentInstalled = agentInstalled
 		p.CreatedAt = time.Unix(createdAt, 0).UTC()
 		p.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 		out = append(out, p)
@@ -444,6 +462,9 @@ func (s *Store) Update(ctx context.Context, id string, in UpdateInput) (*Profile
 		}
 		cur.ChrootDNS = parseChrootDNS(v)
 	}
+	if in.AgentInstalled != nil {
+		cur.AgentInstalled = *in.AgentInstalled
+	}
 
 	tdBlob, _ := json.Marshal(cur.TargetDisk)
 	ncBlob, _ := json.Marshal(cur.Network)
@@ -455,12 +476,12 @@ func (s *Store) Update(ctx context.Context, id string, in UpdateInput) (*Profile
         SET description = ?, hostname_template = ?, root_password_hash = ?,
             target_disk_json = ?, network_json = ?, os_family = ?,
             subnet_id = ?, network_renderer = ?, bootloader = ?,
-            chroot_dns = ?, updated_at = ?
+            chroot_dns = ?, agent_installed = ?, updated_at = ?
         WHERE id = ?`,
 		cur.Description, cur.HostnameTemplate, cur.RootPasswordHash,
 		string(tdBlob), string(ncBlob), cur.OSFamily, cur.SubnetID,
 		cur.NetworkRenderer, cur.Bootloader,
-		chrootDNSStr, now, id,
+		chrootDNSStr, cur.AgentInstalled, now, id,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update profile: %w", err)

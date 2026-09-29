@@ -28,9 +28,9 @@ func collectSensors(ctx context.Context, r *inventory.Report) error {
 // parseSDR parses the pipe-separated rows produced by `ipmitool sdr elist full`.
 // Format example:
 //
-//   CPU1 Temp        | 01h | ok  |  3.1 | 35 degrees C
-//   Fan1A            | 30h | ok  |  7.1 | 4800 RPM
-//   PS1 Current      | 03h | ok  | 10.1 | 0.40 Amps
+//	CPU1 Temp        | 01h | ok  |  3.1 | 35 degrees C
+//	Fan1A            | 30h | ok  |  7.1 | 4800 RPM
+//	PS1 Current      | 03h | ok  | 10.1 | 0.40 Amps
 //
 // Columns: Name | SensorID | Status | EntityID | Reading.
 func parseSDR(out []byte) []inventory.Sensor {

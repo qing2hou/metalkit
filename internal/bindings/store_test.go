@@ -61,6 +61,8 @@ func newFixture(t *testing.T) *testFixture {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
+	// Deterministic liveness probe: unit tests must not emit real ARP frames.
+	bindStore.WithProber(&fakeProber{})
 	return &testFixture{
 		db:       db,
 		machines: inv,
@@ -217,8 +219,8 @@ func TestUpsertStaticRequiresAddress(t *testing.T) {
 		DesiredState: "install",
 		UpdatedBy:    "admin",
 	})
-	if err == nil || !strings.Contains(err.Error(), "static_address") {
-		t.Fatalf("want static_address error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "静态方式需要指定 IP") {
+		t.Fatalf("want static-address-required error, got %v", err)
 	}
 }
 
@@ -229,7 +231,7 @@ func TestUpsertDHCPRejectsAddress(t *testing.T) {
 	pr := f.seedProfile(t, "p-dhcp-2", "dhcp")
 
 	_, err := f.bindings.Upsert(context.Background(), UpsertInput{
-		MachineUUID:   mu, ImageID: im, ProfileID: pr,
+		MachineUUID: mu, ImageID: im, ProfileID: pr,
 		DesiredState:  "install",
 		StaticAddress: "10.0.0.5",
 		UpdatedBy:     "admin",
@@ -844,11 +846,11 @@ func TestUpsertStaticEmptyAddressNoSubnet_Rejects(t *testing.T) {
 		DesiredState: "install",
 		UpdatedBy:    "admin",
 	})
-	if err == nil || !strings.Contains(err.Error(), "static_address") {
-		t.Fatalf("want static_address error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "静态方式需要指定 IP") {
+		t.Fatalf("want static-address-required error, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "subnet") {
-		t.Errorf("error should mention subnet hint, got %q", err.Error())
+	if !strings.Contains(err.Error(), "子网") {
+		t.Errorf("error should mention the subnet hint, got %q", err.Error())
 	}
 }
 
@@ -1042,5 +1044,95 @@ func TestRefCountBySubnet(t *testing.T) {
 	}
 	if n, err := f.bindings.RefCountBySubnet(ctx, otherSn); err != nil || n != 0 {
 		t.Fatalf("other subnet RefCountBySubnet = (%d, %v)", n, err)
+	}
+}
+
+// seedReportWithArch attaches a report carrying cpu.arch to an existing
+// machine by raw SQL, mirroring what inventory.UpsertReport produces.
+func (f *testFixture) seedReportWithArch(t *testing.T, uuid, arch string) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{
+		"collected_at": time.Now().UTC().Format(time.RFC3339),
+		"cpu":          map[string]any{"arch": arch, "sockets": 2},
+	})
+	res, err := f.db.ExecContext(context.Background(),
+		`INSERT INTO reports (uuid, ts, body) VALUES (?, ?, ?)`, uuid, time.Now().Unix(), string(body))
+	if err != nil {
+		t.Fatalf("seed report: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	if _, err := f.db.ExecContext(context.Background(),
+		`UPDATE machines SET latest_report = ? WHERE uuid = ?`, id, uuid); err != nil {
+		t.Fatalf("link report: %v", err)
+	}
+}
+
+func TestUpsertArchMismatch(t *testing.T) {
+	f := newFixture(t)
+	pr := f.seedProfile(t, "p-arch", "dhcp")
+
+	// Machine reports amd64; image targets arm64 → hard reject.
+	mu := f.seedMachine(t, '3')
+	f.seedReportWithArch(t, mu, "amd64")
+	armImg, err := f.images.FinalizeImage(context.Background(), images.FinalizeInput{
+		Name: "arm.qcow2", Arch: "arm64", Format: "qcow2",
+		SizeBytes: 1024, SHA256: strings.Repeat("b", 64), UploadedBy: "admin",
+	})
+	if err != nil {
+		t.Fatalf("seed arm image: %v", err)
+	}
+	_, err = f.bindings.Upsert(context.Background(), UpsertInput{
+		MachineUUID: mu, ImageID: armImg.ID, ProfileID: pr,
+		DesiredState: "install", UpdatedBy: "admin",
+	})
+	if !errors.Is(err, ErrArchMismatch) {
+		t.Errorf("err = %v, want ErrArchMismatch", err)
+	}
+
+	// Matching arch binds fine.
+	amdImg, err := f.images.FinalizeImage(context.Background(), images.FinalizeInput{
+		Name: "amd.qcow2", Arch: "amd64", Format: "qcow2",
+		SizeBytes: 1024, SHA256: strings.Repeat("c", 64), UploadedBy: "admin",
+	})
+	if err != nil {
+		t.Fatalf("seed amd image: %v", err)
+	}
+	if _, err := f.bindings.Upsert(context.Background(), UpsertInput{
+		MachineUUID: mu, ImageID: amdImg.ID, ProfileID: pr,
+		DesiredState: "install", UpdatedBy: "admin",
+	}); err != nil {
+		t.Errorf("matching arch should bind: %v", err)
+	}
+}
+
+func TestUpsertArchUnknownSidesPass(t *testing.T) {
+	f := newFixture(t)
+	pr := f.seedProfile(t, "p-arch2", "dhcp")
+
+	// Machine with no report (no arch) + arm64 image → pass (soft check).
+	mu := f.seedMachine(t, '4')
+	armImg, err := f.images.FinalizeImage(context.Background(), images.FinalizeInput{
+		Name: "arm2.qcow2", Arch: "arm64", Format: "qcow2",
+		SizeBytes: 1024, SHA256: strings.Repeat("d", 64), UploadedBy: "admin",
+	})
+	if err != nil {
+		t.Fatalf("seed arm image: %v", err)
+	}
+	if _, err := f.bindings.Upsert(context.Background(), UpsertInput{
+		MachineUUID: mu, ImageID: armImg.ID, ProfileID: pr,
+		DesiredState: "install", UpdatedBy: "admin",
+	}); err != nil {
+		t.Errorf("no-report machine should bind any arch: %v", err)
+	}
+
+	// Machine reports arm64; legacy image without arch → pass.
+	mu2 := f.seedMachine(t, '5')
+	f.seedReportWithArch(t, mu2, "arm64")
+	legacyImg := f.seedImage(t, "e") // no Arch field
+	if _, err := f.bindings.Upsert(context.Background(), UpsertInput{
+		MachineUUID: mu2, ImageID: legacyImg, ProfileID: pr,
+		DesiredState: "install", UpdatedBy: "admin",
+	}); err != nil {
+		t.Errorf("legacy image (no arch) should bind: %v", err)
 	}
 }

@@ -3,10 +3,12 @@ package leases
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,8 +43,7 @@ func mustAddr(t *testing.T, s string) netip.Addr {
 func defaultPool(t *testing.T) AllocateInput {
 	t.Helper()
 	return AllocateInput{
-		Start:    mustAddr(t, "192.168.10.100"),
-		End:      mustAddr(t, "192.168.10.105"),
+		Ranges:   []Range{{Start: mustAddr(t, "192.168.10.100"), End: mustAddr(t, "192.168.10.105")}},
 		Exclude:  map[string]struct{}{"192.168.10.101": {}},
 		LeaseDur: time.Hour,
 	}
@@ -123,8 +124,7 @@ func TestAllocate_PoolExhausted(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	in := AllocateInput{
-		Start:    mustAddr(t, "192.168.10.100"),
-		End:      mustAddr(t, "192.168.10.102"),
+		Ranges:   []Range{{Start: mustAddr(t, "192.168.10.100"), End: mustAddr(t, "192.168.10.102")}},
 		Exclude:  map[string]struct{}{"192.168.10.101": {}},
 		LeaseDur: time.Hour,
 	}
@@ -248,5 +248,109 @@ func TestList_Order(t *testing.T) {
 	}
 	if rows[0].IP > rows[1].IP {
 		t.Errorf("rows not sorted by IP: %v", rows)
+	}
+}
+
+func TestAllocate_MultiRange(t *testing.T) {
+	store := newTestStore(t)
+	// Two disjoint segments with a gap (.103-.104 excluded by design).
+	rg := func(a, b string) Range {
+		return Range{Start: mustAddr(t, a), End: mustAddr(t, b)}
+	}
+	ranges := []Range{rg("10.0.0.10", "10.0.0.11"), rg("10.0.0.30", "10.0.0.31")}
+
+	// Fill the first range, then the second; the gap must never be handed out.
+	var got []string
+	for i := 0; i < 4; i++ {
+		l, err := store.Allocate(context.Background(), AllocateInput{
+			MAC:      fmt.Sprintf("02:00:00:00:00:%02x", i+1),
+			Ranges:   ranges,
+			LeaseDur: time.Hour,
+		})
+		if err != nil {
+			t.Fatalf("alloc %d: %v", i, err)
+		}
+		got = append(got, l.IP)
+	}
+	want := []string{"10.0.0.10", "10.0.0.11", "10.0.0.30", "10.0.0.31"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("alloc order = %v, want %v", got, want)
+		}
+	}
+
+	// Sticky: the first MAC keeps its IP even though the second range is now
+	// where free space lives.
+	l, err := store.Allocate(context.Background(), AllocateInput{
+		MAC:    "02:00:00:00:00:01",
+		Ranges: ranges,
+	})
+	if err != nil {
+		t.Fatalf("sticky: %v", err)
+	}
+	if l.IP != "10.0.0.10" {
+		t.Errorf("sticky IP = %s, want 10.0.0.10", l.IP)
+	}
+
+	// Exhausted -> ErrPoolEmpty.
+	if _, err := store.Allocate(context.Background(), AllocateInput{
+		MAC:    "02:00:00:00:00:99",
+		Ranges: ranges,
+	}); err != ErrPoolEmpty {
+		t.Errorf("exhausted err = %v, want ErrPoolEmpty", err)
+	}
+
+	// Pool shrunk to a range that excludes the sticky IP → re-pick from the
+	// new range, not an error and not the old address.
+	l, err = store.Allocate(context.Background(), AllocateInput{
+		MAC:    "02:00:00:00:00:01",
+		Ranges: []Range{rg("10.0.0.50", "10.0.0.51")},
+	})
+	if err != nil {
+		t.Fatalf("shrink repick: %v", err)
+	}
+	if l.IP != "10.0.0.50" {
+		t.Errorf("repick IP = %s, want 10.0.0.50", l.IP)
+	}
+}
+
+func TestAllocate_ConcurrentBurst(t *testing.T) {
+	// A PXErack power-on: several DISCOVERs inside the same millisecond.
+	// Regression for the burst race where every concurrent Allocate read
+	// the same free IP and UNIQUE(ip) was defeated by DELETE-first.
+	store := newTestStore(t)
+	rg := Range{Start: mustAddr(t, "10.0.0.10"), End: mustAddr(t, "10.0.0.13")}
+
+	var wg sync.WaitGroup
+	ips := make([]string, 4)
+	errs := make([]error, 4)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			l, err := store.Allocate(context.Background(), AllocateInput{
+				MAC:    fmt.Sprintf("02:00:00:00:01:%02x", i+1),
+				Ranges: []Range{rg},
+			})
+			if err == nil {
+				ips[i] = l.IP
+			}
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	seen := map[string]bool{}
+	for i, ip := range ips {
+		if errs[i] != nil {
+			t.Fatalf("alloc %d: %v", i, errs[i])
+		}
+		if seen[ip] {
+			t.Errorf("IP %s handed to two clients in one burst", ip)
+		}
+		seen[ip] = true
+	}
+	if len(seen) != 4 {
+		t.Errorf("distinct IPs = %d, want 4 (got %v)", len(seen), ips)
 	}
 }

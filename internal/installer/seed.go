@@ -226,6 +226,14 @@ func buildSeedCommon(
 		writeDirectNetworkConfig(deps, spec, mntRoot, renderer, rhel7)
 	}
 
+	// Same iDRAC vKVM workaround the live image ships (metalkit-vt-init
+	// there, live-image config/includes.chroot): iDRAC's virtual-keyboard
+	// USB HID injects Scroll_Lock, which freezes Linux VT output and makes
+	// the BMC console keyboard look dead until Scroll Lock is toggled by
+	// hand. The installed system needs the same shield — operators manage
+	// freshly installed machines through vKVM before SSH is reachable.
+	writeVTInitService(deps, mntRoot)
+
 	return nil
 }
 
@@ -314,6 +322,36 @@ func renderNetworkConfig(nc profiles.NetworkConfig, b bindings.Binding, nics []N
 //
 // Auto mode (or no live match) falls back to "eth0" — netplan treats it as a
 // logical alias of any en* device via the wildcard matcher.
+// pickPhysicalNIC resolves which real NIC the business network should bind
+// to, as a MAC address (empty = unknown). Interface names are NOT stable
+// across the three stages (live=eno1/idrac, installed with net.ifnames=0 →
+// eth0..N — where the BMC's USB NIC may enumerate as eth0 BEFORE the real
+// PCI NICs, installed with predictable names → ens1f0), but the MAC is.
+// Every renderer (netplan / NM keyfile / sysconfig / ENI) can match on MAC,
+// so MAC is the one anchor the installer relies on end to end.
+//
+// Preference order: first LINK-UP physical NIC, else the first physical NIC
+// reported. Virtual/BMC ports (see NICInfo.IsVirtual) are skipped — binding
+// the business IP to iDRAC's passthrough port is exactly the 2026-09-28
+// incident (business VLAN 40 + static IP landed on eth0 = iDRAC USB NIC,
+// while the real ports freeloaded on DHCP).
+func pickPhysicalNIC(nics []NICInfo) (NICInfo, bool) {
+	var first NICInfo
+	found := false
+	for _, n := range nics {
+		if n.IsVirtual() || n.MAC == "" {
+			continue
+		}
+		if !found {
+			first, found = n, true
+		}
+		if n.Link {
+			return n, true
+		}
+	}
+	return first, found
+}
+
 func resolveSingleNICKey(selector string, nics []NICInfo, rhel7 bool) string {
 	switch {
 	case strings.HasPrefix(selector, "by-mac:"):
@@ -363,10 +401,20 @@ func renderNetworkConfigSingle(nc profiles.NetworkConfig, b bindings.Binding, ni
 		sb.WriteString("    match:\n")
 		fmt.Fprintf(&sb, "      name: %q\n", name)
 	default:
-		// auto: match any en* nic. Netplan demands at least one matcher
-		// when the device name (metalkit0) is virtual.
-		sb.WriteString("    match:\n")
-		sb.WriteString("      name: \"en*\"\n")
+		// auto: match by MAC of the picked physical NIC when the agent
+		// reported one. A bare name wildcard ("en*") or a hardcoded eth0
+		// would race the installed OS's naming (net.ifnames=0 renumbers
+		// everything and the BMC's USB NIC can enumerate as eth0 before
+		// the real PCI NICs — incident 2026-09-28). MAC is the only
+		// stable anchor; the wildcard is the last-resort fallback for
+		// missing inventory data.
+		if picked, ok := pickPhysicalNIC(nics); ok {
+			sb.WriteString("    match:\n")
+			fmt.Fprintf(&sb, "      macaddress: %q\n", strings.ToLower(picked.MAC))
+		} else {
+			sb.WriteString("    match:\n")
+			sb.WriteString("      name: \"en*\"\n")
+		}
 	}
 	if nc.VLAN > 0 {
 		// Physical NIC is L2-only; IP config goes on the VLAN sub-if.
@@ -516,6 +564,55 @@ func resolveNICMAC(nics []NICInfo, ifname string) string {
 		}
 	}
 	return ""
+}
+
+// writeVTInitService installs the same iDRAC vKVM Scroll_Lock shield the
+// live image ships (live-image config/includes.chroot metalkit-vt-init):
+// iDRAC's virtual-keyboard USB HID injects Scroll_Lock key presses, which
+// freeze Linux VT output and make the console keyboard look dead until
+// Scroll Lock is toggled by hand. On a freshly installed machine operators
+// manage it through vKVM before SSH is reachable, so the installed system
+// needs the same shield. Enabled via the multi-user.target.wants symlink.
+func writeVTInitService(deps Deps, mntRoot string) {
+	unitDir := filepath.Join(mntRoot, "etc", "systemd", "system")
+	if !deps.FS.Exists(unitDir) {
+		_ = deps.FS.MkdirAll(unitDir, 0o755)
+	}
+	unit := `[Unit]
+Description=Disable Scroll_Lock keysym + clear lock state on Linux VTs (iDRAC vKVM USB HID sends Scroll_Lock key presses that pause tty output and look like the console keyboard is frozen)
+DefaultDependencies=no
+After=systemd-vconsole-setup.service
+Before=getty.target getty@tty1.service getty@tty2.service getty@tty3.service getty@tty4.service getty@tty5.service getty@tty6.service
+ConditionPathExists=/dev/tty1
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo "keycode 70 = VoidSymbol" | loadkeys -; for t in 1 2 3 4 5 6; do setleds -D -scroll < /dev/tty$t 2>/dev/null || true; done'
+
+[Install]
+WantedBy=getty.target
+`
+	path := filepath.Join(unitDir, "metalkit-vt-init.service")
+	if err := deps.FS.WriteFile(path, []byte(unit), 0o644); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("direct-write: failed to write vt-init unit", "err", err)
+		}
+		return
+	}
+	// systemctl enable (relative symlink inside the rootfs is enough —
+	// systemd resolves it at boot; no chroot needed).
+	wantsDir := filepath.Join(unitDir, "getty.target.wants")
+	if !deps.FS.Exists(wantsDir) {
+		_ = deps.FS.MkdirAll(wantsDir, 0o755)
+	}
+	if err := deps.FS.Symlink("../metalkit-vt-init.service", filepath.Join(wantsDir, "metalkit-vt-init.service")); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("direct-write: failed to enable vt-init unit", "err", err)
+		}
+	} else if deps.Logger != nil {
+		deps.Logger.Info("direct-write: wrote + enabled metalkit-vt-init.service (iDRAC vKVM Scroll_Lock shield)")
+	}
 }
 
 // lookupSlaveMAC returns the MAC for a bond slave specifier. If the slave is
@@ -681,7 +778,11 @@ func writeENIInterfaces(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 		_ = deps.FS.MkdirAll(ifDir, 0o755)
 	}
 
-	// Resolve the interface name.
+	// Resolve the interface name. by-mac/by-name select the NIC explicitly;
+	// auto falls back to the first physical NIC in the live inventory —
+	// ifcfg-style names (ethN) are rewritten by the installed kernel
+	// (net.ifnames=0) and the BMC USB NIC often takes eth0, so we never
+	// hardcode a bare "eth0" here.
 	dev := "eth0"
 	switch {
 	case strings.HasPrefix(nc.NICSelector, "by-mac:"):
@@ -703,6 +804,10 @@ func writeENIInterfaces(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 			}
 		} else if name != "" {
 			dev = name
+		}
+	default:
+		if picked, ok := pickPhysicalNIC(nics); ok {
+			dev = picked.Name
 		}
 	}
 
@@ -779,9 +884,13 @@ func writeENIInterfacesBond(deps Deps, mntRoot string, nc profiles.NetworkConfig
 		lines = append(lines, "")
 	}
 
-	// Bond master.
+	// Bond master. With a VLAN on top, the bond stays L2-only (inet manual)
+	// and the IP lives on the bond0.<vlan> stanza below — mirroring the
+	// netplan/NM renderers (duplicate IP on master+VLAN wedges routing).
 	lines = append(lines, "auto bond0")
-	if nc.Method == "dhcp" {
+	if nc.VLAN > 0 {
+		lines = append(lines, "iface bond0 inet manual")
+	} else if nc.Method == "dhcp" {
 		lines = append(lines, "iface bond0 inet dhcp")
 	} else {
 		lines = append(lines, "iface bond0 inet static")
@@ -816,6 +925,31 @@ func writeENIInterfacesBond(deps Deps, mntRoot string, nc profiles.NetworkConfig
 			policy = "layer3+4"
 		}
 		lines = append(lines, "    bond-xmit-hash-policy "+policy)
+	}
+
+	// VLAN sub-interface stanza when requested (IP here, master above is
+	// L2-only).
+	if nc.VLAN > 0 {
+		lines = append(lines, "")
+		lines = append(lines, fmt.Sprintf("auto bond0.%d", nc.VLAN))
+		if nc.Method == "dhcp" {
+			lines = append(lines, fmt.Sprintf("iface bond0.%d inet dhcp", nc.VLAN))
+		} else {
+			lines = append(lines, fmt.Sprintf("iface bond0.%d inet static", nc.VLAN))
+			if b.StaticAddress != "" {
+				lines = append(lines, "    address "+b.StaticAddress)
+				if nc.PrefixLen > 0 {
+					lines = append(lines, fmt.Sprintf("    netmask %s", prefixToNetmask(nc.PrefixLen)))
+				}
+			}
+			if nc.Gateway != "" {
+				lines = append(lines, "    gateway "+nc.Gateway)
+			}
+			if len(nc.DNS) > 0 {
+				lines = append(lines, "    dns-nameservers "+strings.Join(nc.DNS, " "))
+			}
+		}
+		lines = append(lines, fmt.Sprintf("    vlan-raw-device bond0"))
 	}
 
 	content := strings.Join(lines, "\n") + "\n"
@@ -882,6 +1016,13 @@ func writeWickedIfcfg(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bi
 			}
 		} else if name != "" {
 			dev = name
+		}
+	default:
+		// auto: pin the first physical NIC by MAC (LLADDR). Bare dev
+		// names are unstable across live → installed renaming.
+		if picked, ok := pickPhysicalNIC(nics); ok {
+			hwaddr = strings.ToLower(picked.MAC)
+			dev = picked.Name
 		}
 	}
 
@@ -950,11 +1091,13 @@ func writeWickedBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bin
 		)
 	}
 
-	// Bond master ifcfg-bond0.
+	// Bond master ifcfg-bond0. With a VLAN on top, L2-only — the IP lives
+	// on the ifcfg-bond0.<vlan> below (same rule as the other renderers:
+	// duplicating the static IP on master+VLAN wedges routing).
 	var master []string
 	master = append(master, "# Managed by metalkit installer")
-	master = append(master, "BOOTPROTO='"+ternary(nc.Method == "dhcp", "dhcp", "static")+"'")
-	if nc.Method != "dhcp" {
+	master = append(master, "BOOTPROTO='"+ternary(nc.Method == "dhcp" && nc.VLAN == 0, "dhcp", "none")+"'")
+	if nc.Method != "dhcp" && nc.VLAN == 0 {
 		if b.StaticAddress != "" {
 			master = append(master, "IPADDR='"+b.StaticAddress+"'")
 		}
@@ -993,6 +1136,33 @@ func writeWickedBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bin
 		[]byte(strings.Join(master, "\n")+"\n"),
 		0o644,
 	)
+
+	// VLAN sub-interface ifcfg-bond0.<vlan> when requested.
+	if nc.VLAN > 0 {
+		var vlan []string
+		vlan = append(vlan, "# Managed by metalkit installer")
+		vlan = append(vlan, fmt.Sprintf("BOOTPROTO='%s'", ternary(nc.Method == "dhcp", "dhcp", "static")))
+		if nc.Method != "dhcp" {
+			if b.StaticAddress != "" {
+				vlan = append(vlan, "IPADDR='"+b.StaticAddress+"'")
+			}
+			if nc.PrefixLen > 0 {
+				vlan = append(vlan, fmt.Sprintf("PREFIXLEN='%d'", nc.PrefixLen))
+			}
+			if nc.Gateway != "" {
+				vlan = append(vlan, "GATEWAY='"+nc.Gateway+"'")
+			}
+		}
+		vlan = append(vlan, "STARTMODE='auto'")
+		vlan = append(vlan, "VLAN='yes'")
+		vlan = append(vlan, fmt.Sprintf("ETHERDEVICE='bond0'"))
+		vlan = append(vlan, fmt.Sprintf("VLAN_ID='%d'", nc.VLAN))
+		_ = deps.FS.WriteFile(
+			filepath.Join(sysDir, fmt.Sprintf("ifcfg-bond0.%d", nc.VLAN)),
+			[]byte(strings.Join(vlan, "\n")+"\n"),
+			0o644,
+		)
+	}
 }
 
 // prefixToNetmask converts a CIDR prefix length (1-32) to a dotted-decimal
@@ -1027,9 +1197,11 @@ func ternary(cond bool, a, b string) string {
 //     installed OS will produce. HWADDR pins the IP to the right NIC even
 //     if the index ends up off by one.
 //   - by-name:<MAC>: same handling as by-mac when name is a MAC.
-//   - everything else (auto / by-name with a real ifname): fall back to
-//     ifcfg-eth0 with no HWADDR — agent picks the first up NIC at the
-//     installed OS layer too, so the alphabetical first ethN wins.
+//   - auto: pick the first link-up physical NIC from the live inventory
+//     (skipping BMC USB virtual ports via NICInfo.IsVirtual) and pin it with
+//     HWADDR. Never bare ifcfg-eth0: net.ifnames=0 renumbers NICs at boot and
+//     the iDRAC USB NIC often takes eth0, which would put the business IP on
+//     the management passthrough port (incident 2026-09-28).
 func writeIfcfg(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo) {
 	sysDir := filepath.Join(mntRoot, "etc", "sysconfig", "network-scripts")
 	if !deps.FS.Exists(sysDir) {
@@ -1037,8 +1209,6 @@ func writeIfcfg(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings
 	}
 
 	// Resolve the target MAC + post-install eth index from the live NIC list.
-	// When the selector doesn't pick a specific NIC (auto), we fall back to
-	// eth0 with no HWADDR so initscripts simply use the first NIC.
 	mac := ""
 	ethIdx := 0
 	switch {
@@ -1048,6 +1218,18 @@ func writeIfcfg(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings
 		nm := strings.TrimPrefix(nc.NICSelector, "by-name:")
 		if isValidMAC(nm) {
 			mac = strings.ToLower(nm)
+		}
+	default:
+		// auto: pin the first physical NIC. ethIdx follows the live list
+		// order only for the FILE NAME (cosmetic); HWADDR is what binds.
+		if picked, ok := pickPhysicalNIC(nics); ok {
+			mac = strings.ToLower(picked.MAC)
+			for i, n := range nics {
+				if strings.ToLower(n.MAC) == mac {
+					ethIdx = i
+					break
+				}
+			}
 		}
 	}
 	if mac != "" {
@@ -1148,7 +1330,10 @@ func writeIfcfgBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bind
 		opts = append(opts, fmt.Sprintf("xmit_hash_policy=%s", policy))
 	}
 
-	// Master ifcfg-bond0.
+	// Master ifcfg-bond0. With a VLAN on top, the bond stays L2-only —
+	// the IP/gateway/DNS live on the ifcfg-bond0.<vlan> sub-interface
+	// written below. Duplicating the static IP on both the master and the
+	// VLAN wedges routing (2026-09-28 Rocky incident, NM variant).
 	var master []string
 	master = append(master, "# Managed by metalkit installer")
 	master = append(master, "DEVICE=bond0")
@@ -1157,28 +1342,67 @@ func writeIfcfgBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bind
 	master = append(master, "BONDING_MASTER=yes")
 	master = append(master, "ONBOOT=yes")
 	master = append(master, fmt.Sprintf("BONDING_OPTS=%q", strings.Join(opts, " ")))
-	if nc.Method == "dhcp" {
-		master = append(master, "BOOTPROTO=dhcp")
+	if nc.VLAN == 0 {
+		if nc.Method == "dhcp" {
+			master = append(master, "BOOTPROTO=dhcp")
+		} else {
+			master = append(master, "BOOTPROTO=none")
+			if b.StaticAddress != "" {
+				master = append(master, "IPADDR="+b.StaticAddress)
+			}
+			if nc.PrefixLen > 0 {
+				master = append(master, fmt.Sprintf("PREFIX=%d", nc.PrefixLen))
+			}
+			if nc.Gateway != "" {
+				master = append(master, "GATEWAY="+nc.Gateway)
+			}
+			for i, dns := range nc.DNS {
+				master = append(master, fmt.Sprintf("DNS%d=%s", i+1, dns))
+			}
+		}
 	} else {
 		master = append(master, "BOOTPROTO=none")
-		if b.StaticAddress != "" {
-			master = append(master, "IPADDR="+b.StaticAddress)
-		}
-		if nc.PrefixLen > 0 {
-			master = append(master, fmt.Sprintf("PREFIX=%d", nc.PrefixLen))
-		}
-		if nc.Gateway != "" {
-			master = append(master, "GATEWAY="+nc.Gateway)
-		}
-		for i, dns := range nc.DNS {
-			master = append(master, fmt.Sprintf("DNS%d=%s", i+1, dns))
-		}
 	}
 	_ = deps.FS.WriteFile(
 		filepath.Join(sysDir, "ifcfg-bond0"),
 		[]byte(strings.Join(master, "\n")+"\n"),
 		0o644,
 	)
+
+	// VLAN sub-interface ifcfg-bond0.<vlan> when requested.
+	if nc.VLAN > 0 {
+		var vlan []string
+		vlan = append(vlan, "# Managed by metalkit installer")
+		vlan = append(vlan, fmt.Sprintf("DEVICE=bond0.%d", nc.VLAN))
+		vlan = append(vlan, fmt.Sprintf("NAME=bond0.%d", nc.VLAN))
+		vlan = append(vlan, "TYPE=Vlan")
+		vlan = append(vlan, "ONBOOT=yes")
+		vlan = append(vlan, "VLAN=yes")
+		vlan = append(vlan, fmt.Sprintf("PHYSDEV=bond0"))
+		vlan = append(vlan, fmt.Sprintf("VLAN_ID=%d", nc.VLAN))
+		if nc.Method == "dhcp" {
+			vlan = append(vlan, "BOOTPROTO=dhcp")
+		} else {
+			vlan = append(vlan, "BOOTPROTO=none")
+			if b.StaticAddress != "" {
+				vlan = append(vlan, "IPADDR="+b.StaticAddress)
+			}
+			if nc.PrefixLen > 0 {
+				vlan = append(vlan, fmt.Sprintf("PREFIX=%d", nc.PrefixLen))
+			}
+			if nc.Gateway != "" {
+				vlan = append(vlan, "GATEWAY="+nc.Gateway)
+			}
+			for i, dns := range nc.DNS {
+				vlan = append(vlan, fmt.Sprintf("DNS%d=%s", i+1, dns))
+			}
+		}
+		_ = deps.FS.WriteFile(
+			filepath.Join(sysDir, fmt.Sprintf("ifcfg-bond0.%d", nc.VLAN)),
+			[]byte(strings.Join(vlan, "\n")+"\n"),
+			0o644,
+		)
+	}
 
 	// One ifcfg per slave, logical names eth0, eth1, ...
 	for i, slave := range bond.Slaves {
@@ -1423,11 +1647,16 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 		miimon = 100
 	}
 
-	// Write one keyfile per slave.
-	// Do NOT set interface-name: the live system's NIC names (eno1, enp1s0f0,
-	// etc.) may differ from the installed OS names (eth0, eth1, etc.) due to
-	// net.ifnames / biosdevname kernel parameters. Rely solely on mac-address
-	// matching so NM finds the right device regardless of its name.
+	// Write one keyfile per slave. Match by MAC ONLY — do NOT write
+	// interface-name: predicting the installed-OS ethN name is unreliable
+	// (enumeration order depends on USB vs PCI timing — the iDRAC virtual
+	// NIC often takes eth0 before the real ports), and a wrong name pins
+	// the keyfile to the wrong device (2026-09-29 incident: slave pinned to
+	// eth0=iDRAC / an eth1+MAC combo matching nothing, bond stuck
+	// activating forever with zero slaves).
+	// MAC matching is safe: NM binds slave connections BEFORE the kernel
+	// bond claims the ports, so at match time every NIC still carries its
+	// own permanent MAC (current-MAC collapse happens later).
 	for i, slave := range bond.Slaves {
 		_, mac := resolveSlaveDevAndMAC(slave, nics)
 
@@ -1463,10 +1692,13 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 	master = append(master, "mode="+bond.Mode)
 	switch bond.Mode {
 	case "active-backup":
-		if bond.Primary != "" {
-			primaryDev, _ := resolveSlaveDevAndMAC(bond.Primary, nics)
-			master = append(master, "primary="+primaryDev)
-		}
+		// primary= references an interface by NAME in NM keyfiles — and any
+		// name we could write is unreliable (live enoN doesn't exist in the
+		// installed OS; predicted ethN is enumeration-order roulette, see
+		// the slave comment above). A dangling primary makes the active
+		// slave (and bond MAC) flap. Write nothing: the kernel pins the
+		// first enslaved carrier-up slave as active, stable in practice.
+		_ = bond.Primary
 	case "802.3ad":
 		rate := bond.LACPRate
 		if rate == "" {
@@ -1480,8 +1712,28 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 		master = append(master, "transmit-hash-policy="+policy)
 	}
 	master = append(master, "")
+	// IP layer. With a VLAN on top, the bond stays L2-only — the
+	// IP/gateway/DNS live on the VLAN sub-interface (writeNMKeyfileVLAN).
+	// MUST stay explicit: ipv4.method=disabled. Omitting [ipv4] defaults to
+	// method=auto (DHCP) in NM keyfiles — the 2026-09-28 follow-up incident:
+	// bond0 DHCP'd 192.168.1.100 on its own and stole the default route.
+	// Writing the same static IP on BOTH the master and the VLAN duplicates
+	// the address and wedges routing (first Rocky incident same day).
 	master = append(master, "[ipv4]")
-	if nc.Method == "dhcp" {
+	if nc.VLAN > 0 {
+		master = append(master, "method=disabled")
+		// ipv6 too: a VLAN-topped L2 bridge has no business doing SLAAC.
+		// ipv6.method defaults to auto — while LACP is still converging the
+		// bond carries no RA, and NM's ip-config stage then blocks the full
+		// IPv6 timeout (~30s). NM re-evaluates readiness as failed and
+		// autoconnect restarts the whole family (reason 'new-activation'),
+		// resetting the bond MAC and restarting LACP from scratch — the
+		// 2026-09-29 infinite 30s rebuild loop. ipv6.method=disabled (and
+		// addr-gen-mode kept eui64 default) makes the master a pure bridge.
+		master = append(master, "")
+		master = append(master, "[ipv6]")
+		master = append(master, "method=disabled")
+	} else if nc.Method == "dhcp" {
 		master = append(master, "method=auto")
 	} else {
 		master = append(master, "method=manual")
@@ -1525,6 +1777,14 @@ func writeNMKeyfileVLAN(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 	lines = append(lines, "type=vlan")
 	lines = append(lines, fmt.Sprintf("interface-name=%s.%d", parent, nc.VLAN))
 	lines = append(lines, "autoconnect=true")
+	// LACP bonds need seconds to converge (aggregator selection) after the
+	// master activates; without this the VLAN activation races the parent,
+	// NM judges the family activation failed and tears the whole bond down
+	// (autoconnect restart) — resetting the bond MAC and forcing the switch
+	// LACP state machine to reconverge from scratch, forever. Teach the VLAN
+	// to wait for the parent device (30s covers LACP fast-rate convergence
+	// with margin). (2026-09-29 802.3ad rebuild-loop incident.)
+	lines = append(lines, "wait-device-timeout=30000")
 	lines = append(lines, "")
 	lines = append(lines, "[vlan]")
 	lines = append(lines, fmt.Sprintf("parent=%s", parent))
@@ -1545,6 +1805,12 @@ func writeNMKeyfileVLAN(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 			lines = append(lines, "dns="+strings.Join(nc.DNS, ";"))
 		}
 	}
+	// Same IPv6 rationale as the bond master: the VLAN carries IPv4 only.
+	// ipv6 auto blocks the ip-config stage for the IPv6 timeout while no RA
+	// arrives on this VLAN, feeding the activation-restart loop.
+	lines = append(lines, "")
+	lines = append(lines, "[ipv6]")
+	lines = append(lines, "method=disabled")
 
 	filename := fmt.Sprintf("%s.%d.nmconnection", parent, nc.VLAN)
 	_ = deps.FS.WriteFile(filepath.Join(nmDir, filename), []byte(strings.Join(lines, "\n")+"\n"), 0o600)

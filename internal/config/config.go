@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -69,6 +70,60 @@ type Config struct {
 	// Hashed once at controller startup; the hash is what hits SQLite. Default
 	// "metalkit" — change in config.yaml per-environment.
 	DefaultRootPassword string `yaml:"defaultRootPassword"`
+
+	// ServerIPPinned records whether serverIP came from config.yaml (true)
+	// or was auto-detected from the interface (false). Not settable via
+	// YAML; overlays use it to decide whether switching the DHCP interface
+	// may re-derive serverIP.
+	ServerIPPinned bool `yaml:"-"`
+
+	// HTTPS serves the HTTP port over TLS. Users holds the operator
+	// accounts for the Web UI (replaces the single adminUser/adminPass pair
+	// when non-empty; the legacy pair remains as fallback for back-compat).
+	HTTPS *HTTPSConfig `yaml:"https"`
+	Users []User       `yaml:"users"`
+}
+
+// HTTPSConfig enables TLS alongside HTTP. Two certificate modes:
+//
+//   - Static: certFile + keyFile point at operator-provided PEM files.
+//     Both must be set together.
+//   - Auto: certFile/keyFile empty → a self-signed certificate is generated
+//     on first boot into stateDir (default under the data dir), with SANs for
+//     ServerIP, localhost and the interface IP. Suitable for management-
+//     network deployments where the controller is the TLS root of its own
+//     browsing population (operators accept the browser warning or
+//     distribute the cert).
+//
+// Dual-listener model (PXE machines cannot do TLS — no trust store, and the
+// shipped iPXE binaries chain over plain HTTP):
+//
+//   - httpsAddr (default ":8443") speaks TLS and serves EVERYTHING.
+//   - The original httpAddr keeps speaking HTTP but serves only the machine
+//     channel (/boot/*, /healthz, /api/v1/report, /api/v1/heartbeat/*,
+//     /api/v1/agent/*); every human-facing path (/ui, the operator API)
+//     is 308-redirected to the HTTPS listener. iPXE templates and the
+//     agent's metalkit.url keep pointing at the HTTP listener untouched.
+type HTTPSConfig struct {
+	// HTTPSAddr is the TLS listener. Defaults to ":8443".
+	HTTPSAddr   string `yaml:"httpsAddr"`
+	CertFile    string `yaml:"certFile"`
+	KeyFile     string `yaml:"keyFile"`
+	StateDir    string `yaml:"stateDir"`    // where the auto cert/key live; defaults to <dbdir>/tls
+	AutoDNSName string `yaml:"autoDNSName"` // extra SAN (e.g. metalkit.internal)
+}
+
+// User is an operator account for the Web UI / API. Password is verified
+// against the bcrypt-style hash produced by `mkpasswd -m sha-512` at
+// account-creation time (same primitive util.CryptSHA512 uses).
+type User struct {
+	Username string `yaml:"username"`
+	// PassHash is a $6$ sha512crypt hash. Generate with:
+	//   mkpasswd -m sha-512
+	PassHash string `yaml:"passHash"`
+	// Role: "admin" (default) can do everything including user management;
+	// "operator" can operate but not manage users or read passwords.
+	Role string `yaml:"role"`
 }
 
 // DHCPPool is the lease range and per-subnet metadata for full DHCP mode.
@@ -98,14 +153,19 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("interface: required")
 	}
 
-	// Auto-detect serverIP from interface if not specified
+	// Auto-detect serverIP from interface if not specified. Whether it was
+	// pinned is recorded so later overlays (settings store) know whether
+	// they may re-derive it when the operator switches the DHCP NIC.
 	if c.ServerIP == "" {
 		detectedIP, err := detectInterfaceIP(c.Interface)
 		if err != nil {
 			return nil, fmt.Errorf("auto-detect serverIP from %s: %w", c.Interface, err)
 		}
 		c.ServerIP = detectedIP
+		c.ServerIPPinned = false
 		slog.Info("auto-detected serverIP", "interface", c.Interface, "ip", c.ServerIP)
+	} else {
+		c.ServerIPPinned = true
 	}
 
 	addr, err := netip.ParseAddr(c.ServerIP)
@@ -132,6 +192,33 @@ func Load(path string) (*Config, error) {
 	}
 	if c.DefaultRootPassword == "" {
 		c.DefaultRootPassword = "metalkit"
+	}
+
+	// HTTPS cert pairs must be complete when the static mode is used.
+	if c.HTTPS != nil {
+		h := c.HTTPS
+		if (h.CertFile == "") != (h.KeyFile == "") {
+			return nil, fmt.Errorf("https: certFile and keyFile must be set together")
+		}
+		if h.HTTPSAddr == "" {
+			h.HTTPSAddr = ":8443"
+		}
+		if h.StateDir == "" {
+			h.StateDir = filepath.Join(filepath.Dir(c.DBPath), "tls")
+		}
+	}
+
+	// User roles normalize to a closed set; empty Role means admin for
+	// back-compat with hand-written configs.
+	for i := range c.Users {
+		switch r := strings.ToLower(strings.TrimSpace(c.Users[i].Role)); r {
+		case "":
+			c.Users[i].Role = "admin"
+		case "admin", "operator":
+			c.Users[i].Role = r
+		default:
+			return nil, fmt.Errorf("users[%d]: role %q must be admin or operator", i, c.Users[i].Role)
+		}
 	}
 
 	// Normalize DHCP mode. Unset and unknown values fall back to proxy so
@@ -261,6 +348,13 @@ func (c *Config) ResolveDHCPPool() error {
 	}
 	p.Exclude = merged
 	return nil
+}
+
+// DetectInterfaceIPv4 returns the first usable IPv4 on the named interface
+// (same selection rules as the serverIP auto-detection). Exported for the
+// settings overlay, which re-derives serverIP when the DHCP NIC changes.
+func DetectInterfaceIPv4(ifaceName string) (string, error) {
+	return detectInterfaceIP(ifaceName)
 }
 
 // detectInterfaceIP returns the first non-loopback IPv4 address on the

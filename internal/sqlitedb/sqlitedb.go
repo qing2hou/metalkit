@@ -92,4 +92,3 @@ func buildDSN(path string) string {
 	}
 	return path + "?" + q.Encode()
 }
-

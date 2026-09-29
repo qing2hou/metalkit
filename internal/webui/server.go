@@ -1,9 +1,9 @@
-// Package webui serves a small, dependency-free operator dashboard for
-// metalkit. It renders two static HTML pages (machine list and machine
-// detail) and exposes a small set of static assets (JS/CSS) from an
-// embedded filesystem. All dynamic data is fetched by the browser from
-// the REST API exposed by the inventory package; this package never
-// imports inventory and never speaks to the database.
+// Package webui serves the operator dashboard for metalkit. The UI is a
+// Vue 3 single-page application (source in ../../frontend) built by Vite
+// into this package's assets/ directory and embedded into the controller
+// binary. All dynamic data is fetched by the browser from the REST API
+// under /api/v1; this package never imports the API packages and never
+// speaks to the database.
 package webui
 
 import (
@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-//go:embed assets/*
+//go:embed assets
 var embeddedAssets embed.FS
 
 // Config configures the Web UI handler.
@@ -26,41 +26,38 @@ type Config struct {
 
 const defaultMount = "/ui"
 
-// Handler returns an http.Handler that serves the operator UI under the
-// configured mount point. The returned handler exposes:
+// Handler returns an http.Handler that serves the SPA under the configured
+// mount point:
 //
-//	GET {mount}/             -> machine list (index.html)
-//	GET {mount}/login        -> login page (login.html)
-//	GET {mount}/m/{uuid}     -> machine detail (detail.html)
-//	GET {mount}/images       -> image catalog + upload (images.html)
-//	GET {mount}/profiles     -> install profiles (profiles.html)
-//	GET {mount}/subnets      -> subnet catalog (subnets.html)
-//	GET {mount}/bmc          -> BMC credentials (bmc.html)
-//	GET {mount}/jobs         -> jobs list (jobs.html)
-//	GET {mount}/jobs/{id}    -> job detail (job.html)
-//	GET {mount}/settings     -> settings (DHCP) page (settings.html)
-//	GET {mount}/assets/*     -> embedded static assets
+//	GET {mount}/              -> index.html (SPA shell; router handles the rest)
+//	GET {mount}/assets/*      -> hashed Vite build output (immutable, no-cache headers kept for safety)
+//	GET {mount}/{anything}    -> real file if it exists in the dist root (favicon etc.),
+//	                             otherwise the SPA shell (history-mode fallback)
+//	GET {mount}               -> 301 redirect to {mount}/
 //
-// All other paths under the mount return 404.
+// Authentication is enforced by the httpd middleware: everything under the
+// mount requires a session except /ui/login (an in-app route) and
+// /ui/assets/* (see internal/httpd/auth.go needsAuth).
 func Handler(cfg Config) http.Handler {
 	mount := normaliseMount(cfg.Mount)
 
-	assetsFS, err := fs.Sub(embeddedAssets, "assets")
+	distFS, err := fs.Sub(embeddedAssets, "assets")
 	if err != nil {
 		// The embed directive is a compile-time guarantee; if Sub fails the
 		// binary is broken. Panic so it's obvious during startup rather than
 		// returning a half-wired handler.
 		panic("webui: failed to scope embedded assets: " + err.Error())
 	}
-	assetFileServer := http.StripPrefix(mount+"/assets/", http.FileServer(http.FS(assetsFS)))
+
+	// Vite emits hashed build output under assets/assets/*; expose it under
+	// {mount}/assets/ so the httpd auth whitelist continues to match.
+	hashedFS, err := fs.Sub(distFS, "assets")
+	if err != nil {
+		panic("webui: failed to scope hashed assets: " + err.Error())
+	}
+	assetFileServer := http.StripPrefix(mount+"/assets/", http.FileServer(http.FS(hashedFS)))
 
 	mux := http.NewServeMux()
-
-	// Machine list at "{mount}/" — the {$} pattern matches the exact path,
-	// avoiding the default subtree match that would swallow "{mount}/foo".
-	mux.HandleFunc("GET "+mount+"/{$}", func(w http.ResponseWriter, r *http.Request) {
-		serveEmbeddedHTML(w, assetsFS, "index.html")
-	})
 
 	// "{mount}" without a trailing slash redirects to "{mount}/" so relative
 	// asset URLs resolve correctly in the browser.
@@ -68,84 +65,46 @@ func Handler(cfg Config) http.Handler {
 		http.Redirect(w, r, mount+"/", http.StatusMovedPermanently)
 	})
 
-	// Login page (open — auth middleware allows /ui/login through).
-	mux.HandleFunc("GET "+mount+"/login", func(w http.ResponseWriter, r *http.Request) {
-		serveEmbeddedHTML(w, assetsFS, "login.html")
-	})
-
-	// Machine detail. The UUID is parsed client-side from the URL; we just
-	// need to render the same HTML shell for any UUID.
-	mux.HandleFunc("GET "+mount+"/m/{uuid}", func(w http.ResponseWriter, r *http.Request) {
-		// r.PathValue("uuid") is intentionally unused server-side: the page
-		// is a static shell and app.js reads the UUID from window.location.
-		_ = r.PathValue("uuid")
-		serveEmbeddedHTML(w, assetsFS, "detail.html")
-	})
-
-	// Image catalog + upload. Static shell; images.js drives upload + list.
-	mux.HandleFunc("GET "+mount+"/images", func(w http.ResponseWriter, r *http.Request) {
-		serveEmbeddedHTML(w, assetsFS, "images.html")
-	})
-
-	// Install profiles. Static shell; profiles.js drives CRUD.
-	mux.HandleFunc("GET "+mount+"/profiles", func(w http.ResponseWriter, r *http.Request) {
-		serveEmbeddedHTML(w, assetsFS, "profiles.html")
-	})
-
-	// Subnet catalog. Static shell; subnets.js drives CRUD.
-	mux.HandleFunc("GET "+mount+"/subnets", func(w http.ResponseWriter, r *http.Request) {
-		serveEmbeddedHTML(w, assetsFS, "subnets.html")
-	})
-
-	// BMC credentials. Static shell; bmc.js drives CRUD + test endpoint.
-	mux.HandleFunc("GET "+mount+"/bmc", func(w http.ResponseWriter, r *http.Request) {
-		serveEmbeddedHTML(w, assetsFS, "bmc.html")
-	})
-
-	// Jobs list. Static shell; jobs.js drives filters/list/cancel.
-	mux.HandleFunc("GET "+mount+"/jobs", func(w http.ResponseWriter, r *http.Request) {
-		serveEmbeddedHTML(w, assetsFS, "jobs.html")
-	})
-
-	// Job detail. The ID is parsed client-side from the URL; we just
-	// need to render the same HTML shell for any job ID.
-	mux.HandleFunc("GET "+mount+"/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
-		// r.PathValue("id") is intentionally unused server-side: the page
-		// is a static shell and job.js reads the ID from window.location.
-		_ = r.PathValue("id")
-		serveEmbeddedHTML(w, assetsFS, "job.html")
-	})
-
-	// Settings (currently just DHCP config). Static shell; settings.js
-	// drives the form. Persists via /api/v1/settings/dhcp.
-	mux.HandleFunc("GET "+mount+"/settings", func(w http.ResponseWriter, r *http.Request) {
-		serveEmbeddedHTML(w, assetsFS, "settings.html")
-	})
-
-	// Static assets with no-cache so browsers always revalidate.
+	// Hashed Vite assets.
 	mux.Handle("GET "+mount+"/assets/", noCache(assetFileServer))
+
+	// History-mode SPA fallback for everything else under the mount. If the
+	// requested path matches a real file in the dist root (favicon.ico,
+	// index.html itself, ...) serve that file; otherwise serve index.html so
+	// the Vue router can pick up deep links like /ui/m/{uuid}.
+	mux.HandleFunc("GET "+mount+"/", func(w http.ResponseWriter, r *http.Request) {
+		rel := strings.TrimPrefix(r.URL.Path, mount+"/")
+		if rel != "" {
+			if f, err := distFS.Open(rel); err == nil {
+				f.Close()
+				http.StripPrefix(mount+"/", http.FileServer(http.FS(distFS))).ServeHTTP(w, r)
+				return
+			}
+		}
+		serveFile(w, distFS, "index.html", "text/html; charset=utf-8")
+	})
 
 	return mux
 }
 
-// serveEmbeddedHTML writes the named file from the embedded asset FS as
-// UTF-8 HTML. Files referenced here are bundled into the binary at build
-// time, so a missing file means the binary is broken.
-func serveEmbeddedHTML(w http.ResponseWriter, assetsFS fs.FS, name string) {
-	body, err := fs.ReadFile(assetsFS, name)
+// serveFile writes a named file from the embedded FS with the given content
+// type. Files referenced here are bundled into the binary at build time, so
+// a missing file means the binary is broken.
+func serveFile(w http.ResponseWriter, fsys fs.FS, name, contentType string) {
+	body, err := fs.ReadFile(fsys, name)
 	if err != nil {
 		http.Error(w, "webui: missing embedded asset: "+name, http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(body)
 }
 
 // normaliseMount validates and normalises the mount prefix. Empty becomes
 // the default. A trailing slash is stripped. A missing leading slash is
-// rejected by panicking — misconfiguration here would silently produce
-// an unreachable UI.
+// rejected by panicking — misconfiguration here would silently produce an
+// unreachable UI.
 func normaliseMount(m string) string {
 	if m == "" {
 		return defaultMount
