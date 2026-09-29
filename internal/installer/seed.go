@@ -1647,27 +1647,28 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 		master = append(master, "transmit-hash-policy="+policy)
 	}
 	master = append(master, "")
-	// When a VLAN sits on top of the bond, the bond master stays L2-only:
-	// the IP/gateway/DNS live on the VLAN sub-interface (writeNMKeyfileVLAN).
+	// IP layer. With a VLAN on top, the bond stays L2-only — the
+	// IP/gateway/DNS live on the VLAN sub-interface (writeNMKeyfileVLAN).
+	// MUST stay explicit: ipv4.method=disabled. Omitting [ipv4] defaults to
+	// method=auto (DHCP) in NM keyfiles — the 2026-09-28 follow-up incident:
+	// bond0 DHCP'd 192.168.1.100 on its own and stole the default route.
 	// Writing the same static IP on BOTH the master and the VLAN duplicates
-	// the address and wedges routing — the 2026-09-28 Rocky incident: bond0
-	// AND bond0.40 both carried 172.16.40.2, gateway unreachable until the
-	// master's IP was removed by hand.
-	if nc.VLAN == 0 {
-		master = append(master, "[ipv4]")
-		if nc.Method == "dhcp" {
-			master = append(master, "method=auto")
-		} else {
-			master = append(master, "method=manual")
-			if b.StaticAddress != "" {
-				master = append(master, fmt.Sprintf("address1=%s/%d", b.StaticAddress, nc.PrefixLen))
-			}
-			if nc.Gateway != "" {
-				master = append(master, "gateway="+nc.Gateway)
-			}
-			if len(nc.DNS) > 0 {
-				master = append(master, "dns="+strings.Join(nc.DNS, ";"))
-			}
+	// the address and wedges routing (first Rocky incident same day).
+	master = append(master, "[ipv4]")
+	if nc.VLAN > 0 {
+		master = append(master, "method=disabled")
+	} else if nc.Method == "dhcp" {
+		master = append(master, "method=auto")
+	} else {
+		master = append(master, "method=manual")
+		if b.StaticAddress != "" {
+			master = append(master, fmt.Sprintf("address1=%s/%d", b.StaticAddress, nc.PrefixLen))
+		}
+		if nc.Gateway != "" {
+			master = append(master, "gateway="+nc.Gateway)
+		}
+		if len(nc.DNS) > 0 {
+			master = append(master, "dns="+strings.Join(nc.DNS, ";"))
 		}
 	}
 

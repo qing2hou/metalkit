@@ -1513,11 +1513,13 @@ func TestBuildSeed_NM_Bond_VLAN_MasterL2Only(t *testing.T) {
 		t.Fatal("bond0.nmconnection not written")
 	}
 	bondStr := string(bondData)
-	if strings.Contains(bondStr, "[ipv4]") || strings.Contains(bondStr, "address1=") {
-		t.Errorf("bond0 master must stay L2-only when a VLAN sits on top:\n%s", bondStr)
+	if strings.Contains(bondStr, "address1=") {
+		t.Errorf("bond0 master must not carry the static IP when a VLAN sits on top:\n%s", bondStr)
 	}
-	if !strings.Contains(bondStr, "mode=802.3ad") {
-		t.Errorf("bond0 missing 802.3ad mode:\n%s", bondStr)
+	for _, sub := range []string{"[ipv4]", "method=disabled", "mode=802.3ad"} {
+		if !strings.Contains(bondStr, sub) {
+			t.Errorf("bond0 master missing explicit %q (ipv4 defaults to DHCP when omitted):\n%s", sub, bondStr)
+		}
 	}
 
 	vlanData, ok := fs.files["/mnt/root/etc/NetworkManager/system-connections/bond0.40.nmconnection"]
