@@ -4,10 +4,12 @@ import { detectFromFilename, generatePassword } from './filename'
 import { fmtBytes, fmtDuration, fmtRelative } from './format'
 
 describe('detectFromFilename', () => {
-  it('识别常见发行版', () => {
+  it('识别常见发行版（家族与后端 detect.go 对齐：rocky/alma/centos→rhel）', () => {
     expect(detectFromFilename('ubuntu-22.04-server.qcow2')?.family).toBe('ubuntu')
-    expect(detectFromFilename('CentOS-7-x86_64.qcow2')?.family).toBe('centos')
-    expect(detectFromFilename('rocky-9.img')?.family).toBe('rocky')
+    expect(detectFromFilename('CentOS-7-x86_64.qcow2')?.family).toBe('rhel7')
+    expect(detectFromFilename('Rocky-8-GenericCloud.latest.x86_64.qcow2')?.family).toBe('rhel')
+    expect(detectFromFilename('rocky-9.img')?.family).toBe('rhel')
+    expect(detectFromFilename('AlmaLinux-9-GenericCloud.x86_64.qcow2')?.family).toBe('rhel')
     expect(detectFromFilename('Kylin-V10.img')?.family).toBe('kylin')
     expect(detectFromFilename('openEuler-22.03.qcow2')?.family).toBe('openeuler')
   })

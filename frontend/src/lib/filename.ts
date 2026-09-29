@@ -23,10 +23,15 @@ export function detectArchFromFilename(filename: string): string {
 
 export function detectFromFilename(filename: string): DetectResult | null {
   const f = filename.toLowerCase()
+  // 家族归并与后端 internal/images/detect.go 对齐：Rocky/Alma/RHEL 都是
+  // rhel 家族（rhel installer 代码路径），CentOS 7 单独 rhel7。前端若
+  // 填 rocky/almalinux/centos 会被后端 family 一致性检查拒绝
+  // ("family mismatch: looks like rhel but you supplied rocky")。
   if (/ubuntu/.test(f)) return { family: 'ubuntu', arch: detectArchFromFilename(filename) }
-  if (/centos/.test(f)) return { family: 'centos', arch: detectArchFromFilename(filename) }
-  if (/rocky/.test(f)) return { family: 'rocky', arch: detectArchFromFilename(filename) }
-  if (/almalinux/.test(f)) return { family: 'almalinux', arch: detectArchFromFilename(filename) }
+  if (/centos[-_.]?7/.test(f)) return { family: 'rhel7', arch: detectArchFromFilename(filename) }
+  if (/centos/.test(f)) return { family: 'rhel', arch: detectArchFromFilename(filename) }
+  if (/rocky/.test(f)) return { family: 'rhel', arch: detectArchFromFilename(filename) }
+  if (/almalinux|alma/.test(f)) return { family: 'rhel', arch: detectArchFromFilename(filename) }
   if (/debian/.test(f)) return { family: 'debian', arch: detectArchFromFilename(filename) }
   if (/kylin/.test(f)) return { family: 'kylin', arch: detectArchFromFilename(filename) }
   if (/openeuler|open-euler/.test(f)) return { family: 'openeuler', arch: detectArchFromFilename(filename) }
