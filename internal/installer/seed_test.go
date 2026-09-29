@@ -1433,7 +1433,6 @@ func TestBuildSeed_NoCloudInit_Bond_NMKeyfiles(t *testing.T) {
 		"interface-name=bond0",
 		"mode=active-backup",
 		"miimon=100",
-		"primary=eth0", // live eno1 = physical idx 0 under net.ifnames=0
 		"method=manual",
 		"address1=192.168.10.100/24",
 	} {
@@ -1458,12 +1457,11 @@ func TestBuildSeed_NoCloudInit_Bond_NMKeyfiles(t *testing.T) {
 		if !strings.Contains(content, "mac-address="+mac) {
 			t.Errorf("slave %d missing mac-address=%s:\n%s", i, mac, content)
 		}
-		// interface-name pins the keyfile to the installed-OS ethN name —
-		// required alongside mac-address: once the kernel bond claims the
-		// slaves their current MACs collapse to the bond MAC and a
-		// MAC-only matcher goes ambiguous (2026-09-29 802.3ad loop).
-		if !strings.Contains(content, fmt.Sprintf("interface-name=eth%d", i)) {
-			t.Errorf("slave %d missing installed-OS interface-name=eth%d:\n%s", i, i, content)
+		// NO interface-name: ethN prediction is enumeration-order roulette
+		// (iDRAC USB NIC can take eth0); MAC-only matching binds before the
+		// kernel bond collapses the slave MACs, so it is unambiguous.
+		if strings.Contains(content, "interface-name=") {
+			t.Errorf("slave %d must not pin interface-name (ethN unreliable):\n%s", i, content)
 		}
 	}
 }
@@ -1675,12 +1673,15 @@ func TestBuildSeed_WritesVTInitService(t *testing.T) {
 	}
 }
 
-// TestBuildSeed_NM_Bond_PrimaryUsesInstalledName verifies primary= in the NM
-// bond keyfile references the INSTALLED-OS interface name (ethN under
-// net.ifnames=0), not the live name (eno1) — an invalid primary leaves
-// active-backup unfixed and the bond MAC flaps between slaves (intermittent
-// connectivity drop, incident 2026-09-29).
-func TestBuildSeed_NM_Bond_PrimaryUsesInstalledName(t *testing.T) {
+// TestBuildSeed_NM_Bond_NoUnreliableNameRefs pins the 2026-09-29 lesson:
+// neither slave keyfiles nor the bond master may reference interfaces by a
+// predicted installed-OS name (ethN). Enumeration order (USB iDRAC vs PCI
+// NICs) varies per boot, so a pinned name can target the wrong device
+// (slave on eth0=iDRAC, or an eth1+MAC combo matching nothing — bond stuck
+// activating with zero slaves). Slaves match by MAC (bound before the
+// kernel bond collapses slave MACs); active-backup writes no primary= and
+// lets the kernel pin the first carrier-up slave.
+func TestBuildSeed_NM_Bond_NoUnreliableNameRefs(t *testing.T) {
 	fs := newMockFS()
 	exec := newMockExec()
 	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="rocky"` + "\n")
@@ -1689,7 +1690,7 @@ func TestBuildSeed_NM_Bond_PrimaryUsesInstalledName(t *testing.T) {
 		Exec: exec,
 		FS:   fs,
 		NICs: []NICInfo{
-			{Name: "idrac", MAC: "64:00:6a:c2:bf:e3", Driver: "cdc_ether", Link: true}, // virtual, must not shift ethN numbering
+			{Name: "idrac", MAC: "64:00:6a:c2:bf:e3", Driver: "cdc_ether", Link: true}, // virtual; must never be referenced
 			{Name: "eno1", MAC: "AA:BB:CC:DD:EE:01", Driver: "tg3", Link: true},
 			{Name: "eno2", MAC: "AA:BB:CC:DD:EE:02", Driver: "tg3"},
 		},
@@ -1724,7 +1725,23 @@ func TestBuildSeed_NM_Bond_PrimaryUsesInstalledName(t *testing.T) {
 		t.Fatal("bond0.nmconnection not written")
 	}
 	s := string(data)
-	if !strings.Contains(s, "primary=eth0") {
-		t.Fatalf("primary must be the installed-OS name eth0 (eno1 is physical idx 0, virtual idrac skipped), got:\n%s", s)
+	if strings.Contains(s, "primary=") {
+		t.Errorf("bond master must not write primary= (name refs unreliable):\n%s", s)
+	}
+	if strings.Contains(s, "64:00:6a") {
+		t.Errorf("bond master must never reference the virtual NIC:\n%s", s)
+	}
+	for i := 0; i < 2; i++ {
+		path := fmt.Sprintf("/mnt/root/etc/NetworkManager/system-connections/bond0-slave-%d.nmconnection", i)
+		slave, ok := fs.files[path]
+		if !ok {
+			t.Fatalf("%s not written", path)
+		}
+		if strings.Contains(string(slave), "interface-name=") {
+			t.Errorf("slave %d must not pin interface-name:\n%s", i, slave)
+		}
+		if strings.Contains(string(slave), "64:00:6a") {
+			t.Errorf("slave %d must never match the virtual NIC:\n%s", i, slave)
+		}
 	}
 }

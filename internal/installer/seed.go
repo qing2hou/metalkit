@@ -1647,40 +1647,24 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 		miimon = 100
 	}
 
-	// Write one keyfile per slave. Keep BOTH matchers: interface-name pins
-	// the connection to the installed-OS device name (ethN — resolved from
-	// the live NIC list order, virtual ports skipped, mirroring the kernel
-	// enumeration under net.ifnames=0), and mac-address is the fallback when
-	// the name mapping misses. MAC alone is ambiguous mid-activation: once
-	// the kernel bond claims a slave it rewrites the slave's current MAC to
-	// the bond MAC, so two slaves briefly carry the SAME current MAC and a
-	// mac-address-only matcher can bind both keyfiles to one device (or
-	// none), which fed the 2026-09-29 802.3ad rebuild loop.
+	// Write one keyfile per slave. Match by MAC ONLY — do NOT write
+	// interface-name: predicting the installed-OS ethN name is unreliable
+	// (enumeration order depends on USB vs PCI timing — the iDRAC virtual
+	// NIC often takes eth0 before the real ports), and a wrong name pins
+	// the keyfile to the wrong device (2026-09-29 incident: slave pinned to
+	// eth0=iDRAC / an eth1+MAC combo matching nothing, bond stuck
+	// activating forever with zero slaves).
+	// MAC matching is safe: NM binds slave connections BEFORE the kernel
+	// bond claims the ports, so at match time every NIC still carries its
+	// own permanent MAC (current-MAC collapse happens later).
 	for i, slave := range bond.Slaves {
 		_, mac := resolveSlaveDevAndMAC(slave, nics)
-		dev := ""
-		if mac != "" {
-			idx := 0
-			for _, n := range nics {
-				if n.IsVirtual() || n.MAC == "" {
-					continue
-				}
-				if strings.EqualFold(n.MAC, mac) {
-					dev = fmt.Sprintf("eth%d", idx)
-					break
-				}
-				idx++
-			}
-		}
 
 		var lines []string
 		lines = append(lines, "# Managed by metalkit installer")
 		lines = append(lines, "[connection]")
 		lines = append(lines, fmt.Sprintf("id=bond0-slave-%d", i))
 		lines = append(lines, "type=ethernet")
-		if dev != "" {
-			lines = append(lines, "interface-name="+dev)
-		}
 		lines = append(lines, "master=bond0")
 		lines = append(lines, "slave-type=bond")
 		lines = append(lines, "")
@@ -1708,44 +1692,13 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 	master = append(master, "mode="+bond.Mode)
 	switch bond.Mode {
 	case "active-backup":
-		if bond.Primary != "" {
-			// primary= is a REAL interface reference in NM keyfiles (unlike
-			// the cosmetic YAML keys): the live name (eno1) does not exist in
-			// the installed OS when net.ifnames=0 rewrites NICs to ethN — an
-			// invalid name leaves the bond without a fixed primary, so the
-			// active slave (and the bond MAC) flaps between slaves and the
-			// network intermittently drops (HWaddr-conflict dmesg spam is the
-			// telltale). Resolve the primary to the installed-OS name: prefer
-			// the interface carrying its MAC, fall back to the MAC-matched
-			// port (NM accepts MACs where names are unstable), lastly a
-			// direct slave reference.
-			primaryDev, primaryMAC := resolveSlaveDevAndMAC(bond.Primary, nics)
-			if primaryMAC != "" {
-				for _, n := range nics {
-					if strings.EqualFold(n.MAC, primaryMAC) {
-						primaryDev = n.Name
-						break
-					}
-				}
-				// Installed name when it differs from the live name:
-				// net.ifnames=0 renumbers NICs by enumeration order, and the
-				// live NIC list (NICs) mirrors that order (live idx 0 → eth0,
-				// idx 1 → eth1, ...). Skip virtual ports so iDRAC's USB NIC
-				// can't shift the numbering (it enumerates first).
-				physIdx := 0
-				for _, n := range nics {
-					if n.IsVirtual() || n.MAC == "" {
-						continue
-					}
-					if strings.EqualFold(n.MAC, primaryMAC) {
-						primaryDev = fmt.Sprintf("eth%d", physIdx)
-						break
-					}
-					physIdx++
-				}
-			}
-			master = append(master, "primary="+primaryDev)
-		}
+		// primary= references an interface by NAME in NM keyfiles — and any
+		// name we could write is unreliable (live enoN doesn't exist in the
+		// installed OS; predicted ethN is enumeration-order roulette, see
+		// the slave comment above). A dangling primary makes the active
+		// slave (and bond MAC) flap. Write nothing: the kernel pins the
+		// first enslaved carrier-up slave as active, stable in practice.
+		_ = bond.Primary
 	case "802.3ad":
 		rate := bond.LACPRate
 		if rate == "" {
