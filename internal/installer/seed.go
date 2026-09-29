@@ -226,6 +226,14 @@ func buildSeedCommon(
 		writeDirectNetworkConfig(deps, spec, mntRoot, renderer, rhel7)
 	}
 
+	// Same iDRAC vKVM workaround the live image ships (metalkit-vt-init
+	// there, live-image config/includes.chroot): iDRAC's virtual-keyboard
+	// USB HID injects Scroll_Lock, which freezes Linux VT output and makes
+	// the BMC console keyboard look dead until Scroll Lock is toggled by
+	// hand. The installed system needs the same shield — operators manage
+	// freshly installed machines through vKVM before SSH is reachable.
+	writeVTInitService(deps, mntRoot)
+
 	return nil
 }
 
@@ -556,6 +564,55 @@ func resolveNICMAC(nics []NICInfo, ifname string) string {
 		}
 	}
 	return ""
+}
+
+// writeVTInitService installs the same iDRAC vKVM Scroll_Lock shield the
+// live image ships (live-image config/includes.chroot metalkit-vt-init):
+// iDRAC's virtual-keyboard USB HID injects Scroll_Lock key presses, which
+// freeze Linux VT output and make the console keyboard look dead until
+// Scroll Lock is toggled by hand. On a freshly installed machine operators
+// manage it through vKVM before SSH is reachable, so the installed system
+// needs the same shield. Enabled via the multi-user.target.wants symlink.
+func writeVTInitService(deps Deps, mntRoot string) {
+	unitDir := filepath.Join(mntRoot, "etc", "systemd", "system")
+	if !deps.FS.Exists(unitDir) {
+		_ = deps.FS.MkdirAll(unitDir, 0o755)
+	}
+	unit := `[Unit]
+Description=Disable Scroll_Lock keysym + clear lock state on Linux VTs (iDRAC vKVM USB HID sends Scroll_Lock key presses that pause tty output and look like the console keyboard is frozen)
+DefaultDependencies=no
+After=systemd-vconsole-setup.service
+Before=getty.target getty@tty1.service getty@tty2.service getty@tty3.service getty@tty4.service getty@tty5.service getty@tty6.service
+ConditionPathExists=/dev/tty1
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo "keycode 70 = VoidSymbol" | loadkeys -; for t in 1 2 3 4 5 6; do setleds -D -scroll < /dev/tty$t 2>/dev/null || true; done'
+
+[Install]
+WantedBy=getty.target
+`
+	path := filepath.Join(unitDir, "metalkit-vt-init.service")
+	if err := deps.FS.WriteFile(path, []byte(unit), 0o644); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("direct-write: failed to write vt-init unit", "err", err)
+		}
+		return
+	}
+	// systemctl enable (relative symlink inside the rootfs is enough —
+	// systemd resolves it at boot; no chroot needed).
+	wantsDir := filepath.Join(unitDir, "getty.target.wants")
+	if !deps.FS.Exists(wantsDir) {
+		_ = deps.FS.MkdirAll(wantsDir, 0o755)
+	}
+	if err := deps.FS.Symlink("../metalkit-vt-init.service", filepath.Join(wantsDir, "metalkit-vt-init.service")); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("direct-write: failed to enable vt-init unit", "err", err)
+		}
+	} else if deps.Logger != nil {
+		deps.Logger.Info("direct-write: wrote + enabled metalkit-vt-init.service (iDRAC vKVM Scroll_Lock shield)")
+	}
 }
 
 // lookupSlaveMAC returns the MAC for a bond slave specifier. If the slave is

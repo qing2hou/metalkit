@@ -339,9 +339,9 @@ func TestRenderNetworkConfig_AutoPinsPhysicalMAC(t *testing.T) {
 	}
 	b := bindings.Binding{StaticAddress: "10.0.0.5"}
 	nics := []NICInfo{
-		{Name: "idrac", MAC: "64:00:6a:c2:bf:e3", Driver: "cdc_ether", Link: true},  // BMC virtual
-		{Name: "eno1", MAC: "f8:bc:12:50:53:c0", Driver: "tg3", Link: true},         // physical, link-up
-		{Name: "eno2", MAC: "f8:bc:12:50:53:c1", Driver: "tg3"},                     // physical, no link
+		{Name: "idrac", MAC: "64:00:6a:c2:bf:e3", Driver: "cdc_ether", Link: true}, // BMC virtual
+		{Name: "eno1", MAC: "f8:bc:12:50:53:c0", Driver: "tg3", Link: true},        // physical, link-up
+		{Name: "eno2", MAC: "f8:bc:12:50:53:c1", Driver: "tg3"},                    // physical, no link
 	}
 	got := renderNetworkConfig(nc, b, nics, false)
 	if !strings.Contains(got, `macaddress: "f8:bc:12:50:53:c0"`) {
@@ -355,8 +355,8 @@ func TestRenderNetworkConfig_AutoPinsPhysicalMAC(t *testing.T) {
 func TestPickPhysicalNIC_SkipsVirtualAndPrefersLinkUp(t *testing.T) {
 	nics := []NICInfo{
 		{Name: "idrac", MAC: "64:00:6a:c2:bf:e3", Driver: "cdc_ether", Link: true},
-		{Name: "eno1", MAC: "aa:aa:aa:aa:aa:01", Driver: "tg3"},                     // first physical, no link
-		{Name: "eno2", MAC: "aa:aa:aa:aa:aa:02", Driver: "tg3", Link: true},         // link-up physical
+		{Name: "eno1", MAC: "aa:aa:aa:aa:aa:01", Driver: "tg3"},             // first physical, no link
+		{Name: "eno2", MAC: "aa:aa:aa:aa:aa:02", Driver: "tg3", Link: true}, // link-up physical
 	}
 	got, ok := pickPhysicalNIC(nics)
 	if !ok {
@@ -1631,5 +1631,42 @@ func TestWriteENIInterfacesBond_VLAN(t *testing.T) {
 		if !strings.Contains(content, sub) {
 			t.Errorf("ENI bond VLAN stanza missing %q:\n%s", sub, content)
 		}
+	}
+}
+
+// TestBuildSeed_WritesVTInitService verifies the installed system gets the
+// same iDRAC vKVM Scroll_Lock shield the live image ships: the unit file
+// plus the getty.target.wants enable symlink.
+func TestBuildSeed_WritesVTInitService(t *testing.T) {
+	fs := newMockFS()
+	exec := newMockExec()
+	fs.files["/mnt/root/etc/os-release"] = []byte(`ID="rocky"` + "\n")
+	fs.files["/mnt/root/etc/shadow"] = []byte("root:$6$old:19000:0:99999:7:::\n")
+	deps := Deps{Exec: exec, FS: fs, NICs: []NICInfo{{Name: "eno1", MAC: "aa:bb:cc:dd:ee:01"}}}
+	spec := jobs.InstallSpec{
+		Profile: profiles.Profile{OSFamily: "rhel",
+			HostnameTemplate: "n-{uuid8}",
+			RootPasswordHash: "$6$hash",
+			Network:          profiles.NetworkConfig{Method: "dhcp", NICSelector: "auto"},
+		},
+		Binding: bindings.Binding{MachineUUID: "abcdef01-0000-0000-0000-000000000000"},
+	}
+
+	if err := BuildSeed(context.Background(), deps, spec, "/mnt/root"); err != nil {
+		t.Fatalf("BuildSeed failed: %v", err)
+	}
+
+	unit, ok := fs.files["/mnt/root/etc/systemd/system/metalkit-vt-init.service"]
+	if !ok {
+		t.Fatal("metalkit-vt-init.service not written to installed rootfs")
+	}
+	for _, sub := range []string{"keycode 70 = VoidSymbol", "setleds", "WantedBy=getty.target"} {
+		if !strings.Contains(string(unit), sub) {
+			t.Errorf("vt-init unit missing %q:\n%s", sub, unit)
+		}
+	}
+	link := "/mnt/root/etc/systemd/system/getty.target.wants/metalkit-vt-init.service"
+	if !fs.Exists(link) {
+		t.Errorf("vt-init enable symlink missing: %s", link)
 	}
 }
