@@ -1722,6 +1722,17 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 	master = append(master, "[ipv4]")
 	if nc.VLAN > 0 {
 		master = append(master, "method=disabled")
+		// ipv6 too: a VLAN-topped L2 bridge has no business doing SLAAC.
+		// ipv6.method defaults to auto — while LACP is still converging the
+		// bond carries no RA, and NM's ip-config stage then blocks the full
+		// IPv6 timeout (~30s). NM re-evaluates readiness as failed and
+		// autoconnect restarts the whole family (reason 'new-activation'),
+		// resetting the bond MAC and restarting LACP from scratch — the
+		// 2026-09-29 infinite 30s rebuild loop. ipv6.method=disabled (and
+		// addr-gen-mode kept eui64 default) makes the master a pure bridge.
+		master = append(master, "")
+		master = append(master, "[ipv6]")
+		master = append(master, "method=disabled")
 	} else if nc.Method == "dhcp" {
 		master = append(master, "method=auto")
 	} else {
@@ -1794,6 +1805,12 @@ func writeNMKeyfileVLAN(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 			lines = append(lines, "dns="+strings.Join(nc.DNS, ";"))
 		}
 	}
+	// Same IPv6 rationale as the bond master: the VLAN carries IPv4 only.
+	// ipv6 auto blocks the ip-config stage for the IPv6 timeout while no RA
+	// arrives on this VLAN, feeding the activation-restart loop.
+	lines = append(lines, "")
+	lines = append(lines, "[ipv6]")
+	lines = append(lines, "method=disabled")
 
 	filename := fmt.Sprintf("%s.%d.nmconnection", parent, nc.VLAN)
 	_ = deps.FS.WriteFile(filepath.Join(nmDir, filename), []byte(strings.Join(lines, "\n")+"\n"), 0o600)

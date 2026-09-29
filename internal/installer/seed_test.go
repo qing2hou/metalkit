@@ -1518,7 +1518,9 @@ func TestBuildSeed_NM_Bond_VLAN_MasterL2Only(t *testing.T) {
 	if strings.Contains(bondStr, "address1=") {
 		t.Errorf("bond0 master must not carry the static IP when a VLAN sits on top:\n%s", bondStr)
 	}
-	for _, sub := range []string{"[ipv4]", "method=disabled", "mode=802.3ad"} {
+	for _, sub := range []string{"[ipv4]", "method=disabled", "[ipv6]", "mode=802.3ad"} {
+		// note: method=disabled appears under BOTH [ipv4] and [ipv6]; one
+		// Contains check covers both (same literal).
 		if !strings.Contains(bondStr, sub) {
 			t.Errorf("bond0 master missing explicit %q (ipv4 defaults to DHCP when omitted):\n%s", sub, bondStr)
 		}
