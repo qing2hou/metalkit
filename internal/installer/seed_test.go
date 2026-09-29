@@ -1458,8 +1458,12 @@ func TestBuildSeed_NoCloudInit_Bond_NMKeyfiles(t *testing.T) {
 		if !strings.Contains(content, "mac-address="+mac) {
 			t.Errorf("slave %d missing mac-address=%s:\n%s", i, mac, content)
 		}
-		if strings.Contains(content, "interface-name=") {
-			t.Errorf("slave %d should NOT have interface-name:\n%s", i, content)
+		// interface-name pins the keyfile to the installed-OS ethN name —
+		// required alongside mac-address: once the kernel bond claims the
+		// slaves their current MACs collapse to the bond MAC and a
+		// MAC-only matcher goes ambiguous (2026-09-29 802.3ad loop).
+		if !strings.Contains(content, fmt.Sprintf("interface-name=eth%d", i)) {
+			t.Errorf("slave %d missing installed-OS interface-name=eth%d:\n%s", i, i, content)
 		}
 	}
 }
@@ -1527,7 +1531,7 @@ func TestBuildSeed_NM_Bond_VLAN_MasterL2Only(t *testing.T) {
 		t.Fatal("bond0.40.nmconnection (VLAN) not written")
 	}
 	vlanStr := string(vlanData)
-	for _, sub := range []string{"type=vlan", "parent=bond0", "id=40", "address1=172.16.40.2/24", "gateway=172.16.40.1"} {
+	for _, sub := range []string{"type=vlan", "parent=bond0", "id=40", "address1=172.16.40.2/24", "gateway=172.16.40.1", "wait-device-timeout=30000"} {
 		if !strings.Contains(vlanStr, sub) {
 			t.Errorf("bond0.40 VLAN keyfile missing %q:\n%s", sub, vlanStr)
 		}

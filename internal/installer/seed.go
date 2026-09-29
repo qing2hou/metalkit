@@ -1647,19 +1647,40 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 		miimon = 100
 	}
 
-	// Write one keyfile per slave.
-	// Do NOT set interface-name: the live system's NIC names (eno1, enp1s0f0,
-	// etc.) may differ from the installed OS names (eth0, eth1, etc.) due to
-	// net.ifnames / biosdevname kernel parameters. Rely solely on mac-address
-	// matching so NM finds the right device regardless of its name.
+	// Write one keyfile per slave. Keep BOTH matchers: interface-name pins
+	// the connection to the installed-OS device name (ethN — resolved from
+	// the live NIC list order, virtual ports skipped, mirroring the kernel
+	// enumeration under net.ifnames=0), and mac-address is the fallback when
+	// the name mapping misses. MAC alone is ambiguous mid-activation: once
+	// the kernel bond claims a slave it rewrites the slave's current MAC to
+	// the bond MAC, so two slaves briefly carry the SAME current MAC and a
+	// mac-address-only matcher can bind both keyfiles to one device (or
+	// none), which fed the 2026-09-29 802.3ad rebuild loop.
 	for i, slave := range bond.Slaves {
 		_, mac := resolveSlaveDevAndMAC(slave, nics)
+		dev := ""
+		if mac != "" {
+			idx := 0
+			for _, n := range nics {
+				if n.IsVirtual() || n.MAC == "" {
+					continue
+				}
+				if strings.EqualFold(n.MAC, mac) {
+					dev = fmt.Sprintf("eth%d", idx)
+					break
+				}
+				idx++
+			}
+		}
 
 		var lines []string
 		lines = append(lines, "# Managed by metalkit installer")
 		lines = append(lines, "[connection]")
 		lines = append(lines, fmt.Sprintf("id=bond0-slave-%d", i))
 		lines = append(lines, "type=ethernet")
+		if dev != "" {
+			lines = append(lines, "interface-name="+dev)
+		}
 		lines = append(lines, "master=bond0")
 		lines = append(lines, "slave-type=bond")
 		lines = append(lines, "")
@@ -1792,6 +1813,14 @@ func writeNMKeyfileVLAN(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 	lines = append(lines, "type=vlan")
 	lines = append(lines, fmt.Sprintf("interface-name=%s.%d", parent, nc.VLAN))
 	lines = append(lines, "autoconnect=true")
+	// LACP bonds need seconds to converge (aggregator selection) after the
+	// master activates; without this the VLAN activation races the parent,
+	// NM judges the family activation failed and tears the whole bond down
+	// (autoconnect restart) — resetting the bond MAC and forcing the switch
+	// LACP state machine to reconverge from scratch, forever. Teach the VLAN
+	// to wait for the parent device (30s covers LACP fast-rate convergence
+	// with margin). (2026-09-29 802.3ad rebuild-loop incident.)
+	lines = append(lines, "wait-device-timeout=30000")
 	lines = append(lines, "")
 	lines = append(lines, "[vlan]")
 	lines = append(lines, fmt.Sprintf("parent=%s", parent))
