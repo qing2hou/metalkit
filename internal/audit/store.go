@@ -64,6 +64,57 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger) (*Store, err
 	return &Store{db: db, logger: logger, now: time.Now}, nil
 }
 
+// Retention policy. Audit rows are small (details capped at 4 KiB) but
+// every operator request appends one, so an unpruned table grows forever
+// and eventually slows the audit page's ts-DESC queries.
+const (
+	// DefaultRetention is how long audit events are kept (7 days aligned
+	// with monitor's sample retention is too short for an audit trail;
+	// 180d balances "answerable after the fact" against unbounded growth).
+	DefaultRetention = 180 * 24 * time.Hour
+	// JanitorInterval is how often Prune runs when driven by the GC loop.
+	JanitorInterval = 6 * time.Hour
+)
+
+// Prune deletes events older than the retention window. Returns the number
+// of rows removed. Mirrors monitor.Store.Prune.
+func (s *Store) Prune(ctx context.Context, retention time.Duration) (int64, error) {
+	if retention <= 0 {
+		retention = DefaultRetention
+	}
+	cutoff := s.now().Add(-retention)
+	res, err := s.db.ExecContext(ctx, `DELETE FROM audit_events WHERE ts < ?`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("audit: prune: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// GCLoop prunes on a timer until ctx is cancelled. Forgets per-run errors
+// (logged) — retention is housekeeping, never fatal. Mirrors
+// monitor.Store.GCLoop; the controller wires it to its run context.
+func (s *Store) GCLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = JanitorInterval
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			n, err := s.Prune(ctx, DefaultRetention)
+			if err != nil {
+				s.logger.Warn("audit: prune failed", "err", err)
+			} else if n > 0 {
+				s.logger.Info("audit: pruned events", "count", n)
+			}
+		}
+	}
+}
+
 // Record appends one event. Never returns an error to the caller — a
 // failed audit write is logged and the operator request proceeds.
 func (s *Store) Record(ctx context.Context, actor, action, target, outcome string, details any) {

@@ -232,7 +232,12 @@ func (s *Server) makeHandler(ctx context.Context) server4.Handler {
 }
 
 func (s *Server) handle(ctx context.Context, conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCPv4) {
-	s.logger.Info("dhcp: received",
+	// Received-packet logging stays at Debug: a rack powering on sends a
+	// burst of DISCOVERs per machine (PXE retries), and Info-per-packet
+	// floods the log and drowns the warnings that matter during real
+	// install campaigns. The reply below stays at Info — one line per
+	// served boot stage is the useful signal.
+	s.logger.Debug("dhcp: received",
 		"mac", req.ClientHWAddr.String(),
 		"xid", req.TransactionID.String(),
 		"msg_type", req.MessageType().String(),

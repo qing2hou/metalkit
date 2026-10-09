@@ -638,6 +638,11 @@ func run() int {
 	go monitorStore.GCLoop(runCtx, monitor.JanitorInterval)
 	monitorAPI := monitor.NewAPI(monitorStore, logger.With("component", "monitor-api"))
 
+	// Audit events grow without bound otherwise — every operator request
+	// appends one row; 180-day retention (audit.DefaultRetention), pruned
+	// every 6h, same lifecycle as the monitor GC above.
+	go auditStore.GCLoop(runCtx, audit.JanitorInterval)
+
 	// Browser-UI sessions (cookie auth). Basic Auth keeps working for curl
 	// and agents; the cookie path is what makes the form-based login page
 	// usable. GC loop runs every hour to evict expired rows.
