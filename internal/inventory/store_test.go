@@ -17,7 +17,7 @@ func newTestStore(t *testing.T) *Store {
 	// file so each case starts clean and the WAL path is exercised.
 	path := filepath.Join(t.TempDir(), "inv.db")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger})
+	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger, NoSync: true})
 	if err != nil {
 		t.Fatalf("sqlitedb.Open: %v", err)
 	}

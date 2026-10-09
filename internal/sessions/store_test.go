@@ -19,6 +19,7 @@ func openTestDB(t *testing.T) *sql.DB {
 	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{
 		Path:   ":memory:",
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		NoSync: true,
 	})
 	if err != nil {
 		t.Fatalf("open: %v", err)

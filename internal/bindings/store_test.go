@@ -35,7 +35,7 @@ func newFixture(t *testing.T) *testFixture {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	path := filepath.Join(t.TempDir(), "test.db")
-	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger})
+	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger, NoSync: true})
 	if err != nil {
 		t.Fatalf("sqlitedb.Open: %v", err)
 	}
@@ -432,7 +432,7 @@ func newCipheredFixture(t *testing.T) *testFixture {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	path := filepath.Join(t.TempDir(), "test.db")
-	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger})
+	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger, NoSync: true})
 	if err != nil {
 		t.Fatalf("sqlitedb.Open: %v", err)
 	}

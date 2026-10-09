@@ -63,7 +63,12 @@ func TestFinalizeUpload_ConcurrentSameSession(t *testing.T) {
 				t.Errorf("winner[%d] FinalSHA %q want %q", i, results[i].FinalSHA, in.ExpectedSHA256)
 			}
 		case errors.Is(err, ErrSessionBusy):
-			// expected loser
+			// loser: the other finalize held the claim
+		case errors.Is(err, ErrNotFound):
+			// equally-legit loser: the other finalize FINISHED (session row
+			// deleted in its commit) before this one read it. The barrier
+			// only lines up the start; the whole winner can complete first
+			// once fixtures are fast (NoSync).
 		default:
 			t.Errorf("finalize[%d]: unexpected error: %v", i, err)
 		}

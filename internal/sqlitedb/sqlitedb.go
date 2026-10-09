@@ -22,6 +22,15 @@ import (
 type Options struct {
 	Path   string
 	Logger *slog.Logger
+
+	// NoSync sets PRAGMA synchronous=OFF on every pooled connection. Test
+	// fixtures only: on slow filesystems (WSL2, CI runners on network mounts)
+	// each fsync costs hundreds of ms, and the per-test fresh databases make
+	// the full suite take 15+ minutes without this. Durability is irrelevant
+	// for throwaway test databases; production must keep the default
+	// (synchronous=NORMAL under WAL) — a crash mid-install must not lose a
+	// committed binding or job row.
+	NoSync bool
 }
 
 // Open returns a connected *sql.DB. ":memory:" is supported for tests; WAL is
@@ -45,7 +54,7 @@ func Open(ctx context.Context, opts Options) (*sql.DB, error) {
 		return nil, errors.New("sqlitedb: Path is required")
 	}
 
-	dsn := buildDSN(opts.Path)
+	dsn := buildDSN(opts.Path, opts.NoSync)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", opts.Path, err)
@@ -83,12 +92,25 @@ func Open(ctx context.Context, opts Options) (*sql.DB, error) {
 // log writes can land while the orchestrator is mid-transaction on bindings,
 // and 5s proved too short on slow disks (SQLITE_BUSY surfaced as HTTP 400 to
 // the agent, aborting installs at the grub-install stage).
-func buildDSN(path string) string {
+//
+// _txlock=immediate makes every BEGIN take the write lock upfront. With the
+// default deferred transactions, two concurrent writers that both read
+// before writing (FinalizeImage: dedupe-SELECT then INSERT) deadlock on the
+// lock upgrade and SQLite returns SQLITE_BUSY immediately — busy_timeout
+// does NOT apply to upgrade deadlocks, so the 30s above never helped that
+// path. BEGIN IMMEDIATE serialises writers at BEGIN (where busy_timeout
+// makes them wait); SQLite has a single writer anyway, so this only moves
+// the queue from "upgrade deadlock" to "honest wait".
+func buildDSN(path string, noSync bool) string {
 	q := url.Values{}
 	q.Add("_pragma", "busy_timeout(30000)")
 	q.Add("_pragma", "foreign_keys(on)")
+	q.Add("_txlock", "immediate")
 	if path != ":memory:" {
 		q.Add("_pragma", "journal_mode(WAL)")
+	}
+	if noSync {
+		q.Add("_pragma", "synchronous(off)")
 	}
 	return path + "?" + q.Encode()
 }

@@ -25,7 +25,7 @@ import (
 // end-to-end by uploading an image init request with only a session cookie.
 func TestSessionUserRecordedAsUploadActor(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: ":memory:", Logger: logger})
+	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: ":memory:", Logger: logger, NoSync: true})
 	if err != nil {
 		t.Fatalf("sqlitedb.Open: %v", err)
 	}

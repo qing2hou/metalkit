@@ -31,6 +31,7 @@ func newAuthTestServer(t *testing.T, adminPass string, withStore bool, withUI bo
 		db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{
 			Path:   ":memory:",
 			Logger: logger,
+			NoSync: true,
 		})
 		if err != nil {
 			t.Fatalf("sqlitedb.Open: %v", err)
@@ -275,6 +276,7 @@ func newSessionsStoreForTest(t *testing.T) *sessions.Store {
 	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{
 		Path:   ":memory:",
 		Logger: logger,
+		NoSync: true,
 	})
 	if err != nil {
 		t.Fatalf("sqlitedb.Open: %v", err)
