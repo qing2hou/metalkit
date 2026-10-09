@@ -42,6 +42,8 @@ export const machinesApi = {
   reports: (uuid: string) => apiGet<ReportMeta[]>(`/machines/${uuid}/reports`),
   report: (uuid: string, id: number) => apiGet<Report>(`/machines/${uuid}/reports/${id}`),
   remove: (uuid: string) => apiSend<null>('DELETE', `/machines/${uuid}`),
+  setNotes: (uuid: string, notes: string) =>
+    apiSend<MachineSummary>('PATCH', `/machines/${uuid}/notes`, { notes }),
 }
 
 // ---------- images ----------

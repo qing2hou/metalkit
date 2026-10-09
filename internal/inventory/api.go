@@ -29,6 +29,7 @@ func RegisterRoutes(mux *http.ServeMux, store *Store, logger *slog.Logger) {
 	mux.HandleFunc("POST /api/v1/heartbeat/{uuid}", h.postHeartbeat)
 	mux.HandleFunc("GET /api/v1/machines", h.listMachines)
 	mux.HandleFunc("GET /api/v1/machines/{uuid}", h.getMachine)
+	mux.HandleFunc("PATCH /api/v1/machines/{uuid}/notes", h.patchNotes)
 	mux.HandleFunc("GET /api/v1/machines/{uuid}/reports", h.listReports)
 	mux.HandleFunc("GET /api/v1/machines/{uuid}/reports/{id}", h.getReport)
 	mux.HandleFunc("GET /api/v1/lookup", h.lookup)
@@ -142,8 +143,50 @@ func (h *apiHandlers) getMachine(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
-func (h *apiHandlers) listReports(w http.ResponseWriter, r *http.Request) {
+// patchNotes replaces one machine's operator remark
+// (PATCH /api/v1/machines/{uuid}/notes, body {"notes": "..."}).
+func (h *apiHandlers) patchNotes(w http.ResponseWriter, r *http.Request) {
 	uuid, ok := validUUID(w, r.PathValue("uuid"))
+	if !ok {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4*1024)
+	var in struct {
+		Notes string `json:"notes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if err := h.store.SetNotes(r.Context(), uuid, strings.TrimSpace(in.Notes)); err != nil {
+		if errors.Is(err, ErrMachineNotFound) {
+			writeError(w, http.StatusNotFound, "machine not found")
+			return
+		}
+		if strings.Contains(err.Error(), "notes too long") {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		h.logger.Error("set notes failed", "err", err, "uuid", uuid)
+		writeError(w, http.StatusInternalServerError, "update failed")
+		return
+	}
+	machines, err := h.store.ListMachines(r.Context())
+	if err != nil {
+		h.logger.Error("list machines failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "list failed")
+		return
+	}
+	for _, m := range machines {
+		if m.UUID == uuid {
+			writeJSON(w, http.StatusOK, m)
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, "machine not found")
+}
+
+func (h *apiHandlers) listReports(w http.ResponseWriter, r *http.Request) {	uuid, ok := validUUID(w, r.PathValue("uuid"))
 	if !ok {
 		return
 	}
@@ -262,8 +305,7 @@ func validUUID(w http.ResponseWriter, raw string) (string, bool) {
 	return u, true
 }
 
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+func writeJSON(w http.ResponseWriter, code int, v any) {	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }

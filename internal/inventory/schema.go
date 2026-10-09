@@ -1,6 +1,14 @@
 package inventory
 
 // SQLite schema. WAL mode + busy_timeout=5000ms are applied by store.go via PRAGMA.
+
+// migrations are idempotent column adds for databases created before the
+// column existed. "duplicate column name" is the expected benign failure
+// (same pattern as bindings/images).
+var migrations = []string{
+	"ALTER TABLE machines ADD COLUMN notes TEXT NOT NULL DEFAULT ''",
+}
+
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS machines (
     uuid          TEXT PRIMARY KEY,
@@ -10,7 +18,8 @@ CREATE TABLE IF NOT EXISTS machines (
     first_seen    INTEGER NOT NULL,
     last_seen     INTEGER NOT NULL,
     status        TEXT NOT NULL CHECK(status IN ('online','offline','unknown')),
-    latest_report INTEGER
+    latest_report INTEGER,
+    notes         TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS machine_macs (

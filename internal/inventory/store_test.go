@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"context"
+	"strings"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -329,5 +330,56 @@ func TestPragmas(t *testing.T) {
 	}
 	if fk != 1 {
 		t.Fatalf("foreign_keys: got %d want 1", fk)
+	}
+}
+
+// TestSetNotes: operator remarks round-trip, survive report upserts, are
+// surfaced by ListMachines, and reject unknown machines.
+func TestSetNotes(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	uuid := "4c4c4544-00aa-3210-8053-c5c04f463830"
+	if _, _, err := s.UpsertReport(ctx, sampleReport(uuid)); err != nil {
+		t.Fatalf("UpsertReport: %v", err)
+	}
+
+	if err := s.SetNotes(ctx, uuid, "库位 A-12 · 数据库节点勿动"); err != nil {
+		t.Fatalf("SetNotes: %v", err)
+	}
+	machines, err := s.ListMachines(ctx)
+	if err != nil {
+		t.Fatalf("ListMachines: %v", err)
+	}
+	if len(machines) != 1 || machines[0].Notes != "库位 A-12 · 数据库节点勿动" {
+		t.Fatalf("notes not surfaced: %+v", machines)
+	}
+
+	// A new agent report must NOT wipe the operator's remark.
+	if _, _, err := s.UpsertReport(ctx, sampleReport(uuid)); err != nil {
+		t.Fatalf("second UpsertReport: %v", err)
+	}
+	machines, _ = s.ListMachines(ctx)
+	if machines[0].Notes == "" {
+		t.Fatal("agent report wiped operator notes")
+	}
+
+	// Overwrite + clear.
+	if err := s.SetNotes(ctx, uuid, ""); err != nil {
+		t.Fatalf("SetNotes clear: %v", err)
+	}
+	machines, _ = s.ListMachines(ctx)
+	if machines[0].Notes != "" {
+		t.Fatalf("clear failed: %q", machines[0].Notes)
+	}
+
+	// Unknown machine → explicit error (404 path).
+	if err := s.SetNotes(ctx, "4c4c4544-00bb-3210-8053-c5c04f463830", "x"); err == nil {
+		t.Fatal("unknown machine must error")
+	}
+
+	// Oversized remark rejected.
+	if err := s.SetNotes(ctx, uuid, strings.Repeat("字", MaxNotesBytes)); err == nil {
+		t.Fatal("oversized notes must be rejected")
 	}
 }

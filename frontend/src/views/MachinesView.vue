@@ -80,6 +80,7 @@ async function load(): Promise<void> {
 // ---- 列表页直达装机弹窗：点「装机」按需拉取该机器的配置数据 ----
 const installVisible = ref(false)
 const installUuid = ref('')
+const installIntent = ref<'install' | 'reinstall'>('install')
 const installReport = ref<Report | null>(null)
 const installImages = ref<Image[]>([])
 const installProfiles = ref<Profile[]>([])
@@ -87,9 +88,10 @@ const installSubnets = ref<Subnet[]>([])
 const installBinding = ref<Binding | null>(null)
 const installLoading = ref(false)
 
-async function openInstall(row: MachineSummary): Promise<void> {
+async function openInstall(row: MachineSummary, intent: 'install' | 'reinstall' = 'install'): Promise<void> {
   installLoading.value = true
   installUuid.value = row.uuid
+  installIntent.value = intent
   try {
     const [report, images, profiles, subnets, binding] = await Promise.all([
       machinesApi.get(row.uuid).catch(() => null),
@@ -108,6 +110,37 @@ async function openInstall(row: MachineSummary): Promise<void> {
     ElMessage.error(`加载装机数据失败: ${(err as Error).message}`)
   } finally {
     installLoading.value = false
+  }
+}
+
+function openReinstall(row: MachineSummary): void {
+  void openInstall(row, 'reinstall')
+}
+
+// ---------- 备注行内编辑（点击备注文字进入编辑，回车/失焦保存） ----------
+const editingNotes = reactive({ uuid: null as string | null, value: '' })
+
+function startEditNotes(row: MachineSummary): void {
+  editingNotes.uuid = row.uuid
+  editingNotes.value = row.notes ?? ''
+}
+
+let notesSaving = false
+async function saveNotes(row: MachineSummary): Promise<void> {
+  if (notesSaving) return
+  if (editingNotes.uuid !== row.uuid) return
+  const next = editingNotes.value.trim()
+  notesSaving = true
+  try {
+    if (next !== (row.notes ?? '')) {
+      await machinesApi.setNotes(row.uuid, next)
+      row.notes = next
+    }
+  } catch (err) {
+    ElMessage.error(`备注保存失败: ${(err as Error).message}`)
+  } finally {
+    notesSaving = false
+    editingNotes.uuid = null
   }
 }
 
@@ -163,25 +196,6 @@ function openDetail(row: MachineSummary): void {
   router.push(`/m/${row.uuid}`)
 }
 
-async function remove(row: MachineSummary): Promise<void> {
-  try {
-    await ElMessageBox.confirm(
-      `删除机器 ${row.serial || row.uuid} 的全部上报与绑定数据？此操作不可恢复。`,
-      '删除机器',
-      { type: 'warning' },
-    )
-  } catch {
-    return
-  }
-  try {
-    await machinesApi.remove(row.uuid)
-    ElMessage.success('已删除')
-    await load()
-  } catch (err) {
-    // 409 = 有进行中的作业
-    ElMessage.error(`删除失败: ${(err as Error).message}`)
-  }
-}
 
 const pagedTable = usePagedTable(filtered)
 </script>
@@ -271,11 +285,35 @@ const pagedTable = usePagedTable(filtered)
               <span v-else class="mk-subtle">—</span>
             </template>
           </el-table-column>
+          <el-table-column label="备注" min-width="150">
+            <template #default="{ row }">
+              <el-tooltip v-if="row.notes && row.notes !== editingNotes.uuid" :content="row.notes" placement="top">
+                <span class="mk-notes" @click.stop="startEditNotes(asRow<MachineSummary>(row))">{{ row.notes }}</span>
+              </el-tooltip>
+              <el-input
+                v-if="editingNotes.uuid === row.uuid"
+                v-model="editingNotes.value"
+                size="small"
+                maxlength="200"
+                placeholder="备注（如：库位 A-12 / 数据库节点勿动）"
+                @click.stop
+                @keyup.enter="saveNotes(asRow<MachineSummary>(row))"
+                @keyup.esc="editingNotes.uuid = null"
+                @blur="saveNotes(asRow<MachineSummary>(row))"
+              />
+              <span
+                v-else-if="!row.notes"
+                class="mk-subtle mk-notes-add"
+                @click.stop="startEditNotes(asRow<MachineSummary>(row))"
+              >＋ 备注</span>
+            </template>
+          </el-table-column>
           <el-table-column label="最近上报" width="120">
             <template #default="{ row }">{{ fmtRelative(row.last_seen) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="130" fixed="right">
+          <el-table-column label="操作" width="170" fixed="right">
             <template #default="{ row }">
+              <el-button text size="small" @click.stop="openDetail(asRow<MachineSummary>(row))">详情</el-button>
               <el-button
                 text
                 size="small"
@@ -283,7 +321,12 @@ const pagedTable = usePagedTable(filtered)
                 :loading="installLoading"
                 @click.stop="openInstall(asRow<MachineSummary>(row))"
               >装机</el-button>
-              <el-button text size="small" type="danger" @click.stop="remove(asRow<MachineSummary>(row))">删除</el-button>
+              <el-button
+                text
+                size="small"
+                type="danger"
+                @click.stop="openReinstall(asRow<MachineSummary>(row))"
+              >重装</el-button>
             </template>
           </el-table-column>
           <template #empty>
@@ -310,7 +353,7 @@ const pagedTable = usePagedTable(filtered)
         :profiles="installProfiles"
         :subnets="installSubnets"
         :binding="installBinding"
-        intent="install"
+        :intent="installIntent"
         @saved="load"
       />
     </div>
@@ -318,6 +361,23 @@ const pagedTable = usePagedTable(filtered)
 </template>
 
 <style scoped>
+/* 备注列：悬停显示可编辑暗示，与行点击下钻互不干扰（click.stop） */
+.mk-notes,
+.mk-notes-add {
+  cursor: text;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.mk-notes-add:hover,
+.mk-notes:hover {
+  color: var(--el-color-primary);
+}
+
 .mk-filters {
   display: flex;
   gap: 12px;

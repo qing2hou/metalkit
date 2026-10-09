@@ -17,6 +17,13 @@ import (
 // ErrNotFound is returned when a machine, report, or MAC lookup misses.
 var ErrNotFound = errors.New("inventory: not found")
 
+// ErrMachineNotFound is returned by SetNotes when the machine row is absent
+// (callers surface it as 404).
+var ErrMachineNotFound = errors.New("inventory: machine not found")
+
+// MaxNotesBytes caps one machine's operator remark.
+const MaxNotesBytes = 512
+
 // offlineAfter is how long without contact before a machine is marked offline.
 // markOfflineTick is how often RunOfflineMarker re-evaluates.
 const (
@@ -59,6 +66,15 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger) (*Store, err
 	}
 	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
 		return nil, fmt.Errorf("apply inventory schema: %w", err)
+	}
+	// Idempotent column adds for pre-notes databases ("duplicate column
+	// name" is the expected benign failure).
+	for _, m := range migrations {
+		if _, err := db.ExecContext(ctx, m); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return nil, fmt.Errorf("apply inventory migration %q: %w", m, err)
+			}
+		}
 	}
 	return &Store{db: db, logger: logger}, nil
 }
@@ -276,6 +292,27 @@ type MachineSummary struct {
 	// network, so IPv4Addresses shows that temporary PXE address instead.
 	// UIs should prefer InstallIP when set.
 	InstallIP string `json:"install_ip,omitempty"`
+	// Notes is the operator's free-form remark on this machine ("库位 A-12",
+	// "数据库节点，勿动"). Not touched by agents or installs — purely manual.
+	Notes string `json:"notes"`
+}
+
+// SetNotes replaces one machine's operator remark. MaxNotesBytes caps the
+// payload so the listing can't be bloated through it.
+func (s *Store) SetNotes(ctx context.Context, uuid, notes string) error {
+	if len(notes) > MaxNotesBytes {
+		return fmt.Errorf("inventory: notes too long: %d > %d bytes", len(notes), MaxNotesBytes)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE machines SET notes = ? WHERE uuid = ?`, notes, uuid)
+	if err != nil {
+		return fmt.Errorf("set notes: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrMachineNotFound
+	}
+	return nil
 }
 
 // ListMachines returns all machines, most-recently-seen first.
@@ -285,7 +322,8 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
                m.first_seen, m.last_seen, m.status,
                COALESCE(m.latest_report, 0),
                COALESCE(json_extract(r.body, '$.bmc.ip'), ''),
-               EXISTS(SELECT 1 FROM bmc_credentials b WHERE b.machine_uuid = m.uuid),
+	               EXISTS(SELECT 1 FROM bmc_credentials b WHERE b.machine_uuid = m.uuid),
+	               COALESCE(m.notes, ''),
                -- Machine IPs: flatten nics[].addresses, keep dotted-quad
                -- entries (agent reports them as "a.b.c.d/nn"; the mask is
                -- stripped in Go), deduped.
@@ -312,11 +350,11 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
 			m                    MachineSummary
 			firstSeen, lastSeen  int64
 			serial, mfr, product sql.NullString
-			bmcIP, ipsCSV        sql.NullString
+			bmcIP, ipsCSV, notes sql.NullString
 			managed              bool
 		)
 		if err := rows.Scan(&m.UUID, &serial, &mfr, &product, &firstSeen, &lastSeen,
-			&m.Status, &m.LatestReport, &bmcIP, &managed, &ipsCSV); err != nil {
+			&m.Status, &m.LatestReport, &bmcIP, &managed, &notes, &ipsCSV); err != nil {
 			return nil, fmt.Errorf("scan machine: %w", err)
 		}
 		m.Serial = serial.String
@@ -326,6 +364,7 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
 		m.LastSeen = time.Unix(lastSeen, 0).UTC()
 		m.BMCIP = bmcIP.String
 		m.BMCManaged = managed
+		m.Notes = notes.String
 		if ipsCSV.String != "" {
 			m.IPv4Addresses = strings.Split(ipsCSV.String, ",")
 		}
