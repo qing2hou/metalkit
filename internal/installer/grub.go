@@ -283,6 +283,9 @@ func installGRUBChrootRHEL(ctx context.Context, deps Deps, spec jobs.InstallSpec
 	// default) → user can't even log in to debug. Mask kdump to skip it
 	// entirely. See qa.md #5.
 	maskKdumpService(ctx, deps, mntRoot)
+	// 裸机首启提速：wait-online 会为没插线的网口等满 2 分钟超时
+	// （netplan 按 MAC 匹配全部网卡），snapd.seeded 再吃 48 秒。
+	maskBootLatencyHogs(ctx, deps, mntRoot)
 
 	if espMount != "" {
 		if out, err := deps.Exec.Run(ctx, "efibootmgr", "-v"); err != nil {
@@ -616,6 +619,23 @@ func installGRUBHostDebian(ctx context.Context, deps Deps, spec jobs.InstallSpec
 // install entirely. This makes Debian 13/14 installs work on non-RAID
 // servers even when the live system has no internet access (apt install
 // would fail and leave the user with an unbootable disk).
+// isUbuntuFamily: ubuntu 家族的内核元包与 Debian 不同（linux-image-amd64
+// 在 Ubuntu 源里不存在——2026-10-09 实测 noble 报 "has no installation
+// candidate"，导致云内核缺存储驱动的兜底静默失败）。
+func isUbuntuFamily(family string) bool {
+	return family == "ubuntu"
+}
+
+// standardKernelMetaPackage 返回换装全驱动标准内核的元包名：
+// Debian 系 = arch.DebianMetaKernel（linux-image-amd64 / arm64）；
+// Ubuntu = linux-generic（拉 linux-image-6.x-generic，含全部 SCSI/RAID 驱动）。
+func standardKernelMetaPackage(spec jobs.InstallSpec, arch archInfo) string {
+	if isUbuntuFamily(spec.Profile.OSFamily) {
+		return "linux-generic"
+	}
+	return arch.DebianMetaKernel
+}
+
 func regenerateInitramfsDebian(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot, devPath string) {
 	arch := archFromSpec(spec)
 	criticalDrivers := []string{"megaraid_sas", "mpt3sas", "hpsa", "aacraid", "smartpqi"}
@@ -705,14 +725,38 @@ func regenerateInitramfsDebian(ctx context.Context, deps Deps, spec jobs.Install
 	// files in-place; the sources.list uses mirror+file:/// so changing
 	// the mirror file is sufficient. Best-effort: if the file layout
 	// differs (older Debian releases), apt update just uses the default.
-	mirrorDir := filepath.Join(mntRoot, "etc", "apt", "mirrors")
-	_ = deps.FS.MkdirAll(mirrorDir, 0o755)
-	tunaDebian := []byte("https://mirrors.tuna.tsinghua.edu.cn/debian\n")
-	tunaSecurity := []byte("https://mirrors.tuna.tsinghua.edu.cn/debian-security\n")
-	_ = deps.FS.WriteFile(filepath.Join(mirrorDir, "debian.list"), tunaDebian, 0o644)
-	_ = deps.FS.WriteFile(filepath.Join(mirrorDir, "debian-security.list"), tunaSecurity, 0o644)
-	if deps.Logger != nil {
-		deps.Logger.Info("regenerate-initramfs-debian: switched apt mirror to TUNA")
+	if isUbuntuFamily(spec.Profile.OSFamily) {
+		// Ubuntu 24.04 (noble) 用 deb822 的 /etc/apt/sources.list.d/ubuntu.sources，
+		// Debian 的 mirrors/debian.list 机制对它无效（实测：换源后仍走 archive.ubuntu.com
+		// 且 linux-image-amd64 在 Ubuntu 源里根本不存在）。整文件重写为 TUNA。
+		tunaUbuntu := []byte(`Types: deb
+URIs: https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+Suites: noble noble-updates noble-backports
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+Suites: noble-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+`)
+		sourcesDir := filepath.Join(mntRoot, "etc", "apt", "sources.list.d")
+		_ = deps.FS.MkdirAll(sourcesDir, 0o755)
+		_ = deps.FS.WriteFile(filepath.Join(sourcesDir, "ubuntu.sources"), tunaUbuntu, 0o644)
+		if deps.Logger != nil {
+			deps.Logger.Info("regenerate-initramfs-debian: rewrote ubuntu.sources to TUNA")
+		}
+	} else {
+		mirrorDir := filepath.Join(mntRoot, "etc", "apt", "mirrors")
+		_ = deps.FS.MkdirAll(mirrorDir, 0o755)
+		tunaDebian := []byte("https://mirrors.tuna.tsinghua.edu.cn/debian\n")
+		tunaSecurity := []byte("https://mirrors.tuna.tsinghua.edu.cn/debian-security\n")
+		_ = deps.FS.WriteFile(filepath.Join(mirrorDir, "debian.list"), tunaDebian, 0o644)
+		_ = deps.FS.WriteFile(filepath.Join(mirrorDir, "debian-security.list"), tunaSecurity, 0o644)
+		if deps.Logger != nil {
+			deps.Logger.Info("regenerate-initramfs-debian: switched apt mirror to TUNA")
+		}
 	}
 
 	// Install the full kernel meta-package. apt will pull a standard
@@ -738,7 +782,7 @@ func regenerateInitramfsDebian(ctx context.Context, deps Deps, spec jobs.Install
 
 	installArgs = []string{
 		mntRoot, "apt-get", "install", "-y",
-		arch.DebianMetaKernel,
+		standardKernelMetaPackage(spec, arch),
 	}
 	if out, err := deps.Exec.Run(ctx, "chroot", installArgs...); err != nil {
 		if deps.Logger != nil {
@@ -2012,6 +2056,43 @@ func disableSELinuxIfEnforcing(deps Deps, mntRoot string) {
 	}
 	if deps.Logger != nil {
 		deps.Logger.Info("disable-selinux: set SELINUX=disabled")
+	}
+}
+
+// maskBootLatencyHogs masks services that add minutes to bare-metal first
+// boot without providing value there:
+//
+//   - systemd-networkd-wait-online.service: netplan matches ALL nics by MAC,
+//     so unplugged ports (eno3/eno4 on a 4-port box with 2 cables) stay
+//     "no-carrier (configured)" and wait-online blocks the full 2-minute
+//     timeout before giving up. Real incident 2026-10-09: first boot took
+//     4min10s, 2min of it waiting for empty ports. Bare-metal installs
+//     don't need "network fully online" gating — SSH and cloud-init are
+//     up as soon as bond0 is routable.
+//   - snapd.seeded.service: 48s seeding snaps nobody asked for on a
+//     server; it also gates cloud-init completion on Ubuntu cloud images.
+//
+// Same mechanism as maskKdumpService: /dev/null symlink in the target rootfs.
+func maskBootLatencyHogs(ctx context.Context, deps Deps, mntRoot string) {
+	for _, unit := range []string{"systemd-networkd-wait-online.service", "snapd.seeded.service", "snapd.service"} {
+		maskPath := filepath.Join(mntRoot, "etc", "systemd", "system", unit)
+		_ = deps.FS.MkdirAll(filepath.Dir(maskPath), 0o755)
+		if _, err := deps.FS.Stat(maskPath); err == nil {
+			continue // already masked or a real dropin exists; leave it
+		}
+		if err := deps.FS.Symlink("/dev/null", maskPath); err != nil {
+			if deps.Logger != nil {
+				deps.Logger.Warn("mask-boot-hogs: symlink failed", "unit", unit, "err", err)
+			}
+			continue
+		}
+		// Pull it out of any .wants dir too.
+		for _, base := range []string{"multi-user.target.wants", "network-online.target.wants", "sysinit.target.wants"} {
+			_ = deps.FS.Remove(filepath.Join(mntRoot, "etc", "systemd", "system", base, unit))
+		}
+		if deps.Logger != nil {
+			deps.Logger.Info("mask-boot-hogs: masked", "unit", unit)
+		}
 	}
 }
 
