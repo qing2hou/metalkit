@@ -339,6 +339,7 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
                COALESCE(json_extract(r.body, '$.bmc.ip'), ''),
 	               EXISTS(SELECT 1 FROM bmc_credentials b WHERE b.machine_uuid = m.uuid),
 	               COALESCE(m.notes, ''),
+               COALESCE(m.location, ''),
                -- Machine IPs: flatten nics[].addresses, keep dotted-quad
                -- entries (agent reports them as "a.b.c.d/nn"; the mask is
                -- stripped in Go), deduped.
