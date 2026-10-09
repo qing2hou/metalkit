@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 
 import { auditApi } from '@/api'
@@ -8,6 +9,7 @@ import AppShell from '@/components/AppShell.vue'
 import { useQuerySync } from '@/composables/useQuerySync'
 import { usePagedTable } from '@/composables/usePagedTable'
 import { fmtAbsolute } from '@/lib/format'
+import { asRow } from '@/lib/typed'
 
 const list = ref<AuditEvent[]>([])
 const loading = ref(false)
@@ -59,6 +61,54 @@ const actionFilters = [
   'POST /api/v1/bmc',
 ]
 
+// 删除单条审计记录（Admin 操作；删除会新记一条审计）
+async function remove(row: AuditEvent): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `删除这条审计记录（#${row.id} ${row.action}）？`,
+      '删除审计记录',
+      { type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await auditApi.remove(row.id)
+    ElMessage.success('已删除')
+    await load()
+  } catch (err) {
+    ElMessage.error(`删除失败: ${(err as Error).message}`)
+  }
+}
+
+// 清空全部审计记录（两步确认）
+async function purgeAll(): Promise<void> {
+  try {
+    await ElMessageBox.confirm(`清空全部 ${pagedTable.total.value} 条审计记录？此操作不可恢复。`, '清空审计', {
+      type: 'warning',
+    })
+  } catch {
+    return
+  }
+  try {
+    const { value } = await ElMessageBox.prompt('请输入「清空」两个字以确认执行', '最终确认', {
+      confirmButtonText: '执行清空',
+      cancelButtonText: '取消',
+      inputValidator: (v: string) => v.trim() === '清空' || '输入不正确，请输入「清空」',
+    })
+    if (value.trim() !== '清空') return
+  } catch {
+    return
+  }
+  try {
+    const r = await auditApi.purge()
+    ElMessage.success(`已清空 ${r.deleted} 条记录`)
+    await load()
+  } catch (err) {
+    ElMessage.error(`清空失败: ${(err as Error).message}`)
+  }
+}
+
 const pagedTable = usePagedTable(list)
 </script>
 
@@ -67,8 +117,10 @@ const pagedTable = usePagedTable(list)
     <div class="mk-page">
       <header class="mk-page-header">
         <h1 class="mk-page-title">审计</h1>
-        <p class="mk-page-sub">谁在何时对哪台机器做了什么</p>
-        <el-button :icon="Refresh" circle aria-label="刷新" @click="load" />
+        <div class="mk-header-actions">
+          <el-button type="danger" plain :disabled="!pagedTable.total.value" @click="purgeAll">清空</el-button>
+          <el-button :icon="Refresh" circle aria-label="刷新" @click="load" />
+        </div>
       </header>
 
       <el-alert v-if="loadError" :title="loadError" type="error" show-icon :closable="false" style="margin-bottom: 12px" />
@@ -124,6 +176,11 @@ const pagedTable = usePagedTable(list)
                 {{ row.details }}
               </span>
               <span v-else class="mk-subtle">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" min-width="70">
+            <template #default="{ row }">
+              <el-button text size="small" type="danger" @click.stop="remove(asRow<AuditEvent>(row))">删除</el-button>
             </template>
           </el-table-column>
           <template #empty>

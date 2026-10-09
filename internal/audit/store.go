@@ -9,11 +9,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 )
+
+var ErrNotFound = errors.New("audit: event not found")
 
 type Store struct {
 	db     *sql.DB
@@ -86,6 +89,31 @@ func (s *Store) Prune(ctx context.Context, retention time.Duration) (int64, erro
 	res, err := s.db.ExecContext(ctx, `DELETE FROM audit_events WHERE ts < ?`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("audit: prune: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// DeleteEvent removes one event by id. Audit is otherwise append-only;
+// this exists for the admin UI's manual cleanup, not for automation.
+func (s *Store) DeleteEvent(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM audit_events WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete event: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteAll removes every event (the UI's "clear all" with its own
+// confirmation). Returns the number removed.
+func (s *Store) DeleteAll(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM audit_events`)
+	if err != nil {
+		return 0, fmt.Errorf("delete all events: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return n, nil

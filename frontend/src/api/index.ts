@@ -171,6 +171,8 @@ export const auditApi = {
     const q = qs.toString()
     return apiGet<AuditEvent[]>(`/audit${q ? `?${q}` : ''}`)
   },
+  remove: (id: number) => apiSend<null>('DELETE', `/audit/${id}`),
+  purge: () => apiSend<{ deleted: number }>('POST', '/audit/purge', {}),
 }
 
 // ---------- util ----------
