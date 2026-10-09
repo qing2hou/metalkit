@@ -201,16 +201,28 @@ const passwordError = computed(() => {
   return ''
 })
 
-const canSubmit = computed(
-  () =>
-    form.imageId !== '' &&
-    form.profileId !== '' &&
-    (form.ipMode !== 'static' || !staticIpError.value) &&
-    !passwordError.value &&
-    (form.diskMode === 'smallest' || form.diskValue !== '') &&
-    (form.nicMode === 'auto' || form.nicMac !== '') &&
-    (!form.useBond || form.bondSlaves.length >= 2),
-)
+// 禁用时点按钮/悬停：明确告诉用户差什么——按钮静默无反应是今天
+// 「点保存并发装没建任务」事故的直接体验（静态 IP 填一半按钮灰死无声）。
+const blockedReasons = computed<string[]>(() => {
+  const why: string[] = []
+  if (!form.imageId) why.push('未选择镜像')
+  if (!form.profileId) why.push('未选择安装配置')
+  if (form.ipMode === 'static' && staticIpError.value) why.push(staticIpError.value)
+  if (passwordError.value) why.push(passwordError.value)
+  if (form.diskMode !== 'smallest' && !form.diskValue) why.push('目标盘选择了按 WWN/路径/型号但未填匹配值')
+  if (form.nicMode !== 'auto' && !form.nicMac) why.push('引导网卡选了按 MAC 但未填')
+  if (form.useBond && form.bondSlaves.length < 2) why.push('Bond 至少需要 2 个成员口')
+  return why
+})
+
+function showWhyBlocked(): void {
+  const why = blockedReasons.value
+  if (why.length) {
+    ElMessage.warning(`尚不能提交：${why.join('；')}`)
+  }
+}
+
+const canSubmit = computed(() => blockedReasons.value.length === 0)
 
 // ---------- 密码 ----------
 
@@ -637,29 +649,37 @@ async function submit(dispatch: boolean): Promise<void> {
     <template #footer>
       <div class="mk-dialog-footer">
         <div class="mk-footer-main">
-          <el-button text :loading="saving" :disabled="!canSubmit" @click="submit(false)">
-            仅保存配置
-          </el-button>
+          <el-tooltip :disabled="canSubmit" :content="blockedReasons.join('；')" placement="top">
+            <span class="mk-disabled-wrap" @click="!canSubmit && showWhyBlocked()">
+              <el-button text :loading="saving" :disabled="!canSubmit" @click="submit(false)">
+                仅保存配置
+              </el-button>
+            </span>
+          </el-tooltip>
           <span class="mk-footer-hint mk-subtle">
             {{ dispatchHint }}
           </span>
         </div>
         <div class="mk-footer-actions">
-          <el-button v-if="isReinstall" type="danger" plain :loading="saving" :disabled="!canSubmit" @click="submit(false)">
-            仅保存配置（不重装）
-          </el-button>
-          <el-button
-            v-if="isReinstall"
-            type="danger"
-            :loading="saving"
-            :disabled="!canSubmit"
-            @click="confirmReinstall"
-          >
-            确认重装并执行
-          </el-button>
-          <el-button v-else type="primary" :loading="saving" :disabled="!canSubmit" @click="submit(true)">
-            保存并发装
-          </el-button>
+          <el-tooltip :disabled="canSubmit" :content="blockedReasons.join('；')" placement="top">
+            <span class="mk-disabled-wrap" @click="!canSubmit && showWhyBlocked()">
+              <el-button v-if="isReinstall" type="danger" plain :loading="saving" :disabled="!canSubmit" @click="submit(false)">
+                仅保存配置（不重装）
+              </el-button>
+              <el-button
+                v-if="isReinstall"
+                type="danger"
+                :loading="saving"
+                :disabled="!canSubmit"
+                @click="confirmReinstall"
+              >
+                确认重装并执行
+              </el-button>
+              <el-button v-else type="primary" :loading="saving" :disabled="!canSubmit" @click="submit(true)">
+                保存并发装
+              </el-button>
+            </span>
+          </el-tooltip>
         </div>
       </div>
     </template>
@@ -692,6 +712,10 @@ async function submit(dispatch: boolean): Promise<void> {
 
 .mk-footer-hint {
   line-height: 1.4;
+}
+
+.mk-disabled-wrap {
+  display: inline-flex;
 }
 
 .mk-footer-actions {
