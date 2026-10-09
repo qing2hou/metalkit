@@ -12,6 +12,7 @@ import InstallDialog from '@/components/InstallDialog.vue'
 import { usePollHealth } from '@/composables/usePollHealth'
 import StatusTag from '@/components/StatusTag.vue'
 import { fmtAbsolute, fmtBytes, fmtRelative } from '@/lib/format'
+import { hardwareToCsv, hardwareToTxt } from '@/lib/hw-export'
 import { asRow } from '@/lib/typed'
 
 const route = useRoute()
@@ -85,6 +86,7 @@ async function load(): Promise<void> {
 // 轮询：详情页 10s（装机期间作业状态变化主要看作业页）
 let pollTimer: ReturnType<typeof setInterval> | null = null
 onMounted(() => {
+  void loadMachineExtras()
   void load()
   pollTimer = setInterval(() => {
     if (!document.hidden) void load()
@@ -105,6 +107,38 @@ const bindingProfile = computed(() =>
 const bindingSubnet = computed(() =>
   binding.value?.subnet_id ? subnets.value.find((s) => s.id === binding.value?.subnet_id) : undefined,
 )
+
+// ---- 硬件清单导出（CSV 给 Excel；TXT 贴工单） ----
+const machineExtras = ref<{ location?: string; notes?: string } | null>(null)
+
+async function loadMachineExtras(): Promise<void> {
+  try {
+    const all = await machinesApi.list()
+    const me = all.find((m) => m.uuid === uuid.value)
+    machineExtras.value = me ? { location: me.location, notes: me.notes } : null
+  } catch {
+    /* 导出发回时兜底：缺位置/备注不影响清单本体 */
+  }
+}
+
+function downloadHardware(kind: 'csv' | 'txt'): void {
+  const rep = report.value
+  if (!rep) {
+    ElMessage.warning('暂无硬件上报，无法导出')
+    return
+  }
+  const serial = summary.value?.serial ?? rep.machine?.serial ?? uuid.value.slice(0, 8)
+  const text = kind === 'csv'
+    ? hardwareToCsv(rep)
+    : hardwareToTxt(rep, { serial, location: machineExtras.value?.location, notes: machineExtras.value?.notes })
+  const blob = new Blob([text], { type: kind === 'csv' ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `hardware-${serial}.${kind}`
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 const biosVersion = computed(() => {
   const bios = (report.value?.firmware as { bios?: { vendor?: string; version?: string } } | undefined)?.bios
@@ -431,7 +465,15 @@ function viewHistoryItem(meta: ReportMeta): void {
 
       <!-- 硬件报告折叠区 -->
       <el-card class="mk-card">
-        <template #header><span>硬件报告</span></template>
+        <template #header>
+          <div class="mk-card-header">
+            <span>硬件报告</span>
+            <div>
+              <el-button size="small" :disabled="!report" @click="downloadHardware('csv')">导出 CSV</el-button>
+              <el-button size="small" :disabled="!report" @click="downloadHardware('txt')">导出 TXT</el-button>
+            </div>
+          </div>
+        </template>
         <el-collapse>
           <el-collapse-item title="机器 / 固件" name="machine">
             <dl class="mk-kv-grid">
