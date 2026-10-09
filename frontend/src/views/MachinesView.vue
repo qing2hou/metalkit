@@ -271,7 +271,7 @@ const pagedTable = usePagedTable(filtered)
           </el-table-column>
           <el-table-column label="UUID" min-width="240">
             <template #default="{ row }">
-              <CopyableText :text="row.uuid" :label="row.uuid.slice(0, 13) + '…'" />
+              <CopyableText :text="row.uuid" :label="row.uuid" />
             </template>
           </el-table-column>
           <el-table-column label="机型" min-width="180">

@@ -193,7 +193,7 @@ const pagedTable = usePagedTable(filtered)
           <el-table-column label="机器" min-width="200">
             <template #default="{ row }">
               <router-link :to="`/m/${row.machine_uuid}`" class="mk-link mono" @click.stop>
-                {{ row.machine_uuid.slice(0, 13) }}…
+                {{ row.machine_uuid }}
               </router-link>
             </template>
           </el-table-column>

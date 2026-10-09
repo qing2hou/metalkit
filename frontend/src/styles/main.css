@@ -149,16 +149,20 @@ html.dark {
 
 /* ---------- 可复制文本 ---------- */
 
+/* 可复制文本：完整显示（配合「一行显示所有信息」），长 ID 允许换行 */
 .mk-copyable {
   cursor: pointer;
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   gap: var(--mk-space-1);
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   vertical-align: bottom;
+  word-break: break-all;
+}
+
+.mk-copyable .mk-copyable-text {
+  white-space: normal;
+  word-break: break-all;
 }
 
 .mk-copyable:hover {
@@ -206,7 +210,10 @@ html.dark .mk-terminal {
 
 /* ---------- 表格密度 ---------- */
 
-/* 表格统一紧凑密度：行高 40px 档，企业后台标准 */
+/* 表格统一紧凑密度 + 「一行显示所有信息」：
+   单元格默认不截断——长文本（备注/绑定的 Profile 名/错误信息等）
+   自动换行、行高随之撑开，保证一行把该行的全部信息显示完；
+   列过多放不下时表格出横向滚动条而不是吞内容。 */
 .el-table.mk-table {
   --el-table-header-bg-color: var(--mk-page-bg);
   --el-table-header-text-color: var(--el-text-color-secondary);
@@ -218,6 +225,13 @@ html.dark .mk-terminal {
   font-weight: 500;
   font-size: var(--mk-font-xs);
   color: var(--el-text-color-secondary);
+}
+
+/* 单元格内容完整展示：不省略、不隐藏，word-break 兜底极长 hash */
+.el-table.mk-table .cell {
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.5;
 }
 
 /* 表格内小操作按钮对齐 */
@@ -268,4 +282,61 @@ html.dark .mk-terminal {
   color: var(--el-text-color-secondary);
   padding: var(--mk-space-8) var(--mk-space-4);
   font-size: var(--mk-font-sm);
+}
+
+/* ---------- 按钮高亮（全局） ---------- */
+
+/* 所有 Element 按钮：hover/active 一律给出明确高亮反馈——
+   品牌色文字 + 浅色底 + 150ms 过渡；行内小按钮同样适用。
+   danger/primary 保持各自语义色系的高亮。 */
+.el-button {
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.el-button:hover:not(.is-disabled) {
+  filter: none;
+}
+
+/* 文字按钮（表格操作列主体）：hover 从极淡灰变为品牌色前景 + 浅色底 */
+.el-button.is-text:not(.is-disabled):hover {
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+}
+
+/* 品牌色文字按钮 hover 语义保持：加深背景 */
+.el-button--primary.is-text:not(.is-disabled):hover,
+.el-button.is-text.el-button--primary:not(.is-disabled):hover {
+  background: var(--el-color-primary-light-8);
+  color: var(--el-color-primary);
+}
+
+/* danger 文字按钮：hover 红色前景 + 红色浅底 */
+.el-button.is-text.el-button--danger:not(.is-disabled):hover,
+.el-button--danger.is-text:not(.is-disabled):hover {
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
+}
+
+/* 实体按钮：hover 加浮起阴影 */
+button.el-button--primary:not(.is-text):not(.is-disabled):hover,
+button.el-button--danger:not(.is-text):not(.is-disabled):hover {
+  box-shadow: 0 2px 8px rgb(16 24 40 / 18%);
+  transform: translateY(-0.5px);
+}
+
+/* 默认（描边）按钮 hover：品牌色边框 + 文字 */
+.el-button:not(.is-text):not(.el-button--primary):not(.el-button--danger):not(.is-disabled):hover {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-5);
+  background: var(--el-color-primary-light-9);
+}
+
+/* 表格行内链接：hover 品牌色 + 下划线 */
+a.mk-link:hover,
+.mk-copyable:hover {
+  text-decoration: underline;
 }
