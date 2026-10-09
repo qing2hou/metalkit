@@ -181,3 +181,21 @@ func TestFilenameUniqueIndex(t *testing.T) {
 		t.Errorf("file 2 corrupted: err=%v", err)
 	}
 }
+
+// TestWriteChunkMalformedSHAHeaderIs400: a malformed X-Chunk-Sha256 header
+// is a client error — the pre-sentinel classification matched the "sha256"
+// keyword for 400; the sentinel rewrite briefly let it fall through to 500
+// (found by QA's API probe). ErrSHAFormat restores the 400.
+func TestWriteChunkMalformedSHAHeaderIs400(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	body := bytes.Repeat([]byte{0x99}, 64)
+	sess, err := s.CreateUpload(ctx, uploadBytes("hdr.qcow2", body, 64))
+	if err != nil {
+		t.Fatalf("CreateUpload: %v", err)
+	}
+	_, err = s.WriteChunk(ctx, sess.ID, 1, bytes.NewReader(body), "deadbeef")
+	if !errors.Is(err, ErrSHAFormat) {
+		t.Fatalf("malformed chunk sha: got %v want ErrSHAFormat", err)
+	}
+}

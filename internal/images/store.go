@@ -168,7 +168,7 @@ func (s *Store) CreateUpload(ctx context.Context, in CreateUploadInput) (*Upload
 	// naming, dedup, and the images.sha256 column. When non-empty, it must be
 	// a valid 64-hex string and the server verifies it post-assembly.
 	if in.ExpectedSHA256 != "" && !sha256RE.MatchString(in.ExpectedSHA256) {
-		return nil, errors.New("images: expected_sha256 must be 64 lowercase hex chars")
+		return nil, fmt.Errorf("%w: expected_sha256 must be 64 lowercase hex chars", ErrSHAFormat)
 	}
 	chunkSize := in.ChunkSize
 	if chunkSize <= 0 {
@@ -331,7 +331,7 @@ type FinalizeInput struct {
 // hash suffix is appended so both can coexist on disk.
 func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, error) {
 	if !sha256RE.MatchString(in.SHA256) {
-		return nil, errors.New("images: sha256 must be 64 lowercase hex chars")
+		return nil, fmt.Errorf("%w: sha256 must be 64 lowercase hex chars", ErrSHAFormat)
 	}
 	id, err := newImageID()
 	if err != nil {

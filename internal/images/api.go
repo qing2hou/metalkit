@@ -232,7 +232,7 @@ func (a *API) putChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Client-declared shape violations → 400; everything else is a 500.
-	if errors.Is(err, ErrChunkRange) || errors.Is(err, ErrChunkLength) {
+	if errors.Is(err, ErrChunkRange) || errors.Is(err, ErrChunkLength) || errors.Is(err, ErrSHAFormat) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

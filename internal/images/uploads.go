@@ -93,7 +93,7 @@ func (s *Store) WriteChunk(ctx context.Context, sessionID string, n int, body io
 		return 0, wrapErr(ErrChunkRange, "chunk %d out of range [1,%d]", n, sess.NumChunks)
 	}
 	if expectedSHA != "" && !sha256RE.MatchString(expectedSHA) {
-		return 0, errors.New("images: chunk sha256 must be 64 lowercase hex chars")
+		return 0, fmt.Errorf("%w: chunk sha256 must be 64 lowercase hex chars", ErrSHAFormat)
 	}
 
 	expectedLen := sess.ChunkSize
@@ -323,6 +323,8 @@ var (
 	ErrChunkMissing = errors.New("images: chunk missing")
 	// ErrSizeMismatch: assembled size != session's declared total.
 	ErrSizeMismatch = errors.New("images: assembled size mismatch")
+	// ErrSHAFormat: a client-supplied sha256 is not 64 lowercase hex chars.
+	ErrSHAFormat = errors.New("images: sha256 must be 64 lowercase hex chars")
 	// ErrSessionBusy: another finalize already claimed the session.
 	ErrSessionBusy = errors.New("images: upload session is being finalized")
 )

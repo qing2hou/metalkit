@@ -42,7 +42,7 @@ var intendedOpen = map[string]string{
 	"/boot/amd64/":                     "PXE arch-path kernel/initrd",
 	"/boot/arm64/":                     "PXE arch-path kernel/initrd",
 	"/":                                "redirect to /ui/ only; 404 otherwise",
-	"/api/v1/report":                   "live-boot agents, no credential store",
+	"POST /api/v1/report":              "live-boot agents, no credential store",
 	"POST /api/v1/heartbeat/{uuid}":    "live agents heartbeat",
 	"POST /api/v1/auth/login":          "login page itself",
 	"POST /api/v1/auth/logout":         "logout must work with expired cookie",
@@ -193,13 +193,18 @@ func newFullServer(t *testing.T) *Server {
 }
 
 // TestNeedsAuth_AllRegisteredRoutes: every pattern in allRoutePatterns is
-// (a) verified to actually exist on the production mux (a real request to
-// it returns 405/400/200/401 — anything but the 404 an unregistered route
-// yields) and (b) checked against needsAuth (via a concrete example path)
-// against the declared intent. Removing or renaming a route fails (a);
-// adding a new one undocumented fails only when someone bumps the table —
-// so (a) doubles as the drift detector: patterns the mux has but the table
-// lacks can be found by the count probe below.
+// (a) verified to actually exist on the production mux (mux.Handler must
+// resolve this exact method+path to this exact pattern) and (b) checked
+// against needsAuth (via a concrete example path) against the declared
+// intent. Removing, renaming, or re-shaping a route fails (a); a route on
+// the open list that needsAuth closes (or vice versa) fails (b).
+//
+// Known limitation, stated honestly: the stdlib offers no way to enumerate
+// a ServeMux's registrations, so a BRAND-NEW route added without touching
+// this table is NOT automatically caught here — needsAuth's fail-closed
+// default means such a route ships authenticated (the safe direction), and
+// the gap is policed by review + periodic recount (a full hand recount in
+// Oct 2026 found 78 registrations; the table must match that count).
 func TestNeedsAuth_AllRegisteredRoutes(t *testing.T) {
 	s := newFullServer(t)
 	mux := s.routes()
@@ -208,6 +213,9 @@ func TestNeedsAuth_AllRegisteredRoutes(t *testing.T) {
 	// catch-all "/" — otherwise the resolvePattern check below proves nothing.
 	if _, pat := mux.Handler(httptest.NewRequest(http.MethodGet, "/api/v1/definitely-not-registered", nil)); pat != "/" {
 		t.Fatalf("control probe resolved to %q, want catch-all \"/\" — resolvePattern cannot detect unregistered paths", pat)
+	}
+	if n := len(allRoutePatterns); n != 78 {
+		t.Errorf("allRoutePatterns has %d entries; the mux registers 78 (recounted Oct 2026) — update both the table and this number when routes change", n)
 	}
 
 	open := openPatternSet()
@@ -261,7 +269,9 @@ var allRoutePatterns = []string{
 	"/ui",
 	"/ui/",
 	"/",
-	// inventory
+	// inventory (report/heartbeat register in inventory's agent handlers)
+	"POST /api/v1/report",
+	"POST /api/v1/heartbeat/{uuid}",
 	"GET /api/v1/machines",
 	"GET /api/v1/machines/{uuid}",
 	"GET /api/v1/machines/{uuid}/reports",
@@ -378,23 +388,6 @@ func wildcardExample(pattern string) string {
 			break
 		}
 		out = out[:i] + "placeholder" + out[i+j+1:]
-	}
-	return out
-}
-
-func symmetricDiff(a, b []string) []string {
-	set := make(map[string]int)
-	for _, s := range a {
-		set[s]++
-	}
-	for _, s := range b {
-		set[s]--
-	}
-	var out []string
-	for s, n := range set {
-		if n != 0 {
-			out = append(out, s)
-		}
 	}
 	return out
 }
