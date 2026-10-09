@@ -82,7 +82,7 @@ func (s *Store) Prune(ctx context.Context, retention time.Duration) (int64, erro
 	if retention <= 0 {
 		retention = DefaultRetention
 	}
-	cutoff := s.now().Add(-retention)
+	cutoff := s.now().UTC().Add(-retention)
 	res, err := s.db.ExecContext(ctx, `DELETE FROM audit_events WHERE ts < ?`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("audit: prune: %w", err)

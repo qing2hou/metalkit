@@ -18,7 +18,7 @@ agent live-image 自带完整安装工具链)。
 ## 0. 总体流程图
 
 ```
-  源代码 (/opt/claude/devops)
+  源代码 (<你的源码目录>)
         │
    ┌────┴────┐
    │ make    │ ── 构建机:Go 1.25+, live-build 或 docker, 联网
@@ -241,7 +241,7 @@ dnf install -y whois || true               # 可能缺,继续
 ```bash
 # 4.1.1 在构建机上同步代码(整个仓库或 §1.4 列出的最小子集)
 rsync -av --exclude=.git --exclude=node_modules \
-    /opt/claude/devops/ root@<控制节点IP>:/root/metalkit-src/
+    <你的源码目录>/ root@<控制节点IP>:/root/metalkit-src/
 
 # 4.1.2 在控制节点 ssh 进去
 ssh root@<控制节点IP>
