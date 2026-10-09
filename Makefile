@@ -1,7 +1,7 @@
 GO ?= go
 VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo dev)
 
-.PHONY: help frontend build agent agent-arm64 monitor test tidy ipxe live run clean
+.PHONY: help frontend build agent agent-arm64 monitor test test-frontend lint tidy ipxe live run clean
 ARCH ?= amd64
 
 GOARCH ?= amd64
@@ -13,7 +13,9 @@ help:
 	@echo "  agent      - build inventory agent into bin/agent-$(GOARCH) (default amd64; GOARCH=arm64 to cross-compile)"
 	@echo "  agent-arm64 - convenience: build arm64 agent (same as 'make agent GOARCH=arm64')"
 	@echo "  monitor    - build monitoring agent into bin/monitor-$(GOARCH) (implanted into installed systems)"
-	@echo "  test     - run go tests"
+	@echo "  test     - run go + frontend tests (frontend skipped if node absent)"
+	@echo "  test-frontend - run frontend unit tests only"
+	@echo "  lint     - go vet over cmd/ and internal/"
 	@echo "  tidy     - go mod tidy"
 	@echo "  ipxe     - fetch iPXE binaries via scripts/fetch-ipxe.sh"
 	@echo "  live     - build Debian live image via scripts/build-live.sh (depends on agent + monitor)"
@@ -51,8 +53,23 @@ monitor:
 	  -o bin/monitor-$(GOARCH) ./cmd/monitor
 	ln -sf monitor-$(GOARCH) bin/monitor
 
-test:
+test: test-go test-frontend
+
+# Go tests only — what CI runs and what you want during backend work.
+test-go:
 	$(GO) test ./cmd/... ./internal/...
+
+# Frontend tests; skipped with a notice when node is absent so `make test`
+# stays usable on Go-only machines (CI runs the frontend job unconditionally).
+test-frontend:
+	@if command -v npm >/dev/null 2>&1; then \
+		cd frontend && npm test; \
+	else \
+		echo "test-frontend: npm not found — skipping (run 'cd frontend && npm test' on a machine with node)"; \
+	fi
+
+lint:
+	$(GO) vet ./cmd/... ./internal/...
 
 tidy:
 	$(GO) mod tidy

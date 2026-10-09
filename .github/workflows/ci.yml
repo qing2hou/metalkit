@@ -1,0 +1,51 @@
+# Minimal gate: Go build/vet/tests + frontend typecheck/tests on every push
+# and PR. Deliberately small — grow it (linters, asset-sync check) once this
+# proves stable on the runner.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./cmd/... ./internal/...
+        env:
+          # Tests probe with raw sockets when run as root on a real host; on
+          # CI runners the fake/loopback paths cover us, keep env sane.
+          CGO_ENABLED: "0"
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Type check
+        run: npx vue-tsc -b
+      - name: Unit tests
+        run: npm test
