@@ -13,7 +13,7 @@ const sample: Report = {
     serial: '93MPG82',
   },
   firmware: { bios: { vendor: 'Dell Inc.', version: '2.11.4' }, uefi_mode: true, secure_boot: false },
-  cpu: { arch: 'amd64' },
+  cpu: { arch: 'amd64', vendor: 'GenuineIntel', sockets: 2, total_cores: 20, total_threads: 40, per_socket: [{ socket: 'CPU1', model: 'Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz', cores: 10, threads: 20 }] },
   memory: {
     total_bytes: 64 * 1024 ** 3,
     dimms: [{ slot: 'A1', size_bytes: 32 * 1024 ** 3, speed_mt_s: 2400, type: 'DDR4', manufacturer: 'Samsung' }],
@@ -28,6 +28,7 @@ describe('hardwareToCsv', () => {
   it('包含全部四个硬件段与字段', () => {
     const csv = hardwareToCsv(sample)
     expect(csv).toContain('机器信息')
+    expect(csv).toContain('Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz')
     expect(csv).toContain('93MPG82')
     expect(csv).toContain('内存')
     expect(csv).toContain('A1,32,2400,DDR4,Samsung')
@@ -59,6 +60,7 @@ describe('hardwareToTxt', () => {
     expect(txt).toContain('metalkit 硬件清单')
     expect(txt).toContain('位　置: 机房2-R05-U12')
     expect(txt).toContain('备　注: 数据库节点')
+    expect(txt).toContain('CPU:　　 Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz（2 路 20 核 40 线程）')
     expect(txt).toContain('── 内存（1 条）──')
     expect(txt).toContain('A1  32G  2400MT/s  DDR4  Samsung')
     expect(txt).toContain('── 磁盘（1 块）──')

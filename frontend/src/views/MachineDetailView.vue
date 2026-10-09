@@ -140,6 +140,12 @@ function downloadHardware(kind: 'csv' | 'txt'): void {
   URL.revokeObjectURL(url)
 }
 
+// CPU 型号摘要：去重后的每颗型号（多路同型号只显示一次）
+const cpuModelSummary = computed(() => {
+  const models = [...new Set((report.value?.cpu?.per_socket ?? []).map((s) => s.model).filter(Boolean))]
+  return models.join(' + ')
+})
+
 const biosVersion = computed(() => {
   const bios = (report.value?.firmware as { bios?: { vendor?: string; version?: string } } | undefined)?.bios
   return bios ? [bios.vendor, bios.version].filter(Boolean).join(' ') : ''
@@ -314,7 +320,7 @@ function viewHistoryItem(meta: ReportMeta): void {
                 <span v-else class="mk-subtle">未上报</span>
               </dd>
             </div>
-            <div class="mk-kv"><dt>CPU 架构</dt><dd>{{ report?.cpu?.arch || '—' }}</dd></div>
+            <div class="mk-kv"><dt>CPU</dt><dd>{{ cpuModelSummary || '—' }}<span v-if="report?.cpu?.arch" class="mk-subtle"> · {{ report.cpu.arch }}</span></dd></div>
             <div class="mk-kv"><dt>固件</dt><dd>{{ biosVersion || '—' }}</dd></div>
             <div class="mk-kv"><dt>Live 版本</dt><dd>{{ (report?.system as any)?.live_image_version || '—' }}</dd></div>
           </dl>
@@ -488,7 +494,7 @@ function viewHistoryItem(meta: ReportMeta): void {
             </dl>
           </el-collapse-item>
 
-          <el-collapse-item title="CPU" name="cpu">
+          <el-collapse-item :title="`CPU（${cpuModelSummary || '未上报型号'}）`" name="cpu">
             <dl class="mk-kv-grid">
               <div class="mk-kv"><dt>架构</dt><dd>
                 <el-tag v-if="report?.cpu?.arch" :type="report?.cpu?.arch === 'arm64' ? 'warning' : 'info'" size="small" disable-transitions>
@@ -496,10 +502,33 @@ function viewHistoryItem(meta: ReportMeta): void {
                 </el-tag>
                 <span v-else class="mk-subtle">未上报</span>
               </dd></div>
+              <div class="mk-kv"><dt>厂商</dt><dd>{{ report?.cpu?.vendor || '—' }}</dd></div>
               <div class="mk-kv"><dt>插槽数</dt><dd>{{ report?.cpu?.sockets ?? '—' }}</dd></div>
               <div class="mk-kv"><dt>物理核</dt><dd>{{ report?.cpu?.total_cores ?? '—' }}</dd></div>
               <div class="mk-kv"><dt>逻辑核</dt><dd>{{ report?.cpu?.total_threads ?? '—' }}</dd></div>
+              <div class="mk-kv"><dt>NUMA 节点</dt><dd>{{ report?.cpu?.numa_nodes ?? '—' }}</dd></div>
             </dl>
+            <el-table
+              v-if="report?.cpu?.per_socket?.length"
+              class="mk-table"
+              :data="report.cpu.per_socket"
+              stripe
+              size="small"
+              style="margin-top: 10px"
+            >
+              <el-table-column prop="socket" label="插槽" min-width="70" />
+              <el-table-column prop="model" label="型号" min-width="260" />
+              <el-table-column label="核/线程" min-width="90">
+                <template #default="{ row }">{{ row.cores ?? '—' }} 核 / {{ row.threads ?? '—' }} 线程</template>
+              </el-table-column>
+              <el-table-column label="主频" min-width="90">
+                <template #default="{ row }">
+                  {{ row.base_freq_mhz ? `${(row.base_freq_mhz / 1000).toFixed(2)} GHz` : '—' }}
+                  <span v-if="row.max_freq_mhz" class="mk-subtle">（睿频 {{ (row.max_freq_mhz / 1000).toFixed(1) }}）</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="microcode" label="微码" min-width="110" />
+            </el-table>
           </el-collapse-item>
 
           <el-collapse-item :title="`内存（${fmtBytes(report?.memory?.total_bytes)}）`" name="memory">

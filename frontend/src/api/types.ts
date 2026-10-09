@@ -70,6 +70,27 @@ export interface Nic {
   sfp?: Record<string, unknown>
 }
 
+export interface CpuSocket {
+  socket?: string
+  model?: string
+  cores?: number
+  threads?: number
+  base_freq_mhz?: number
+  max_freq_mhz?: number
+  microcode?: string
+}
+
+export interface CpuInfo {
+  arch?: string
+  vendor?: string
+  sockets?: number
+  total_cores?: number
+  total_threads?: number
+  numa_nodes?: number
+  per_socket?: CpuSocket[]
+  flags?: string[]
+}
+
 export interface Report {
   schema_version?: number
   agent_version?: string
@@ -84,14 +105,7 @@ export interface Report {
     chassis?: Record<string, unknown>
   }
   firmware?: Record<string, unknown>
-  cpu?: {
-    arch?: string
-    sockets?: number
-    total_cores?: number
-    total_threads?: number
-    per_socket?: Array<Record<string, unknown>>
-    flags?: string[]
-  }
+  cpu?: CpuInfo
   memory?: {
     total_bytes?: number
     ecc?: boolean
