@@ -6,6 +6,7 @@ import { auditApi } from '@/api'
 import type { AuditEvent } from '@/api/types'
 import AppShell from '@/components/AppShell.vue'
 import { useQuerySync } from '@/composables/useQuerySync'
+import { usePagedTable } from '@/composables/usePagedTable'
 import { fmtAbsolute } from '@/lib/format'
 
 const list = ref<AuditEvent[]>([])
@@ -57,6 +58,8 @@ const actionFilters = [
   'DELETE /api/v1/machines',
   'POST /api/v1/bmc',
 ]
+
+const pagedTable = usePagedTable(list)
 </script>
 
 <template>
@@ -92,7 +95,7 @@ const actionFilters = [
           </el-select>
         </div>
 
-        <el-table class="mk-table" v-loading="loading" :data="list" stripe size="small">
+        <el-table class="mk-table" v-loading="loading" :data="pagedTable.paged.value" stripe size="small">
           <el-table-column label="时间" width="170">
             <template #default="{ row }">{{ fmtAbsolute(row.ts) }}</template>
           </el-table-column>
@@ -127,6 +130,15 @@ const actionFilters = [
             <el-empty description="暂无审计记录" :image-size="72" />
           </template>
         </el-table>
+        <el-pagination
+          v-if="pagedTable.total.value > pagedTable.pageSize.value"
+          v-model:current-page="pagedTable.currentPage.value"
+          v-model:page-size="pagedTable.pageSize.value"
+          :page-sizes="[20, 50, 100]"
+          :total="pagedTable.total.value"
+          layout="total, sizes, prev, pager, next, jumper"
+          style="margin-top: 16px; justify-content: flex-end"
+        />
         <div class="mk-subtle" style="margin-top: 8px">
           记录所有变更类 API 调用（含失败）与敏感操作（如装机密码查看）。只读，追加写。
         </div>

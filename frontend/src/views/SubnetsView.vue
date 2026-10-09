@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { FormInstance, FormRules } from 'element-plus'
+import { usePagedTable } from '@/composables/usePagedTable'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 
@@ -201,6 +202,8 @@ async function remove(row: Subnet): Promise<void> {
     ElMessage.error(`删除失败: ${(err as Error).message}`)
   }
 }
+
+const pagedTable = usePagedTable(list)
 </script>
 
 <template>
@@ -213,7 +216,7 @@ async function remove(row: Subnet): Promise<void> {
       </header>
 
       <el-card class="mk-card">
-        <el-table class="mk-table" v-loading="loading" :data="list" stripe>
+        <el-table class="mk-table" v-loading="loading" :data="pagedTable.paged.value" stripe>
           <el-table-column prop="name" label="名称" min-width="140" />
           <el-table-column prop="cidr" label="CIDR" min-width="160">
             <template #default="{ row }"><span class="mono">{{ row.cidr }}</span></template>
@@ -250,6 +253,15 @@ async function remove(row: Subnet): Promise<void> {
             <el-empty description="还没有子网" :image-size="72" />
           </template>
         </el-table>
+        <el-pagination
+          v-if="pagedTable.total.value > pagedTable.pageSize.value"
+          v-model:current-page="pagedTable.currentPage.value"
+          v-model:page-size="pagedTable.pageSize.value"
+          :page-sizes="[20, 50, 100]"
+          :total="pagedTable.total.value"
+          layout="total, sizes, prev, pager, next, jumper"
+          style="margin-top: 16px; justify-content: flex-end"
+        />
       </el-card>
 
       <el-dialog

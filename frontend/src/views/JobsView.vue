@@ -9,6 +9,7 @@ import AppShell from '@/components/AppShell.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { usePollHealth } from '@/composables/usePollHealth'
 import { useQuerySync } from '@/composables/useQuerySync'
+import { usePagedTable } from '@/composables/usePagedTable'
 import { fmtAbsolute, fmtRelative } from '@/lib/format'
 import { asRow } from '@/lib/typed'
 
@@ -140,6 +141,8 @@ async function purgeFinished(): Promise<void> {
 }
 
 const runningCount = computed(() => list.value.filter((j) => j.status === 'running' || j.status === 'pending').length)
+
+const pagedTable = usePagedTable(filtered)
 </script>
 
 <template>
@@ -182,7 +185,7 @@ const runningCount = computed(() => list.value.filter((j) => j.status === 'runni
           <el-checkbox v-model="filters.last24h">最近 24 小时</el-checkbox>
         </div>
 
-        <el-table class="mk-table" v-loading="loading" :data="filtered" stripe size="small">
+        <el-table class="mk-table" v-loading="loading" :data="pagedTable.paged.value" stripe size="small">
           <el-table-column label="状态" width="90">
             <template #default="{ row }"><StatusTag :status="row.status" /></template>
           </el-table-column>
@@ -230,6 +233,15 @@ const runningCount = computed(() => list.value.filter((j) => j.status === 'runni
             <el-empty description="没有作业" :image-size="72" />
           </template>
         </el-table>
+        <el-pagination
+          v-if="pagedTable.total.value > pagedTable.pageSize.value"
+          v-model:current-page="pagedTable.currentPage.value"
+          v-model:page-size="pagedTable.pageSize.value"
+          :page-sizes="[20, 50, 100]"
+          :total="pagedTable.total.value"
+          layout="total, sizes, prev, pager, next, jumper"
+          style="margin-top: 16px; justify-content: flex-end"
+        />
       </el-card>
     </div>
   </AppShell>

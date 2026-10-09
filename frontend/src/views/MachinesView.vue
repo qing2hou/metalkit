@@ -12,6 +12,7 @@ import InstallDialog from '@/components/InstallDialog.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { usePollHealth } from '@/composables/usePollHealth'
 import { useQuerySync } from '@/composables/useQuerySync'
+import { usePagedTable } from '@/composables/usePagedTable'
 import { fmtRelative } from '@/lib/format'
 import { asRow } from '@/lib/typed'
 
@@ -181,6 +182,8 @@ async function remove(row: MachineSummary): Promise<void> {
     ElMessage.error(`删除失败: ${(err as Error).message}`)
   }
 }
+
+const pagedTable = usePagedTable(filtered)
 </script>
 
 <template>
@@ -225,7 +228,7 @@ async function remove(row: MachineSummary): Promise<void> {
 
         <el-table class="mk-table"
           v-loading="loading"
-          :data="filtered"
+          :data="pagedTable.paged.value"
           stripe
           row-key="uuid"
           @row-click="openDetail"
@@ -287,6 +290,15 @@ async function remove(row: MachineSummary): Promise<void> {
             <el-empty description="没有机器；让机器 PXE 引导进入 live 系统即可自动上报" :image-size="72" />
           </template>
         </el-table>
+        <el-pagination
+          v-if="pagedTable.total.value > pagedTable.pageSize.value"
+          v-model:current-page="pagedTable.currentPage.value"
+          v-model:page-size="pagedTable.pageSize.value"
+          :page-sizes="[20, 50, 100]"
+          :total="pagedTable.total.value"
+          layout="total, sizes, prev, pager, next, jumper"
+          style="margin-top: 16px; justify-content: flex-end"
+        />
       </el-card>
 
       <!-- 列表页直达装机弹窗：数据按需拉取，保存后刷新列表 -->

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ArrowDown, Plus } from '@element-plus/icons-vue'
+import { usePagedTable } from '@/composables/usePagedTable'
 import type { FormInstance, FormRules, UploadFile } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
@@ -227,6 +228,8 @@ async function doImport(): Promise<void> {
     importing.value = false
   }
 }
+
+const pagedTable = usePagedTable(list)
 </script>
 
 <template>
@@ -242,7 +245,7 @@ async function doImport(): Promise<void> {
       </header>
 
       <el-card class="mk-card">
-        <el-table class="mk-table" v-loading="loading" :data="list" stripe>
+        <el-table class="mk-table" v-loading="loading" :data="pagedTable.paged.value" stripe>
           <el-table-column prop="ip" label="BMC IP" min-width="140">
             <template #default="{ row }"><span class="mono">{{ row.ip }}</span></template>
           </el-table-column>
@@ -285,6 +288,15 @@ async function doImport(): Promise<void> {
             <el-empty description="还没有 BMC 凭据" :image-size="72" />
           </template>
         </el-table>
+        <el-pagination
+          v-if="pagedTable.total.value > pagedTable.pageSize.value"
+          v-model:current-page="pagedTable.currentPage.value"
+          v-model:page-size="pagedTable.pageSize.value"
+          :page-sizes="[20, 50, 100]"
+          :total="pagedTable.total.value"
+          layout="total, sizes, prev, pager, next, jumper"
+          style="margin-top: 16px; justify-content: flex-end"
+        />
       </el-card>
 
       <el-dialog
