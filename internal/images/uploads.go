@@ -257,17 +257,12 @@ func (s *Store) FinalizeUpload(ctx context.Context, sessionID string, extractor 
 		}
 	}
 
-	filename, err := s.uniqueFilename(ctx, sess.Name, format, got)
-	if err != nil {
-		_ = os.Remove(stage)
-		return nil, err
-	}
-	finalPath := filepath.Join(s.dir, filename)
-	if err := os.Rename(stage, finalPath); err != nil {
-		_ = os.Remove(stage)
-		return nil, fmt.Errorf("rename to final: %w", err)
-	}
-
+	// Commit the catalog row FIRST (the filename is derived and locked inside
+	// the FinalizeImage transaction — a concurrent same-name finalize either
+	// sees our row and suffixes its own name, or fails its INSERT and never
+	// renames), and only then move the staged bytes into place. The old
+	// order (rename first, insert second) let a same-name loser overwrite
+	// the winner's file on disk.
 	img, err := s.FinalizeImage(ctx, FinalizeInput{
 		Name:         sess.Name,
 		Version:      sess.Version,
@@ -283,11 +278,17 @@ func (s *Store) FinalizeUpload(ctx context.Context, sessionID string, extractor 
 		SessionID:    sess.ID,
 	})
 	if err != nil {
-		// Roll back the file: ErrDuplicate means a parallel finalize won.
-		// In all error cases the catalog row was not inserted, so removing
-		// the file is the right thing.
-		_ = os.Remove(finalPath)
+		_ = os.Remove(stage)
 		return nil, err
+	}
+	finalPath := filepath.Join(s.dir, img.Filename)
+	if err := os.Rename(stage, finalPath); err != nil {
+		// The catalog row exists but its file is missing — the image is
+		// unusable to any installer. Roll the row back.
+		_, _ = s.db.ExecContext(context.WithoutCancel(ctx),
+			`DELETE FROM images WHERE id = ?`, img.ID)
+		_ = os.Remove(stage)
+		return nil, fmt.Errorf("rename to final: %w", err)
 	}
 
 	// Best-effort cleanup of the chunks dir. Errors here are not fatal.
@@ -506,7 +507,14 @@ func sanitizeFilename(name string) string {
 // When another catalog row (different sha) already claimed the exact name —
 // e.g. a re-upload of an edited image with the same file name — append
 // "-{sha8}" before the extension so both files can coexist.
-func (s *Store) uniqueFilename(ctx context.Context, uploadName, format, sha string) (string, error) {
+//
+// MUST be called from inside the FinalizeImage transaction: the SELECT and
+// the INSERT then share one write lock, so a concurrent finalize of the same
+// name either sees this row (and takes the -sha8 suffix here) or fails its
+// INSERT on the UNIQUE index (which insertImageWithConflictRetry turns into
+// the suffix as well). Outside a transaction the check-then-insert window is
+// exactly the cross-session same-name race.
+func (s *Store) uniqueFilenameTx(ctx context.Context, tx *sql.Tx, uploadName, format, sha string) (string, error) {
 	base := sanitizeFilename(uploadName)
 	ext := filepath.Ext(base)
 	if ext == "" {
@@ -525,7 +533,7 @@ func (s *Store) uniqueFilename(ctx context.Context, uploadName, format, sha stri
 		return sha[:12] + ext, nil
 	}
 	var owner string
-	err := s.db.QueryRowContext(ctx,
+	err := tx.QueryRowContext(ctx,
 		`SELECT sha256 FROM images WHERE filename = ?`, base).Scan(&owner)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -535,9 +543,21 @@ func (s *Store) uniqueFilename(ctx context.Context, uploadName, format, sha stri
 	case owner == sha:
 		return base, nil // same content re-finalized (dedup path), keep name
 	default:
-		stem := strings.TrimSuffix(base, ext)
-		return stem + "-" + sha[:8] + ext, nil
+		return suffixedName(base, ext, sha), nil
 	}
+}
+
+// suffixedName appends "-{sha8}" before the extension (see uniqueFilenameTx).
+func suffixedName(base, ext, sha string) string {
+	return strings.TrimSuffix(base, ext) + "-" + sha[:8] + ext
+}
+
+// isUniqueConstraint reports whether err is SQLite's UNIQUE-constraint
+// failure (SQLITE_CONSTRAINT_UNIQUE, 2067). Errno-based re-typing is not
+// available on the modernc driver, so we match its documented message;
+// the driver's own test suite pins this exact format.
+func isUniqueConstraint(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 // RewriteLegacyNames renames content-addressed files (sha256.format, the
@@ -572,17 +592,46 @@ func (s *Store) RewriteLegacyNames() {
 		}
 		legacy := filepath.Join(s.dir, r.sha+"."+r.format)
 		ctx := context.Background()
-		want, err := s.uniqueFilename(ctx, r.name, r.format, r.sha)
+		// Single-row legacy rewrite inside a write transaction: reuse the tx-aware
+		// derivation so the backfilled filename can never collide with a
+		// concurrent finalize (UPDATE below would fail on the UNIQUE index).
+		tx, txErr := s.db.BeginTx(ctx, nil)
+		if txErr != nil {
+			s.logger.Warn("legacy rename: begin tx", "err", txErr)
+			continue
+		}
+		want, err := s.uniqueFilenameTx(ctx, tx, r.name, r.format, r.sha)
 		if err != nil {
+			_ = tx.Rollback()
 			s.logger.Warn("legacy rename: derive name", "id", r.id, "err", err)
+			continue
+		}
+		_, err = tx.Exec(`UPDATE images SET filename = ? WHERE id = ? AND COALESCE(filename,'') = ''`, want, r.id)
+		if err != nil {
+			_ = tx.Rollback()
+			if isUniqueConstraint(err) {
+				// Another row claimed the name between the derive-SELECT and the
+				// UPDATE (same-name rows in a hand-edited DB). Retry once with
+				// the forced suffix.
+				ext := filepath.Ext(want)
+				want = strings.TrimSuffix(want, ext) + "-" + r.sha[:8] + ext
+				if _, err2 := s.db.Exec(`UPDATE images SET filename = ? WHERE id = ? AND COALESCE(filename,'') = ''`, want, r.id); err2 != nil {
+					s.logger.Warn("legacy rename: fallback update", "id", r.id, "err", err2)
+					continue
+				}
+			} else {
+				s.logger.Warn("legacy rename: update", "id", r.id, "err", err)
+				continue
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			s.logger.Warn("legacy rename: commit", "id", r.id, "err", err)
 			continue
 		}
 		target := filepath.Join(s.dir, want)
 		if _, err := os.Stat(target); err == nil {
 			// Name already occupied on disk by someone else — derive a fresh
 			// unique one (adds -sha8 suffix).
-			want, _ = s.uniqueFilename(ctx, want, r.format, r.sha+"x") // force suffix path
-			// simplest: append sha8 manually
 			ext := filepath.Ext(want)
 			want = strings.TrimSuffix(want, ext) + "-" + r.sha[:8] + ext
 			target = filepath.Join(s.dir, want)

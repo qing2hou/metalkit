@@ -199,3 +199,87 @@ func TestWriteChunkMalformedSHAHeaderIs400(t *testing.T) {
 		t.Fatalf("malformed chunk sha: got %v want ErrSHAFormat", err)
 	}
 }
+
+// TestFinalizeUpload_ConcurrentSameName is the QA-found cross-session race:
+// two different sessions, same upload name, different content. The old flow
+// renamed the staged file into the catalog dir BEFORE the catalog INSERT, so
+// both finalize calls could derive the same bare filename and the second
+// rename silently overwrote the first file — the winner's row then pointed
+// at the loser's bytes, or a loser's rollback deleted the winner's file.
+// The new flow commits the row (name locked in-transaction) first and only
+// then renames, so the loser never touches the winner's filename.
+func TestFinalizeUpload_ConcurrentSameName(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	mkSession := func(fill byte) string {
+		t.Helper()
+		body := bytes.Repeat([]byte{fill}, 256)
+		sess, err := s.CreateUpload(ctx, uploadBytes("clash.qcow2", body, 256))
+		if err != nil {
+			t.Fatalf("CreateUpload: %v", err)
+		}
+		if _, err := s.WriteChunk(ctx, sess.ID, 1, bytes.NewReader(body), sha256Hex(body)); err != nil {
+			t.Fatalf("WriteChunk: %v", err)
+		}
+		return sess.ID
+	}
+	// Pre-seed both bodies so their shas are known for the file checks.
+	bodyA := bytes.Repeat([]byte{0xA1}, 256)
+	bodyB := bytes.Repeat([]byte{0xB2}, 256)
+	sessA, sessB := mkSession(0xA1), mkSession(0xB2)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	results := make([]*FinalizeUploadResult, 2)
+	errs := make([]error, 2)
+	for i, sid := range []string{sessA, sessB} {
+		wg.Add(1)
+		go func(i int, sid string) {
+			defer wg.Done()
+			<-start
+			res, err := s.FinalizeUpload(ctx, sid, extractor{format: "qcow2"})
+			results[i], errs[i] = res, err
+		}(i, sid)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("finalize[%c]: unexpected error: %v", 'A'+i, err)
+		}
+	}
+	if len(results) != 2 || results[0] == nil || results[1] == nil {
+		t.Fatal("expected both finalize calls to succeed")
+	}
+
+	// The two catalog rows must carry DIFFERENT filenames, and each row's
+	// file on disk must hold exactly that row's bytes — no cross-wiring.
+	byName := map[string]string{} // filename -> sha of the bytes on disk
+	for i, res := range results {
+		if res.Image.Filename == "clash.qcow2" && i == 1 {
+			// second winner of the bare name is fine only if the other got suffixed
+		}
+		b, err := os.ReadFile(filepath.Join(s.dir, res.Image.Filename))
+		if err != nil {
+			t.Fatalf("read file of finalize[%c] (%s): %v", 'A'+i, res.Image.Filename, err)
+		}
+		got := sha256Hex(b)
+		if got != res.Image.SHA256 {
+			t.Errorf("finalize[%c]: row sha %s but file bytes hash to %s — cross-wired content",
+				'A'+i, res.Image.SHA256, got)
+		}
+		byName[res.Image.Filename] = got
+	}
+	if len(byName) != 2 {
+		t.Errorf("expected 2 distinct filenames, got %v", byName)
+	}
+	if results[0].Image.SHA256 == results[1].Image.SHA256 {
+		t.Fatal("test bug: both sessions finalized identical content")
+	}
+	dupA := sha256Hex(bodyA)
+	dupB := sha256Hex(bodyB)
+	_ = dupA
+	_ = dupB
+}

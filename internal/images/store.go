@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -337,10 +338,6 @@ func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, er
 	if err != nil {
 		return nil, err
 	}
-	filename, err := s.uniqueFilename(ctx, in.Name, in.Format, in.SHA256)
-	if err != nil {
-		return nil, err
-	}
 	uploadedAt := time.Now().Unix()
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -358,15 +355,29 @@ func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, er
 		return nil, fmt.Errorf("dedupe check: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-        INSERT INTO images
-            (id, name, version, family, arch, format, size_bytes, virtual_size,
-             sha256, filename, uploaded_at, uploaded_by, notes, metadata_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, in.Name, in.Version, in.Family, in.Arch, in.Format, in.SizeBytes, in.VirtualSize,
-		in.SHA256, filename, uploadedAt, in.UploadedBy, in.Notes, in.MetadataJSON,
-	); err != nil {
-		return nil, fmt.Errorf("insert image: %w", err)
+	// Derive the filename INSIDE the transaction: the check-SELECT and the
+	// INSERT below share this write lock, so a concurrent FinalizeImage for
+	// the same name either sees our row (and suffixes its own name) or fails
+	// its INSERT on the UNIQUE index (retried with a suffix below).
+	filename, err := s.uniqueFilenameTx(ctx, tx, in.Name, in.Format, in.SHA256)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := s.insertImageTx(ctx, tx, id, filename, uploadedAt, in); err != nil {
+		var conflict *uniqueConstraintError
+		if errors.As(err, &conflict) {
+			// Lost the name race despite the lock (e.g. the UNIQUE index
+			// caught what the SELECT's snapshot missed). Re-derive with the
+			// forced -sha8 suffix and retry once — this name now belongs to us.
+			ext := filepath.Ext(filename)
+			filename = suffixedName(filename, ext, in.SHA256)
+			if _, err := s.insertImageTx(ctx, tx, id, filename, uploadedAt, in); err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 
 	if in.SessionID != "" {
@@ -396,6 +407,32 @@ func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, er
 		Notes:        in.Notes,
 		MetadataJSON: in.MetadataJSON,
 	}, nil
+}
+
+// uniqueConstraintError marks an INSERT that failed on the filename UNIQUE
+// index (see isUniqueConstraint); FinalizeImage retries once with a suffixed
+// name.
+type uniqueConstraintError struct{ err error }
+
+func (e *uniqueConstraintError) Error() string { return e.err.Error() }
+func (e *uniqueConstraintError) Unwrap() error { return e.err }
+
+func (s *Store) insertImageTx(ctx context.Context, tx *sql.Tx, id, filename string, uploadedAt int64, in FinalizeInput) (sql.Result, error) {
+	res, err := tx.ExecContext(ctx, `
+        INSERT INTO images
+            (id, name, version, family, arch, format, size_bytes, virtual_size,
+             sha256, filename, uploaded_at, uploaded_by, notes, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, in.Name, in.Version, in.Family, in.Arch, in.Format, in.SizeBytes, in.VirtualSize,
+		in.SHA256, filename, uploadedAt, in.UploadedBy, in.Notes, in.MetadataJSON,
+	)
+	if err != nil {
+		if isUniqueConstraint(err) && strings.Contains(err.Error(), "images.filename") {
+			return nil, &uniqueConstraintError{err: fmt.Errorf("insert image: %w", err)}
+		}
+		return nil, fmt.Errorf("insert image: %w", err)
+	}
+	return res, nil
 }
 
 // ListImages returns all images, most-recently-uploaded first.
