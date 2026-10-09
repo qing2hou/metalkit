@@ -214,8 +214,8 @@ func TestNeedsAuth_AllRegisteredRoutes(t *testing.T) {
 	if _, pat := mux.Handler(httptest.NewRequest(http.MethodGet, "/api/v1/definitely-not-registered", nil)); pat != "/" {
 		t.Fatalf("control probe resolved to %q, want catch-all \"/\" — resolvePattern cannot detect unregistered paths", pat)
 	}
-	if n := len(allRoutePatterns); n != 79 {
-		t.Errorf("allRoutePatterns has %d entries; the mux registers 78 (recounted Oct 2026) — update both the table and this number when routes change", n)
+	if n := len(allRoutePatterns); n != 80 {
+		t.Errorf("allRoutePatterns has %d entries; the mux registers 80 (recounted Oct 2026) — update both the table and this number when routes change", n)
 	}
 
 	open := openPatternSet()
@@ -277,6 +277,7 @@ var allRoutePatterns = []string{
 	"GET /api/v1/machines/{uuid}/reports",
 	"GET /api/v1/machines/{uuid}/reports/{id}",
 	"PATCH /api/v1/machines/{uuid}/notes",
+	"PATCH /api/v1/machines/{uuid}/location",
 	"DELETE /api/v1/machines/{uuid}",
 	"GET /api/v1/lookup",
 	// images

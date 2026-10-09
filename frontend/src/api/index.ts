@@ -44,6 +44,8 @@ export const machinesApi = {
   remove: (uuid: string) => apiSend<null>('DELETE', `/machines/${uuid}`),
   setNotes: (uuid: string, notes: string) =>
     apiSend<MachineSummary>('PATCH', `/machines/${uuid}/notes`, { notes }),
+  setLocation: (uuid: string, location: string) =>
+    apiSend<MachineSummary>('PATCH', `/machines/${uuid}/location`, { location }),
 }
 
 // ---------- images ----------

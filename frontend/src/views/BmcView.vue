@@ -259,7 +259,7 @@ const pagedTable = usePagedTable(list)
           <el-table-column label="更新时间" width="150">
             <template #default="{ row }">{{ fmtAbsolute(row.updated_at ?? row.created_at) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="300" fixed="right">
+          <el-table-column label="操作" min-width="240">
             <template #default="{ row }">
               <el-button text size="small" @click="test(asRow<BmcCredential>(row))">测试</el-button>
               <el-button text size="small" @click="onboard(asRow<BmcCredential>(row))">PXE 纳管</el-button>

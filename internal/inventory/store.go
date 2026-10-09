@@ -295,18 +295,33 @@ type MachineSummary struct {
 	// Notes is the operator's free-form remark on this machine ("库位 A-12",
 	// "数据库节点，勿动"). Not touched by agents or installs — purely manual.
 	Notes string `json:"notes"`
+	// Location is the machine's physical position ("A-12" rack unit, "机房2-R05").
+	// Also purely manual, like Notes.
+	Location string `json:"location"`
 }
 
 // SetNotes replaces one machine's operator remark. MaxNotesBytes caps the
 // payload so the listing can't be bloated through it.
 func (s *Store) SetNotes(ctx context.Context, uuid, notes string) error {
-	if len(notes) > MaxNotesBytes {
-		return fmt.Errorf("inventory: notes too long: %d > %d bytes", len(notes), MaxNotesBytes)
+	return s.setMachineField(ctx, uuid, "notes", notes)
+}
+
+// SetLocation replaces one machine's physical position remark, same rules
+// as SetNotes.
+func (s *Store) SetLocation(ctx context.Context, uuid, location string) error {
+	return s.setMachineField(ctx, uuid, "location", location)
+}
+
+// setMachineField is the shared UPDATE behind SetNotes / SetLocation. field
+// is a compile-time-trusted column name (never user input).
+func (s *Store) setMachineField(ctx context.Context, uuid, field, value string) error {
+	if len(value) > MaxNotesBytes {
+		return fmt.Errorf("inventory: %s too long: %d > %d bytes", field, len(value), MaxNotesBytes)
 	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE machines SET notes = ? WHERE uuid = ?`, notes, uuid)
+		`UPDATE machines SET `+field+` = ? WHERE uuid = ?`, value, uuid)
 	if err != nil {
-		return fmt.Errorf("set notes: %w", err)
+		return fmt.Errorf("set %s: %w", field, err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
@@ -350,11 +365,12 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
 			m                    MachineSummary
 			firstSeen, lastSeen  int64
 			serial, mfr, product sql.NullString
-			bmcIP, ipsCSV, notes sql.NullString
+			notes, location      sql.NullString
+			bmcIP, ipsCSV        sql.NullString
 			managed              bool
 		)
 		if err := rows.Scan(&m.UUID, &serial, &mfr, &product, &firstSeen, &lastSeen,
-			&m.Status, &m.LatestReport, &bmcIP, &managed, &notes, &ipsCSV); err != nil {
+			&m.Status, &m.LatestReport, &bmcIP, &managed, &notes, &location, &ipsCSV); err != nil {
 			return nil, fmt.Errorf("scan machine: %w", err)
 		}
 		m.Serial = serial.String
@@ -365,6 +381,7 @@ func (s *Store) ListMachines(ctx context.Context) ([]MachineSummary, error) {
 		m.BMCIP = bmcIP.String
 		m.BMCManaged = managed
 		m.Notes = notes.String
+		m.Location = location.String
 		if ipsCSV.String != "" {
 			m.IPv4Addresses = strings.Split(ipsCSV.String, ",")
 		}

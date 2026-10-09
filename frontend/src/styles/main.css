@@ -74,8 +74,9 @@ html.dark {
 
 /* ---------- 布局骨架 ---------- */
 
+/* 页面全宽：去掉最大宽度限制，信息密度优先（大屏机房监控台场景） */
 .mk-page {
-  max-width: 1280px;
+  max-width: none;
   margin: 0 auto;
   padding: var(--mk-space-6) var(--mk-space-6) 64px;
 }
@@ -232,6 +233,13 @@ html.dark .mk-terminal {
   white-space: normal;
   word-break: break-word;
   line-height: 1.5;
+}
+
+/* 无横向滚动：表格容器不出现水平滚动条，列自动收缩换行兜底
+   （配合各列 min-width 的弹性设定，正常屏宽下全部列都在一屏内） */
+.el-table.mk-table .el-scrollbar__wrap,
+.el-table.mk-table .el-scrollbar {
+  overflow-x: hidden !important;
 }
 
 /* 表格内小操作按钮对齐 */

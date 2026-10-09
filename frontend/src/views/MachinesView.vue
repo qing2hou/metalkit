@@ -125,6 +125,33 @@ function startEditNotes(row: MachineSummary): void {
   editingNotes.value = row.notes ?? ''
 }
 
+// ---------- 位置行内编辑（与备注同一模式，独立存放互不干扰） ----------
+const editingLoc = reactive({ uuid: null as string | null, value: '' })
+
+function startEditLoc(row: MachineSummary): void {
+  editingLoc.uuid = row.uuid
+  editingLoc.value = row.location ?? ''
+}
+
+let locSaving = false
+async function saveLoc(row: MachineSummary): Promise<void> {
+  if (locSaving) return
+  if (editingLoc.uuid !== row.uuid) return
+  const next = editingLoc.value.trim()
+  locSaving = true
+  try {
+    if (next !== (row.location ?? '')) {
+      await machinesApi.setLocation(row.uuid, next)
+      row.location = next
+    }
+  } catch (err) {
+    ElMessage.error(`位置保存失败: ${(err as Error).message}`)
+  } finally {
+    locSaving = false
+    editingLoc.uuid = null
+  }
+}
+
 let notesSaving = false
 async function saveNotes(row: MachineSummary): Promise<void> {
   if (notesSaving) return
@@ -248,7 +275,7 @@ const pagedTable = usePagedTable(filtered)
           @row-click="openDetail"
           style="cursor: pointer"
         >
-          <el-table-column label="状态" width="90">
+          <el-table-column label="状态" min-width="70">
             <template #default="{ row }">
               <StatusTag :status="row.status" raw />
             </template>
@@ -260,29 +287,52 @@ const pagedTable = usePagedTable(filtered)
               <span v-else class="mk-subtle">—</span>
             </template>
           </el-table-column>
-          <el-table-column label="BMC 地址" width="140">
+          <el-table-column label="BMC 地址" min-width="110">
             <template #default="{ row }">
               <span v-if="row.bmc_ip" class="mono">{{ row.bmc_ip }}</span>
               <span v-else class="mk-subtle">—</span>
             </template>
           </el-table-column>
-          <el-table-column label="序列号" min-width="140">
+          <el-table-column label="序列号" min-width="90">
             <template #default="{ row }">{{ row.serial || '—' }}</template>
           </el-table-column>
-          <el-table-column label="UUID" min-width="240">
+          <el-table-column label="UUID" min-width="170">
             <template #default="{ row }">
               <CopyableText :text="row.uuid" :label="row.uuid" />
             </template>
           </el-table-column>
-          <el-table-column label="机型" min-width="180">
+          <el-table-column label="机型" min-width="120">
             <template #default="{ row }">
               {{ [row.manufacturer, row.product_name].filter(Boolean).join(' ') || '—' }}
             </template>
           </el-table-column>
-          <el-table-column label="BMC" width="70">
+          <el-table-column label="BMC" min-width="56">
             <template #default="{ row }">
               <el-tag v-if="row.bmc_managed" type="success" size="small" disable-transitions>纳管</el-tag>
               <span v-else class="mk-subtle">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="位置" min-width="110">
+            <template #default="{ row }">
+              <el-tooltip v-if="row.location && row.location !== editingLoc.uuid" :content="row.location" placement="top">
+                <span class="mk-notes" @click.stop="startEditLoc(asRow<MachineSummary>(row))">{{ row.location }}</span>
+              </el-tooltip>
+              <el-input
+                v-if="editingLoc.uuid === row.uuid"
+                v-model="editingLoc.value"
+                size="small"
+                maxlength="80"
+                placeholder="机房/机柜/U位"
+                @click.stop
+                @keyup.enter="saveLoc(asRow<MachineSummary>(row))"
+                @keyup.esc="editingLoc.uuid = null"
+                @blur="saveLoc(asRow<MachineSummary>(row))"
+              />
+              <span
+                v-else-if="!row.location"
+                class="mk-subtle mk-notes-add"
+                @click.stop="startEditLoc(asRow<MachineSummary>(row))"
+              >＋ 位置</span>
             </template>
           </el-table-column>
           <el-table-column label="备注" min-width="150">
@@ -308,10 +358,10 @@ const pagedTable = usePagedTable(filtered)
               >＋ 备注</span>
             </template>
           </el-table-column>
-          <el-table-column label="最近上报" width="120">
+          <el-table-column label="最近上报" min-width="90">
             <template #default="{ row }">{{ fmtRelative(row.last_seen) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="170" fixed="right">
+          <el-table-column label="操作" min-width="150">
             <template #default="{ row }">
               <el-button text size="small" @click.stop="openDetail(asRow<MachineSummary>(row))">详情</el-button>
               <el-button

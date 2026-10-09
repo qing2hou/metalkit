@@ -7,6 +7,7 @@ package inventory
 // (same pattern as bindings/images).
 var migrations = []string{
 	"ALTER TABLE machines ADD COLUMN notes TEXT NOT NULL DEFAULT ''",
+	"ALTER TABLE machines ADD COLUMN location TEXT NOT NULL DEFAULT ''",
 }
 
 const schemaSQL = `
@@ -19,7 +20,8 @@ CREATE TABLE IF NOT EXISTS machines (
     last_seen     INTEGER NOT NULL,
     status        TEXT NOT NULL CHECK(status IN ('online','offline','unknown')),
     latest_report INTEGER,
-    notes         TEXT NOT NULL DEFAULT ''
+    notes         TEXT NOT NULL DEFAULT '',
+    location      TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS machine_macs (

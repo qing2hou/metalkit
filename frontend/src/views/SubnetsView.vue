@@ -243,7 +243,7 @@ const pagedTable = usePagedTable(list)
           <el-table-column label="创建时间" width="150">
             <template #default="{ row }">{{ fmtAbsolute(row.created_at) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="140" fixed="right">
+          <el-table-column label="操作" min-width="120">
             <template #default="{ row }">
               <el-button text size="small" @click="openEdit(asRow<Subnet>(row))">编辑</el-button>
               <el-button text size="small" type="danger" @click="remove(asRow<Subnet>(row))">删除</el-button>

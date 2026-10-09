@@ -210,7 +210,7 @@ const pagedTable = usePagedTable(filtered)
               <span v-else class="mk-subtle">—</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="130" fixed="right">
+          <el-table-column label="操作" min-width="110">
             <template #default="{ row }">
               <router-link :to="`/jobs/${row.id}`"><el-button text size="small">详情</el-button></router-link>
               <el-button
