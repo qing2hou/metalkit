@@ -152,7 +152,7 @@ http://<server-ip>:9090/ui/
 ### 构建
 
 ```bash
-cd /opt/claude/metalkit
+cd /opt/metalkit
 
 # 构建二进制
 go build -buildvcs=false -o bin/controller ./cmd/controller
@@ -228,7 +228,7 @@ sudo systemctl restart metalkit-controller
 ## 📂 项目结构
 
 ```
-/opt/claude/metalkit/              # 开发源码
+/opt/metalkit/              # 开发源码
 ├── cmd/                           # 主程序入口
 │   ├── controller/                # metalkit-controller（服务端）
 │   └── agent/                     # metalkit-agent（live 镜像内）
@@ -294,4 +294,4 @@ sudo systemctl restart metalkit-controller
 - **查看日志**：`journalctl -u metalkit-controller -f`
 - **运行自检**：`/opt/metalkit/bin/metalkit-controller doctor -config /etc/metalkit/config.yaml`
 - **文档**：[DEPLOY.md](./DEPLOY.md) | [DEVELOP.md](./DEVELOP.md)
-- **live系统默认密码：root/metalkit
+- **live 系统默认密码**：`root` / `metalkit`

@@ -54,7 +54,7 @@ MetalKit 是一个**单二进制裸机 PXE 自动装机系统**。controller 进
 | **Subnet** | 装完机后机器落到哪个网段（CIDR / 网关 / DNS / VLAN） |
 | **Profile** | 装机套餐：镜像 + root 密码 + cloud-init 模板 + 网络/disk 策略，可复用给多台机器 |
 | **Binding** | 把某台 machine + profile + subnet 三方绑定，声明"这台机器要装成什么样" |
-| **Job** | 一次具体装机任务的执行实例，状态机 `pending → installing → succeeded / failed` |
+| **Job** | 一次具体装机任务的执行实例，状态机 `pending → running → succeeded / failed / cancelled` |
 | **BMC 凭据** | 机器的 IPMI 用户名/密码，AES-256 加密入库，UI 拿不回明文 |
 
 ---
@@ -394,12 +394,10 @@ binding 一建立，5 秒内 orchestrator 会自动创建 Job，触发 BMC 上�
 | 状态 | 含义 |
 |---|---|
 | `pending` | 已创建，orchestrator 还没触发 BMC |
-| `preparing` | 正在触发 BMC 上电 + PXE |
-| `installing` | agent 已领取 job，正在写盘 |
-| `finalizing` | 写盘完成，正在切回硬盘启动 |
+| `running` | agent 已领取 job，正在写盘（细分进度看 stage 字段） |
 | `succeeded` | 装机完成，机器应该已经进新系统 |
 | `failed` | 失败，点进去看错误码和日志 |
-| `canceled` | 人工取消 |
+| `cancelled` | 人工取消 |
 
 ### 10.2 单任务详情
 
@@ -421,7 +419,7 @@ Job 进入 `succeeded` 状态需要满足：
 
 ### 10.4 取消任务
 
-`POST /api/v1/jobs/{id}/cancel`，或在 Web UI 点 "Cancel"。运行中的 job 标 `canceling`，agent 下次 poll 时退出。
+`POST /api/v1/jobs/{id}/cancel`，或在 Web UI 点 "Cancel"。运行中的 job 标 `cancelled`，agent 下次 poll 时退出。
 
 ---
 
@@ -461,7 +459,9 @@ Job 进入 `succeeded` 状态需要满足：
 
 ## 12. API 速查
 
-所有 API 走 Basic Auth（`admin:metalkit`），除了 agent 端点（`/api/v1/agent/*`、`/api/v1/report`、`/api/v1/heartbeat/*`）开放。
+所有操作类 API 需要认证：浏览器走 Web UI 登录（session cookie），curl 走 Basic Auth（`admin:<adminPass>`）；agent 端点（`/api/v1/agent/*`、`/api/v1/report`、`/api/v1/heartbeat/*`）开放。
+
+> ⚠️ 本节是速查备忘；端点与字段的权威定义在 `docs/api.md`，两者不一致时以 `docs/api.md` 为准。
 
 ### 12.1 机器
 
@@ -482,9 +482,11 @@ curl -u admin:metalkit "http://192.168.10.120:8080/api/v1/lookup?mac=aa:bb:cc:dd
 # 列出镜像
 curl -u admin:metalkit http://192.168.10.120:8080/api/v1/images
 
-# 修改 family / format
-curl -u admin:metalkit -X PATCH http://192.168.10.120:8080/api/v1/images/<sha> \
-  -d '{"family":"rocky","format":"qcow2"}'
+# 单镜像详情（family/format 由上传时的文件名自动识别，当前 API 不支持改）：
+curl -u admin:metalkit http://192.168.10.120:8080/api/v1/images/<id>
+
+# 删除
+curl -u admin:metalkit -X DELETE http://192.168.10.120:8080/api/v1/images/<id>
 ```
 
 ### 12.3 Profile
@@ -505,25 +507,32 @@ curl -u admin:metalkit -X POST http://192.168.10.120:8080/api/v1/profiles -d '{
 # 列出
 curl -u admin:metalkit http://192.168.10.120:8080/api/v1/profiles
 
-# 部分更新（只改 chroot_dns）
-curl -u admin:metalkit -X PATCH http://192.168.10.120:8080/api/v1/profiles/<id> \
-  -d '{"chroot_dns":"8.8.8.8, 1.1.1.1"}'
+# 更新（PUT，整对象；HTTP API 以 docs/api.md 为准）
+curl -u admin:metalkit -X PUT http://192.168.10.120:8080/api/v1/profiles/<id> -d '{
+  "name": "rocky10-dell",
+  "hostname_template": "node-{{.Index}}",
+  "os_family": "rocky",
+  "image_id": "<sha>",
+  "target_disk": {"selector":"largest","min_size_gb":100},
+  "network": {"method":"static","interface":"bond0","bond_mode":4,"bond_slaves":["eno1","eno2"]},
+  "chroot_dns": "8.8.8.8, 1.1.1.1"
+}'
 ```
 
 ### 12.4 Binding
 
 ```bash
-# 创建 binding 并立即装机
-curl -u admin:metalkit -X POST http://192.168.10.120:8080/api/v1/bindings -d '{
-  "machine_uuid": "<uuid>",
+# 创建/更新 binding（PUT upsert，一台机器一行；立即装机加 desired_state）
+curl -u admin:metalkit -X PUT http://192.168.10.120:8080/api/v1/bindings/<uuid> -d '{
+  "image_id": "<image-id>",
   "profile_id": "<profile-id>",
   "subnet_id": "<subnet-id>",
   "desired_state": "install"
 }'
 
-# 改 desired_state 触发重装
-curl -u admin:metalkit -X PATCH http://192.168.10.120:8080/api/v1/bindings/<uuid> \
-  -d '{"desired_state":"reinstall"}'
+# 触发重装（PUT 改 desired_state；不传的字段保持原值）
+curl -u admin:metalkit -X PUT http://192.168.10.120:8080/api/v1/bindings/<uuid> \
+  -d '{"image_id":"<image-id>","profile_id":"<profile-id>","desired_state":"reinstall"}'
 ```
 
 ### 12.5 Job
