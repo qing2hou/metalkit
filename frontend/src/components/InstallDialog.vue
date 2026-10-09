@@ -120,7 +120,15 @@ watch(
     const b = props.binding
     form.imageId = b?.image_id ?? ''
     form.profileId = b?.profile_id ?? ''
-    form.desiredState = isReinstall.value ? 'reinstall' : ((b?.desired_state as 'install') ?? 'install')
+    // 期望状态预填：binding 的 none 不是「用户上次想要 none」，而是
+    // 「意图已消费/未表达」——必须回落到 install，否则表单会把 none
+    // 原样发回（两个 radio 都不选中，提交后 orchestrator 永不建 job）。
+    // 真实事故：连续三次「保存并发装」toast 全绿但零作业，因为预填把
+    // 上一轮消费完的 none 带进了 payload。
+    const persisted = b?.desired_state === 'install' || b?.desired_state === 'reinstall'
+      ? b.desired_state
+      : 'install'
+    form.desiredState = isReinstall.value ? 'reinstall' : persisted
     form.subnetId = b?.subnet_id ?? ''
     if (b?.static_address) {
       form.ipMode = 'static'
