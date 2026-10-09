@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"metalkit/internal/crypto"
@@ -49,6 +50,18 @@ type Store struct {
 	logger *slog.Logger
 	cipher *crypto.Cipher
 	prober IPProber // liveness probe used when auto-allocating static IPs
+
+	// allocMu serialises the address-decision section of Upsert (keep-existing
+	// reads → auto-allocate → INSERT). auto-allocation is a check-then-act
+	// sequence over shared state (other bindings' static_address, DHCP leases):
+	// without the lock, two concurrent PUTs for different machines in the same
+	// subnet both read the same "free" IP and each wins its own INSERT — the
+	// row-level upsert cannot see the other transaction's write. Locking all of
+	// Upsert (rather than just allocateIPFromSubnet) also covers the sticky /
+	// keep-existing SELECTs against a concurrent writer. Bindings writes are
+	// rare (pre-install configuration), so whole-Upsert serialisation is fine.
+	// Mirrors leases.Store.allocMu, which guards the same race for DHCP pools.
+	allocMu sync.Mutex
 }
 
 // NewStore applies the bindings schema and returns a Store. The schema must
@@ -196,6 +209,10 @@ type UpsertInput struct {
 //
 // Returns ErrMachineUnknown / ErrImageUnknown / ErrProfileUnknown if any
 // referenced row is missing — callers should surface those as 422 or 400.
+//
+// The keep-existing reads + auto-allocation + INSERT run under allocMu: the
+// address decision reads shared state (other bindings' addresses, DHCP
+// leases) and must not interleave with another Upsert's INSERT (see allocMu).
 func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 	muuid, err := validateMachineUUID(in.MachineUUID)
 	if err != nil {
@@ -255,6 +272,13 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 		return nil, err
 	}
 
+	// From here on we read "existing row" state and (possibly) auto-allocate
+	// an address — everything until the INSERT below must be serialized
+	// against other Upserts (allocMu). Read-only cross-table checks above
+	// stay outside the lock.
+	s.allocMu.Lock()
+	defer s.allocMu.Unlock()
+
 	// Three-state subnet_id, vlan_override and nic_selector_override
 	// resolution. Defaults: keep whatever the row currently holds. Empty
 	// string / 0 = clear (NULL).
@@ -268,9 +292,14 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 	var existingNICSel sql.NullString
 	var existingAgentInstalled sql.NullInt64
 	if keepExistingSubnet || keepExistingVLAN || keepExistingNICSel || keepExistingAgentInstalled {
-		_ = s.db.QueryRowContext(ctx,
+		err = s.db.QueryRowContext(ctx,
 			`SELECT subnet_id, vlan_override, nic_selector_override, agent_installed_override FROM bindings WHERE machine_uuid = ?`, muuid).
 			Scan(&existingSubnet, &existingVLAN, &existingNICSel, &existingAgentInstalled)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			// Degrading to "nothing to keep" here would silently clear the
+			// overrides the caller asked to preserve.
+			return nil, fmt.Errorf("load existing subnet/vlan/nic/agent overrides: %w", err)
+		}
 	}
 
 	var subnetIDSQL any
@@ -406,11 +435,15 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 	var existingPasswordCT []byte
 	var existingTargetDisk, existingBond sql.NullString
 	if keepExistingPassword || keepExistingTargetDisk || keepExistingBond {
-		_ = s.db.QueryRowContext(ctx,
+		err = s.db.QueryRowContext(ctx,
 			`SELECT root_password_enc, target_disk_override, bond_override FROM bindings WHERE machine_uuid = ?`, muuid).
 			Scan(&existingPasswordCT, &existingTargetDisk, &existingBond)
-		// QueryRow err is silently ignored: a missing row just leaves zero
-		// values, which is the same as "first insert, nothing to keep".
+		// sql.ErrNoRows (first insert, nothing to keep) is fine; any other
+		// failure must not degrade to "no previous value" — that would clear
+		// the password/overrides the caller asked to keep.
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("load existing password/target_disk/bond overrides: %w", err)
+		}
 	}
 
 	var passwordCT []byte
@@ -982,9 +1015,14 @@ func (s *Store) allocateIPFromSubnet(ctx context.Context, machineUUID, cidr, gat
 	// Sticky: a re-PUT without an explicit address keeps the existing one when
 	// it is still inside this subnet and not a special address.
 	var own string
-	_ = s.db.QueryRowContext(ctx,
+	err = s.db.QueryRowContext(ctx,
 		`SELECT COALESCE(static_address, '') FROM bindings WHERE machine_uuid = ?`, machineUUID).
 		Scan(&own)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// A DB failure must not degrade to "no previous address": that would
+		// hand out a fresh IP to a host that already holds one.
+		return "", fmt.Errorf("load existing static_address for sticky allocation: %w", err)
+	}
 	if own != "" {
 		if ip := net.ParseIP(own).To4(); ip != nil && ipnet.Contains(ip) &&
 			!ip.Equal(network) && !isBroadcast(ip, ipnet) {
