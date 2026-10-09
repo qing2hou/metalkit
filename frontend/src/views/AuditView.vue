@@ -63,7 +63,8 @@ const actionFilters = [
   <AppShell>
     <div class="mk-page">
       <header class="mk-page-header">
-        <h1 class="mk-page-title">审计日志</h1>
+        <h1 class="mk-page-title">审计</h1>
+        <p class="mk-page-sub">谁在何时对哪台机器做了什么</p>
         <el-button :icon="Refresh" circle aria-label="刷新" @click="load" />
       </header>
 
@@ -91,7 +92,7 @@ const actionFilters = [
           </el-select>
         </div>
 
-        <el-table v-loading="loading" :data="list" stripe size="small">
+        <el-table class="mk-table" v-loading="loading" :data="list" stripe size="small">
           <el-table-column label="时间" width="170">
             <template #default="{ row }">{{ fmtAbsolute(row.ts) }}</template>
           </el-table-column>

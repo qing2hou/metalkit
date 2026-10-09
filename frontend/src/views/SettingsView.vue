@@ -237,7 +237,8 @@ function onModeChange(mode: 'proxy' | 'full'): void {
   <AppShell>
     <div class="mk-page">
       <header class="mk-page-header">
-        <h1 class="mk-page-title">设置 · DHCP</h1>
+        <h1 class="mk-page-title">设置</h1>
+        <p class="mk-page-sub">控制器运行参数</p>
       </header>
 
       <el-card v-loading="loading" class="mk-card">

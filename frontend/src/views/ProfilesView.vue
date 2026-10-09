@@ -211,12 +211,13 @@ async function remove(row: Profile): Promise<void> {
   <AppShell>
     <div class="mk-page">
       <header class="mk-page-header">
-        <h1 class="mk-page-title">安装配置（Profiles）</h1>
+        <h1 class="mk-page-title">安装配置</h1>
+        <p class="mk-page-sub">装机模板 — 镜像 / 磁盘 / 网络 / 密码策略</p>
         <el-button type="primary" :icon="Plus" @click="openCreate">新建 Profile</el-button>
       </header>
 
       <el-card class="mk-card">
-        <el-table v-loading="loading" :data="list" stripe>
+        <el-table class="mk-table" v-loading="loading" :data="list" stripe>
           <el-table-column prop="name" label="名称" min-width="160" />
           <el-table-column prop="os_family" label="OS 家族" width="110" />
           <el-table-column label="主机名模板" min-width="180">

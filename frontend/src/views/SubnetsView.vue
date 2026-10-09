@@ -208,11 +208,12 @@ async function remove(row: Subnet): Promise<void> {
     <div class="mk-page">
       <header class="mk-page-header">
         <h1 class="mk-page-title">子网</h1>
+        <p class="mk-page-sub">装机网络段 — 网关 / DNS / DHCP 池与静态地址分配</p>
         <el-button type="primary" @click="openCreate">新建子网</el-button>
       </header>
 
       <el-card class="mk-card">
-        <el-table v-loading="loading" :data="list" stripe>
+        <el-table class="mk-table" v-loading="loading" :data="list" stripe>
           <el-table-column prop="name" label="名称" min-width="140" />
           <el-table-column prop="cidr" label="CIDR" min-width="160">
             <template #default="{ row }"><span class="mono">{{ row.cidr }}</span></template>

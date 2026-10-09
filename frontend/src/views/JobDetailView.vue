@@ -209,7 +209,8 @@ function exportLogs(): void {
     <div v-loading="loading" class="mk-page">
       <header class="mk-page-header">
         <h1 class="mk-page-title">作业详情</h1>
-        <div class="mk-header-right">
+        <p class="mk-page-sub">阶段时间线 / 实时日志 / 错误定位</p>
+        <div class="mk-header-actions">
           <el-button :icon="Refresh" circle aria-label="刷新" @click="refreshAll" />
           <el-button v-if="job && !isTerminal" type="warning" @click="cancelJob">取消作业</el-button>
           <el-button v-if="job && isTerminal" @click="retry">重试</el-button>
@@ -288,7 +289,7 @@ function exportLogs(): void {
 </template>
 
 <style scoped>
-.mk-header-right {
+.mk-header-actions {
   display: flex;
   gap: 10px;
   align-items: center;

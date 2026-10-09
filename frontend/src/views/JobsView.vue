@@ -154,8 +154,9 @@ const runningCount = computed(() => list.value.filter((j) => j.status === 'runni
         style="margin-bottom: 12px"
       />
       <header class="mk-page-header">
-        <h1 class="mk-page-title">装机作业</h1>
-        <div class="mk-header-right">
+        <h1 class="mk-page-title">作业</h1>
+        <p class="mk-page-sub">装机任务的执行记录与实时进度</p>
+        <div class="mk-header-actions">
           <span v-if="runningCount" class="mk-subtle">{{ runningCount }} 个进行中 · 5s 自动刷新</span>
           <el-button :icon="Refresh" circle aria-label="刷新" @click="load" />
           <el-button type="danger" plain @click="purgeFinished">清除已完成</el-button>
@@ -181,7 +182,7 @@ const runningCount = computed(() => list.value.filter((j) => j.status === 'runni
           <el-checkbox v-model="filters.last24h">最近 24 小时</el-checkbox>
         </div>
 
-        <el-table v-loading="loading" :data="filtered" stripe size="small">
+        <el-table class="mk-table" v-loading="loading" :data="filtered" stripe size="small">
           <el-table-column label="状态" width="90">
             <template #default="{ row }"><StatusTag :status="row.status" /></template>
           </el-table-column>
@@ -243,7 +244,7 @@ const runningCount = computed(() => list.value.filter((j) => j.status === 'runni
   margin-bottom: 14px;
 }
 
-.mk-header-right {
+.mk-header-actions {
   display: flex;
   gap: 10px;
   align-items: center;

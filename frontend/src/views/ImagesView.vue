@@ -336,6 +336,7 @@ async function remove(row: Image): Promise<void> {
     <div class="mk-page">
       <header class="mk-page-header">
         <h1 class="mk-page-title">镜像</h1>
+        <p class="mk-page-sub">可部署的操作系统镜像，上传后按内容寻址存储</p>
         <el-button type="primary" :icon="Plus" @click="uploadVisible = true">上传镜像</el-button>
       </header>
 
@@ -348,7 +349,7 @@ async function remove(row: Image): Promise<void> {
             <el-radio-button value="unknown">未知 ({{ archCounts.unknown }})</el-radio-button>
           </el-radio-group>
         </div>
-        <el-table v-loading="loading" :data="filtered" stripe>
+        <el-table class="mk-table" v-loading="loading" :data="filtered" stripe>
           <el-table-column prop="name" label="名称" min-width="180" />
           <el-table-column prop="version" label="版本" width="110" />
           <el-table-column prop="family" label="OS 家族" width="110" />

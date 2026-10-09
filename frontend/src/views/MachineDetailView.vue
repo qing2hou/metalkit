@@ -247,7 +247,8 @@ function viewHistoryItem(meta: ReportMeta): void {
       />
       <header class="mk-page-header">
         <h1 class="mk-page-title">机器详情</h1>
-        <div class="mk-header-right">
+        <p class="mk-page-sub">硬件清单 / 装机绑定 / 作业历史与 BMC 控制</p>
+        <div class="mk-header-actions">
           <el-button v-if="summary?.bmc_ip" @click="syncBmc">同步 BMC</el-button>
           <el-button :icon="Refresh" circle aria-label="刷新" @click="load" />
         </div>
@@ -384,7 +385,7 @@ function viewHistoryItem(meta: ReportMeta): void {
             <router-link to="/jobs"><el-button text size="small">全部作业 →</el-button></router-link>
           </div>
         </template>
-        <el-table :data="recentJobs" stripe size="small">
+        <el-table class="mk-table" :data="recentJobs" stripe size="small">
           <el-table-column label="状态" width="90">
             <template #default="{ row }"><StatusTag :status="row.status" /></template>
           </el-table-column>
@@ -413,7 +414,7 @@ function viewHistoryItem(meta: ReportMeta): void {
       <!-- 上报历史 -->
       <el-card class="mk-card">
         <template #header><span>上报历史（最近 20 次）</span></template>
-        <el-table :data="reportHistory" stripe size="small">
+        <el-table class="mk-table" :data="reportHistory" stripe size="small">
           <el-table-column prop="id" label="ID" width="80" />
           <el-table-column label="采集时间" width="180">
             <template #default="{ row }">{{ fmtAbsolute(row.collected_at) }}</template>
@@ -460,7 +461,7 @@ function viewHistoryItem(meta: ReportMeta): void {
           </el-collapse-item>
 
           <el-collapse-item :title="`内存（${fmtBytes(report?.memory?.total_bytes)}）`" name="memory">
-            <el-table :data="report?.memory?.dimms ?? []" stripe size="small">
+            <el-table class="mk-table" :data="report?.memory?.dimms ?? []" stripe size="small">
               <el-table-column prop="slot" label="插槽" width="100" />
               <el-table-column label="容量" width="110">
                 <template #default="{ row }">{{ fmtBytes(row.size_bytes) }}</template>
@@ -473,7 +474,7 @@ function viewHistoryItem(meta: ReportMeta): void {
           </el-collapse-item>
 
           <el-collapse-item title="磁盘" name="disks">
-            <el-table :data="report?.disks ?? []" stripe size="small">
+            <el-table class="mk-table" :data="report?.disks ?? []" stripe size="small">
               <el-table-column prop="kname" label="设备" width="80" />
               <el-table-column prop="type" label="类型" width="70" />
               <el-table-column label="容量" width="100">
@@ -493,7 +494,7 @@ function viewHistoryItem(meta: ReportMeta): void {
           </el-collapse-item>
 
           <el-collapse-item title="网卡" name="nics">
-            <el-table :data="report?.nics ?? []" stripe size="small">
+            <el-table class="mk-table" :data="report?.nics ?? []" stripe size="small">
               <el-table-column prop="name" label="接口" width="90" />
               <el-table-column label="MAC" min-width="170">
                 <template #default="{ row }"><span class="mono">{{ row.mac }}</span></template>
@@ -607,7 +608,7 @@ function viewHistoryItem(meta: ReportMeta): void {
 </template>
 
 <style scoped>
-.mk-header-right {
+.mk-header-actions {
   display: flex;
   gap: 10px;
   align-items: center;

@@ -233,7 +233,8 @@ async function doImport(): Promise<void> {
   <AppShell>
     <div class="mk-page">
       <header class="mk-page-header">
-        <h1 class="mk-page-title">BMC 凭据</h1>
+        <h1 class="mk-page-title">BMC</h1>
+        <p class="mk-page-sub">带外管理凭据 — 支持电源控制与 PXE 引导</p>
         <div>
           <el-button @click="importVisible = true">CSV 导入</el-button>
           <el-button type="primary" :icon="Plus" @click="openCreate">新建凭据</el-button>
@@ -241,7 +242,7 @@ async function doImport(): Promise<void> {
       </header>
 
       <el-card class="mk-card">
-        <el-table v-loading="loading" :data="list" stripe>
+        <el-table class="mk-table" v-loading="loading" :data="list" stripe>
           <el-table-column prop="ip" label="BMC IP" min-width="140">
             <template #default="{ row }"><span class="mono">{{ row.ip }}</span></template>
           </el-table-column>

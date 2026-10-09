@@ -195,8 +195,9 @@ async function remove(row: MachineSummary): Promise<void> {
         style="margin-bottom: 12px"
       />
       <header class="mk-page-header">
-        <h1 class="mk-page-title">机器列表</h1>
-        <div class="mk-header-right">
+        <h1 class="mk-page-title">机器</h1>
+        <p class="mk-page-sub">裸机清单与装机入口 — 序列号 / UUID / BMC 一览</p>
+        <div class="mk-header-actions">
           <span class="mk-subtle">{{ remainingSec }}s 后自动刷新</span>
           <el-button :icon="Refresh" circle aria-label="立即刷新" @click="refreshNow" />
         </div>
@@ -222,7 +223,7 @@ async function remove(row: MachineSummary): Promise<void> {
           </el-radio-group>
         </div>
 
-        <el-table
+        <el-table class="mk-table"
           v-loading="loading"
           :data="filtered"
           stripe
@@ -312,7 +313,7 @@ async function remove(row: MachineSummary): Promise<void> {
   flex-wrap: wrap;
 }
 
-.mk-header-right {
+.mk-header-actions {
   display: flex;
   align-items: center;
   gap: 10px;

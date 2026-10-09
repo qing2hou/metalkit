@@ -28,6 +28,14 @@ const emit = defineEmits<{
 
 const isReinstall = computed(() => props.intent === 'reinstall')
 
+// 底部操作提示：把「哪个按钮会动真格」写明，防止把「仅保存」当成触发装机
+// （真实事故：2026-10-09 运维点「仅保存」后以为重装在排队）。
+const dispatchHint = computed(() =>
+  isReinstall.value
+    ? '「仅保存配置」不会重装；重装需走右侧红色按钮并二次确认'
+    : '「仅保存配置」不发装机；「保存并发装」才会触发装机',
+)
+
 const visible = computed({
   get: () => props.modelValue,
   set: (v) => emit('update:modelValue', v),
@@ -627,22 +635,33 @@ async function submit(dispatch: boolean): Promise<void> {
     </el-form>
 
     <template #footer>
-      <el-button @click="visible = false">取消</el-button>
-      <el-button :loading="saving" :disabled="!canSubmit" @click="submit(false)">
-        仅保存配置
-      </el-button>
-      <el-button
-        v-if="isReinstall"
-        type="danger"
-        :loading="saving"
-        :disabled="!canSubmit"
-        @click="confirmReinstall"
-      >
-        确认重装并执行
-      </el-button>
-      <el-button v-else type="primary" :loading="saving" :disabled="!canSubmit" @click="submit(true)">
-        保存并发装
-      </el-button>
+      <div class="mk-dialog-footer">
+        <div class="mk-footer-main">
+          <el-button text :loading="saving" :disabled="!canSubmit" @click="submit(false)">
+            仅保存配置
+          </el-button>
+          <span class="mk-footer-hint mk-subtle">
+            {{ dispatchHint }}
+          </span>
+        </div>
+        <div class="mk-footer-actions">
+          <el-button v-if="isReinstall" type="danger" plain :loading="saving" :disabled="!canSubmit" @click="submit(false)">
+            仅保存配置（不重装）
+          </el-button>
+          <el-button
+            v-if="isReinstall"
+            type="danger"
+            :loading="saving"
+            :disabled="!canSubmit"
+            @click="confirmReinstall"
+          >
+            确认重装并执行
+          </el-button>
+          <el-button v-else type="primary" :loading="saving" :disabled="!canSubmit" @click="submit(true)">
+            保存并发装
+          </el-button>
+        </div>
+      </div>
     </template>
   </el-dialog>
 </template>
@@ -652,5 +671,33 @@ async function submit(dispatch: boolean): Promise<void> {
   display: flex;
   gap: 8px;
   width: 100%;
+}
+
+/* 弹窗底部的两区布局：左侧仅保存+说明，右侧主/危险操作。
+   视觉权重从左到右递增，防止把「仅保存」当成触发装机的按钮。 */
+.mk-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--mk-space-4);
+  width: 100%;
+}
+
+.mk-footer-main {
+  display: flex;
+  align-items: center;
+  gap: var(--mk-space-3);
+  min-width: 0;
+}
+
+.mk-footer-hint {
+  line-height: 1.4;
+}
+
+.mk-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--mk-space-2);
+  flex-shrink: 0;
 }
 </style>
