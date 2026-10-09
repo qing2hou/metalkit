@@ -3,9 +3,11 @@ package bmc
 import (
 	"context"
 	"encoding/json"
+
 	"errors"
 	"fmt"
 	"log/slog"
+	"metalkit/internal/apiutil"
 	"net/http"
 	"strings"
 	"time"
@@ -133,7 +135,7 @@ func (a *API) reconcile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "reconcile failed: "+err.Error())
 		return
 	}
-	a.logger.Info("bmc reconciled (manual)", "uuid", uuid, "bmc_ip", ip, "migrated", migrated, "by", basicAuthUser(r))
+	a.logger.Info("bmc reconciled (manual)", "uuid", uuid, "bmc_ip", ip, "migrated", migrated, "by", apiutil.RequestActor(r))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       true,
 		"migrated": migrated,
@@ -180,7 +182,7 @@ func (a *API) upsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.MachineUUID = r.PathValue("uuid")
-	in.UpdatedBy = basicAuthUser(r)
+	in.UpdatedBy = apiutil.RequestActor(r)
 
 	c, err := a.store.Upsert(r.Context(), in)
 	switch {
@@ -218,7 +220,7 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	in.UpdatedBy = basicAuthUser(r)
+	in.UpdatedBy = apiutil.RequestActor(r)
 
 	// Validate the IP first so the derived uuid is well-formed; everything
 	// else gets re-validated inside Upsert.
@@ -362,7 +364,7 @@ func (a *API) power(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": perr.Error()})
 		return
 	}
-	a.logger.Info("bmc power action", "uuid", uuid, "action", action, "by", basicAuthUser(r))
+	a.logger.Info("bmc power action", "uuid", uuid, "action", action, "by", apiutil.RequestActor(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": action})
 }
 
@@ -407,15 +409,8 @@ func (a *API) onboard(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": perr.Error()})
 		return
 	}
-	a.logger.Info("bmc onboard", "uuid", uuid, "ip", cred.IP, "by", basicAuthUser(r))
+	a.logger.Info("bmc onboard", "uuid", uuid, "ip", cred.IP, "by", apiutil.RequestActor(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "onboard"})
-}
-
-func basicAuthUser(r *http.Request) string {
-	if u, _, ok := r.BasicAuth(); ok {
-		return u
-	}
-	return "anonymous"
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

@@ -2,9 +2,11 @@ package jobs
 
 import (
 	"encoding/json"
+
 	"errors"
 	"fmt"
 	"log/slog"
+	"metalkit/internal/apiutil"
 	"net/http"
 	"strconv"
 	"strings"
@@ -145,7 +147,7 @@ func (a *API) cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Record who cancelled so operators can trace it in the logs.
-	_ = a.store.AppendLog(r.Context(), id, "info", fmt.Sprintf("cancelled by %s", basicAuthUser(r)))
+	_ = a.store.AppendLog(r.Context(), id, "info", fmt.Sprintf("cancelled by %s", apiutil.RequestActor(r)))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -169,7 +171,7 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "delete failed")
 		return
 	}
-	a.logger.Info("job deleted", "id", id, "actor", basicAuthUser(r))
+	a.logger.Info("job deleted", "id", id, "actor", apiutil.RequestActor(r))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -180,18 +182,11 @@ func (a *API) purge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "purge failed")
 		return
 	}
-	a.logger.Info("jobs purged", "count", n, "actor", basicAuthUser(r))
+	a.logger.Info("jobs purged", "count", n, "actor", apiutil.RequestActor(r))
 	writeJSON(w, http.StatusOK, map[string]int{"deleted": n})
 }
 
 // ---- helpers ----
-
-func basicAuthUser(r *http.Request) string {
-	if u, _, ok := r.BasicAuth(); ok {
-		return u
-	}
-	return "anonymous"
-}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

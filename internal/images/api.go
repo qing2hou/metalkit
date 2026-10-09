@@ -3,9 +3,11 @@ package images
 import (
 	"context"
 	"encoding/json"
+
 	"errors"
 	"fmt"
 	"log/slog"
+	"metalkit/internal/apiutil"
 	"net/http"
 	"strconv"
 	"strings"
@@ -131,7 +133,7 @@ func (a *API) initUpload(w http.ResponseWriter, r *http.Request) {
 		ExpectedSHA256: strings.ToLower(strings.TrimSpace(in.ExpectedSHA256)),
 		TotalSize:      in.TotalSize,
 		ChunkSize:      in.ChunkSize,
-		UploadedBy:     basicAuthUser(r),
+		UploadedBy:     apiutil.RequestActor(r),
 	}
 	det := DetectFromFilename(in.Name)
 	// Reject obvious operator-vs-detection conflicts on family at the API
@@ -396,15 +398,6 @@ func validImageID(w http.ResponseWriter, raw string) (string, bool) {
 		return "", false
 	}
 	return id, true
-}
-
-// basicAuthUser returns the Basic Auth username from the request, or "" if
-// auth was not present. Used as the audit "uploaded_by" field.
-func basicAuthUser(r *http.Request) string {
-	if u, _, ok := r.BasicAuth(); ok {
-		return u
-	}
-	return "anonymous"
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

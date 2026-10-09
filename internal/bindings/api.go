@@ -2,8 +2,10 @@ package bindings
 
 import (
 	"encoding/json"
+
 	"errors"
 	"log/slog"
+	"metalkit/internal/apiutil"
 	"net/http"
 	"strings"
 
@@ -92,7 +94,7 @@ func (a *API) upsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.MachineUUID = r.PathValue("uuid")
-	in.UpdatedBy = basicAuthUser(r)
+	in.UpdatedBy = apiutil.RequestActor(r)
 
 	b, err := a.store.Upsert(r.Context(), in)
 	switch {
@@ -158,7 +160,7 @@ func (a *API) getPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	actor := sessions.UserFromContext(r.Context())
 	if actor == "" {
-		actor = basicAuthUser(r)
+		actor = apiutil.RequestActor(r)
 	}
 	a.logger.Info("binding password viewed",
 		"machine_uuid", uuid, "actor", actor)
@@ -166,13 +168,6 @@ func (a *API) getPassword(w http.ResponseWriter, r *http.Request) {
 		a.audit.Record(r.Context(), actor, "binding.password_view", uuid, "ok", nil)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"password": pt})
-}
-
-func basicAuthUser(r *http.Request) string {
-	if u, _, ok := r.BasicAuth(); ok {
-		return u
-	}
-	return "anonymous"
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

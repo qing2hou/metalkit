@@ -3,8 +3,10 @@ package profiles
 import (
 	"context"
 	"encoding/json"
+
 	"errors"
 	"log/slog"
+	"metalkit/internal/apiutil"
 	"net/http"
 	"strings"
 
@@ -77,7 +79,7 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	in.CreatedBy = basicAuthUser(r)
+	in.CreatedBy = apiutil.RequestActor(r)
 	p, err := a.store.Create(r.Context(), in)
 	if errors.Is(err, ErrDuplicateName) {
 		writeError(w, http.StatusConflict, err.Error())
@@ -188,13 +190,6 @@ func validProfileID(w http.ResponseWriter, raw string) (string, bool) {
 		return "", false
 	}
 	return id, true
-}
-
-func basicAuthUser(r *http.Request) string {
-	if u, _, ok := r.BasicAuth(); ok {
-		return u
-	}
-	return "anonymous"
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
