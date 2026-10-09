@@ -33,10 +33,16 @@ var validDesiredStates = map[string]bool{
 // MaxHostnameLen mirrors RFC-1035 §2.3.4.
 const MaxHostnameLen = 253
 
+// ErrInvalidUUID marks a machine_uuid that is not a canonical lowercase
+// SMBIOS UUID. The API layer maps it to 400; it replaced a
+// strings.Contains(err.Error(), "machine_uuid") match, where rewording the
+// message silently flipped the status code.
+var ErrInvalidUUID = errors.New("bindings: invalid machine_uuid")
+
 func validateMachineUUID(u string) (string, error) {
 	u = strings.ToLower(strings.TrimSpace(u))
 	if !smbiosUUIDRE.MatchString(u) {
-		return "", fmt.Errorf("machine_uuid %q: must be canonical lowercase SMBIOS UUID", u)
+		return "", fmt.Errorf("%w: %q must be canonical lowercase SMBIOS UUID", ErrInvalidUUID, u)
 	}
 	return u, nil
 }

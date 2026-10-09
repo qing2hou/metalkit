@@ -71,7 +71,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		// validateMachineUUID failure surfaces as 400, everything else as 500.
-		if strings.Contains(err.Error(), "machine_uuid") {
+		if errors.Is(err, ErrInvalidUUID) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -119,7 +119,7 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "binding not found")
 			return
 		}
-		if strings.Contains(err.Error(), "machine_uuid") {
+		if errors.Is(err, ErrInvalidUUID) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -148,7 +148,7 @@ func (a *API) getPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		if strings.Contains(err.Error(), "machine_uuid") {
+		if errors.Is(err, ErrInvalidUUID) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}

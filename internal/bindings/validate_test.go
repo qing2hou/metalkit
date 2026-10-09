@@ -1,6 +1,7 @@
 package bindings
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -85,3 +86,21 @@ func TestValidateSubnetID(t *testing.T) {
 }
 
 func ptrInt(v int) *int { return &v }
+
+// TestValidateMachineUUID_TypedError: the API layer classifies 400 vs 500
+// via errors.Is(err, ErrInvalidUUID) — the sentinel must survive wrapping.
+func TestValidateMachineUUID_TypedError(t *testing.T) {
+	_, err := validateMachineUUID("NOT-A-UUID")
+	if err == nil {
+		t.Fatal("expected error for non-UUID")
+	}
+	if !errors.Is(err, ErrInvalidUUID) {
+		t.Errorf("error does not wrap ErrInvalidUUID: %v", err)
+	}
+	if !strings.Contains(err.Error(), "machine_uuid") && !strings.Contains(err.Error(), "must be canonical") {
+		t.Errorf("message lost its diagnostic content: %v", err)
+	}
+	if _, err := validateMachineUUID("4c4c4544-0058-3210-8053-c5c04f463830"); err != nil {
+		t.Errorf("valid UUID rejected: %v", err)
+	}
+}
