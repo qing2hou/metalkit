@@ -221,16 +221,20 @@ func (a *API) putChunk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "upload session not found")
 		return
 	}
+	if errors.Is(err, ErrSessionBusy) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if errors.As(err, &ErrSHAMismatch{}) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Client-declared shape violations → 400; everything else is a 500.
+	if errors.Is(err, ErrChunkRange) || errors.Is(err, ErrChunkLength) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err != nil {
-		// Validation errors (length mismatch, chunk out of range) surface as 400.
-		if strings.Contains(err.Error(), "length") || strings.Contains(err.Error(), "out of range") || strings.Contains(err.Error(), "sha256") {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
 		a.logger.Error("write chunk", "err", err, "uid", uid, "n", n)
 		writeError(w, http.StatusInternalServerError, "chunk write failed")
 		return
@@ -255,16 +259,20 @@ func (a *API) finalize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	if errors.Is(err, ErrSessionBusy) {
+		writeError(w, http.StatusConflict, "another finalize is already running for this session")
+		return
+	}
 	if errors.As(err, &ErrSHAMismatch{}) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Missing chunks / size mismatch are client error; the rest is a 500.
+	if errors.Is(err, ErrChunkMissing) || errors.Is(err, ErrSizeMismatch) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err != nil {
-		// "missing" or size-mismatch is client error; everything else is 500.
-		if strings.Contains(err.Error(), "missing") || strings.Contains(err.Error(), "size") {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
 		a.logger.Error("finalize", "err", err, "uid", uid)
 		writeError(w, http.StatusInternalServerError, "finalize failed")
 		return

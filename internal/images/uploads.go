@@ -84,8 +84,13 @@ func (s *Store) WriteChunk(ctx context.Context, sessionID string, n int, body io
 	if err != nil {
 		return 0, err
 	}
+	if sess.State == stateFinalizing {
+		// A finalize already claimed this session; a concurrent chunk write
+		// could interleave with the assembled-file concatenation. Reject.
+		return 0, ErrSessionBusy
+	}
 	if n < 1 || n > sess.NumChunks {
-		return 0, fmt.Errorf("images: chunk %d out of range [1,%d]", n, sess.NumChunks)
+		return 0, wrapErr(ErrChunkRange, "chunk %d out of range [1,%d]", n, sess.NumChunks)
 	}
 	if expectedSHA != "" && !sha256RE.MatchString(expectedSHA) {
 		return 0, errors.New("images: chunk sha256 must be 64 lowercase hex chars")
@@ -122,7 +127,7 @@ func (s *Store) WriteChunk(ctx context.Context, sessionID string, n int, body io
 	}
 	if written != expectedLen {
 		_ = os.Remove(tmp)
-		return 0, fmt.Errorf("images: chunk %d length %d != expected %d", n, written, expectedLen)
+		return 0, wrapErr(ErrChunkLength, "chunk %d length %d != expected %d", n, written, expectedLen)
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if expectedSHA != "" && got != expectedSHA {
@@ -180,11 +185,25 @@ func (s *Store) FinalizeUpload(ctx context.Context, sessionID string, extractor 
 		return nil, err
 	}
 
+	// Exactly one finalize may run per session: the state flip below is
+	// atomic, so concurrent finalize calls can't both concatenate into the
+	// same stage path or race a chunk write (which rejects on state=finalizing).
+	// On failure we release the claim so the upload can be retried.
+	if err := s.claimFinalize(ctx, sessionID); err != nil {
+		return nil, err
+	}
+	release := true
+	defer func() {
+		if release {
+			s.releaseFinalize(context.WithoutCancel(ctx), sessionID)
+		}
+	}()
+
 	// Verify all chunks present before doing any heavy lifting.
 	for i := 1; i <= sess.NumChunks; i++ {
 		if _, err := os.Stat(s.chunkPath(sessionID, i)); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				return nil, fmt.Errorf("images: chunk %d missing", i)
+				return nil, wrapErr(ErrChunkMissing, "chunk %d missing", i)
 			}
 			return nil, fmt.Errorf("stat chunk %d: %w", i, err)
 		}
@@ -209,7 +228,7 @@ func (s *Store) FinalizeUpload(ctx context.Context, sessionID string, extractor 
 	}
 	if totalBytes != sess.TotalSize {
 		_ = os.Remove(stage)
-		return nil, fmt.Errorf("images: assembled size %d != declared %d", totalBytes, sess.TotalSize)
+		return nil, wrapErr(ErrSizeMismatch, "assembled size %d != declared %d", totalBytes, sess.TotalSize)
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	// Skip client-hash verification when the client didn't supply one — the
@@ -276,7 +295,73 @@ func (s *Store) FinalizeUpload(ctx context.Context, sessionID string, extractor 
 		s.logger.Warn("cleanup upload dir failed", "session", sessionID, "err", err)
 	}
 
+	// Success: the session row is gone (FinalizeImage deleted it in-transaction),
+	// nothing to release.
+	release = false
 	return &FinalizeUploadResult{Image: img, FinalSHA: got}, nil
+}
+
+// Upload-session lifecycle states (upload_sessions.state). Transitions:
+// uploading → finalizing (claimFinalize, atomic), finalizing → uploading
+// (releaseFinalize, failed finalize), finalizing/… → row deleted
+// (FinalizeImage on success / AbortUpload).
+const (
+	stateUploading  = "uploading"
+	stateFinalizing = "finalizing"
+)
+
+// Sentinel / typed errors for the chunked-upload path. The API layer maps
+// these to 4xx; anything else is a 500. Replaces the old
+// strings.Contains(err.Error(), ...) classification, where rewording a
+// message silently flipped a 400 into a 500.
+var (
+	// ErrChunkRange: chunk number outside [1, NumChunks].
+	ErrChunkRange = errors.New("images: chunk out of range")
+	// ErrChunkLength: chunk bytes != the declared chunk size.
+	ErrChunkLength = errors.New("images: chunk length mismatch")
+	// ErrChunkMissing: finalize found a chunk not yet on disk.
+	ErrChunkMissing = errors.New("images: chunk missing")
+	// ErrSizeMismatch: assembled size != session's declared total.
+	ErrSizeMismatch = errors.New("images: assembled size mismatch")
+	// ErrSessionBusy: another finalize already claimed the session.
+	ErrSessionBusy = errors.New("images: upload session is being finalized")
+)
+
+// wrapErr attaches context to a sentinel without breaking errors.Is.
+func wrapErr(sentinel error, format string, args ...any) error {
+	return fmt.Errorf("%w: %s", sentinel, fmt.Sprintf(format, args...))
+}
+
+// claimFinalize atomically flips the session state uploading→finalizing.
+// Exactly one concurrent caller wins (the UPDATE matches only rows still in
+// "uploading"); losers get ErrSessionBusy. This closes the window where two
+// finalize calls both passed the "all chunks present" check and then wrote
+// to the same stage/final paths, or a chunk write landed mid-concat.
+func (s *Store) claimFinalize(ctx context.Context, sessionID string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE upload_sessions SET state = 'finalizing' WHERE id = ? AND state = 'uploading'`,
+		sessionID)
+	if err != nil {
+		return fmt.Errorf("claim finalize: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		// Either the session is gone (caller has already surfaced ErrNotFound
+		// via GetUpload) or someone else holds the finalize claim.
+		return ErrSessionBusy
+	}
+	return nil
+}
+
+// releaseFinalize drops a failed finalize back to "uploading" so the operator
+// can retry / resume chunks. Best-effort: a failure here only leaves the row
+// stuck in "finalizing", which AbortUpload (DELETE) still clears.
+func (s *Store) releaseFinalize(ctx context.Context, sessionID string) {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE upload_sessions SET state = 'uploading' WHERE id = ? AND state = 'finalizing'`,
+		sessionID); err != nil {
+		s.logger.Warn("release finalize claim failed", "session", sessionID, "err", err)
+	}
 }
 
 func (s *Store) concatChunks(w io.Writer, h hash.Hash, sess *UploadSession) (int64, error) {

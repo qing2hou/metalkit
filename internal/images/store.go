@@ -65,6 +65,33 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger, dir string) 
 			}
 		}
 	}
+	// UNIQUE(filename) — see indexSQL. Empty-string filenames (legacy rows
+	// not yet backfilled) would collide under a unique index, so skip empty
+	// values via a partial index (SQLite: WHERE filename != '').
+	if _, err := db.ExecContext(ctx, indexSQLPartial); err != nil {
+		if !strings.Contains(err.Error(), "already exists") {
+			// Most likely cause: real duplicate filenames in a hand-edited
+			// database. Surface the rows so the operator can rename one.
+			rows, qerr := db.QueryContext(ctx,
+				`SELECT filename, id, name FROM images WHERE filename != '' AND filename IN
+				 (SELECT filename FROM images WHERE filename != '' GROUP BY filename HAVING COUNT(*) > 1)`)
+			if qerr == nil {
+				var dup []string
+				for rows.Next() {
+					var fn, id, nm string
+					if rows.Scan(&fn, &id, &nm) == nil {
+						dup = append(dup, fmt.Sprintf("%s (id=%s, name=%s)", fn, id, nm))
+					}
+				}
+				rows.Close()
+				if len(dup) > 0 {
+					return nil, fmt.Errorf("images: duplicate filenames block the unique index; rename one of: %s",
+						strings.Join(dup, "; "))
+				}
+			}
+			return nil, fmt.Errorf("apply images filename unique index: %w", err)
+		}
+	}
 	s := &Store{db: db, logger: logger, dir: dir}
 	if err := s.ensureDirs(); err != nil {
 		return nil, err
@@ -106,6 +133,7 @@ type UploadSession struct {
 	ChunkSize      int64     `json:"chunk_size"`
 	NumChunks      int       `json:"num_chunks"`
 	UploadedChunks int       `json:"uploaded_chunks"`
+	State          string    `json:"state"` // "uploading" | "finalizing"
 	UploadedBy     string    `json:"uploaded_by"`
 	StartedAt      time.Time `json:"started_at"`
 }
@@ -190,8 +218,8 @@ func (s *Store) CreateUpload(ctx context.Context, in CreateUploadInput) (*Upload
 	if _, err := s.db.ExecContext(ctx, `
         INSERT INTO upload_sessions
             (id, name, version, family, arch, notes, expected_sha256, total_size,
-             chunk_size, num_chunks, uploaded_chunks, uploaded_by, started_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+             chunk_size, num_chunks, uploaded_chunks, state, uploaded_by, started_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'uploading', ?, ?)`,
 		id, in.Name, in.Version, in.Family, in.Arch, in.Notes, in.ExpectedSHA256,
 		in.TotalSize, chunkSize, numChunks, in.UploadedBy, started,
 	); err != nil {
@@ -210,6 +238,7 @@ func (s *Store) CreateUpload(ctx context.Context, in CreateUploadInput) (*Upload
 		ChunkSize:      chunkSize,
 		NumChunks:      numChunks,
 		UploadedChunks: 0,
+		State:          stateUploading,
 		UploadedBy:     in.UploadedBy,
 		StartedAt:      time.Unix(started, 0).UTC(),
 	}, nil
@@ -222,10 +251,10 @@ func (s *Store) GetUpload(ctx context.Context, id string) (*UploadSession, error
 	var version, family, notes sql.NullString
 	err := s.db.QueryRowContext(ctx, `
         SELECT id, name, version, family, COALESCE(arch,''), notes, expected_sha256, total_size,
-               chunk_size, num_chunks, uploaded_chunks, uploaded_by, started_at
+               chunk_size, num_chunks, uploaded_chunks, COALESCE(state,'uploading'), uploaded_by, started_at
         FROM upload_sessions WHERE id = ?`, id).Scan(
 		&u.ID, &u.Name, &version, &family, &u.Arch, &notes, &u.ExpectedSHA256, &u.TotalSize,
-		&u.ChunkSize, &u.NumChunks, &u.UploadedChunks, &u.UploadedBy, &started,
+		&u.ChunkSize, &u.NumChunks, &u.UploadedChunks, &u.State, &u.UploadedBy, &started,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

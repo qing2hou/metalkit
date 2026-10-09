@@ -28,6 +28,10 @@ var migrations = []string{
 	// filename: on-disk file name (sanitized upload name). Empty on legacy
 	// rows — the startup rewriter backfills it and renames sha-named files.
 	"ALTER TABLE images ADD COLUMN filename TEXT NOT NULL DEFAULT ''",
+	// state: upload-session lifecycle ("uploading" | "finalizing") so a
+	// second finalize of the same session, or a chunk write racing a
+	// finalize, can be rejected atomically (see claimFinalize).
+	"ALTER TABLE upload_sessions ADD COLUMN state TEXT NOT NULL DEFAULT 'uploading'",
 }
 
 const schemaSQL = `
@@ -62,8 +66,20 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
     chunk_size      INTEGER NOT NULL,
     num_chunks      INTEGER NOT NULL,
     uploaded_chunks INTEGER NOT NULL DEFAULT 0,
+    state           TEXT NOT NULL DEFAULT 'uploading',
     uploaded_by     TEXT NOT NULL,
     started_at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_upload_sessions_started_at ON upload_sessions(started_at);
+`
+
+// indexSQL runs after schemaSQL + migrations. The UNIQUE index on filename
+// is the DB-level guard that two catalog rows can never claim the same
+// on-disk file name (uniqueFilename's check-then-derive is not atomic).
+// Partial (filename != ”) so legacy rows without a filename yet don't
+// collide. Existing databases: if duplicates already exist the CREATE fails
+// with a clear error telling the operator to rename one of them — never
+// silent.
+const indexSQLPartial = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_images_filename ON images(filename) WHERE filename != '';
 `
