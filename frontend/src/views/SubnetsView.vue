@@ -166,7 +166,10 @@ async function save(): Promise<void> {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean),
-      vlan_id: form.vlanId,
+      // el-input-number 清空后是 undefined，JSON 序列化会丢字段——
+      // 后端三态语义里"不传 = 保持原值"，于是"删掉 VLAN"保存后永远不生效。
+      // 显式发 0（后端明确约定 0 = 清除 VLAN/untagged）。
+      vlan_id: form.vlanId ?? 0,
       dhcp_ranges: form.pools
         .filter((p) => p.start.trim() && p.end.trim())
         .map((p) => ({ start: p.start.trim(), end: p.end.trim() })),
