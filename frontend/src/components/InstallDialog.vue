@@ -199,6 +199,17 @@ const staticIpError = computed(() => {
   return ''
 })
 
+// 切换子网时自动清空静态 IP：旧子网的地址换个网段几乎必然非法
+// （staticIpError 会拦「IP 不在子网内」，但当场清空比让用户撞一次
+// 校验错误再手删的体验好）。prefilling 期间不触发（预填本身就会设子网）。
+watch(
+  () => form.subnetId,
+  (_n, old) => {
+    if (prefilling || old === undefined) return
+    form.staticIp = ''
+  },
+)
+
 // 装机密码：勾选覆盖后若填写则需 8-128 字符（后端 bindings.validatePassword 同规则）
 const passwordError = computed(() => {
   if (!form.usePasswordOverride) return ''
