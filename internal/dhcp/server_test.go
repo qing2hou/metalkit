@@ -3,6 +3,7 @@ package dhcp
 import (
 	"bytes"
 	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -222,5 +223,37 @@ func TestClientArchString(t *testing.T) {
 	}
 	if ClientArch(0xffff).String() != "unknown" {
 		t.Errorf("got %q", ClientArch(0xffff).String())
+	}
+}
+
+func TestDestFor(t *testing.T) {
+	relayed := mustReq(t, dhcpv4.MessageTypeDiscover)
+	relayed.GatewayIPAddr = netip.MustParseAddr("10.17.31.254").AsSlice()
+	src := &net.UDPAddr{IP: net.ParseIP("10.17.12.26"), Port: 67}
+	cases := []struct {
+		name   string
+		req    *dhcpv4.DHCPv4
+		peer   net.Addr
+		target ReplyTarget
+		want   string
+	}{
+		// RFC 2131 §4.1 default: relayed replies go to giaddr:67.
+		{"relayed giaddr", relayed, src, ReplyTargetGiaddr, "10.17.31.254:67"},
+		{"relayed unset target", relayed, src, "", "10.17.31.254:67"},
+		// Source mode: reply to the address the request came from.
+		{"relayed source", relayed, src, ReplyTargetSource, "10.17.12.26:67"},
+		// Source mode without a usable peer must not lose the reply —
+		// fall back to the RFC destination.
+		{"relayed source nil peer", relayed, nil, ReplyTargetSource, "10.17.31.254:67"},
+		{"relayed source zero peer", relayed, &net.UDPAddr{}, ReplyTargetSource, "10.17.31.254:67"},
+		// Direct (non-relayed) clients are unaffected by the target.
+		{"direct giaddr", mustReq(t, dhcpv4.MessageTypeDiscover), src, ReplyTargetGiaddr, "10.17.12.26:67"},
+		{"direct source", mustReq(t, dhcpv4.MessageTypeDiscover), src, ReplyTargetSource, "10.17.12.26:67"},
+	}
+	for _, c := range cases {
+		got := destFor(c.req, c.peer, c.target)
+		if got.String() != c.want {
+			t.Errorf("%s: destFor = %s, want %s", c.name, got.String(), c.want)
+		}
 	}
 }

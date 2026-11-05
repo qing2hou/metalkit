@@ -41,6 +41,13 @@ type Config struct {
 	// make metalkit hand out IP leases itself (zero external-DHCP deploy).
 	DHCPMode string `yaml:"dhcpMode"`
 
+	// DHCPReplyTarget selects the destination of replies to relayed requests
+	// (giaddr set): "giaddr" (default, RFC 2131 §4.1) or "source" — the
+	// address the relayed request came from. Set "source" for relay
+	// appliances that listen on their outgoing address instead of giaddr
+	// and silently drop RFC-compliant replies.
+	DHCPReplyTarget string `yaml:"dhcpReplyTarget"`
+
 	// DHCPPool is the lease pool used when DHCPMode == "full". All fields are
 	// optional — Load() auto-fills any blank field by reading the IPv4/mask
 	// of cfg.Interface, so a minimal "dhcpMode: full" config Just Works.
@@ -230,6 +237,18 @@ func Load(path string) (*Config, error) {
 		c.DHCPMode = DHCPModeFull
 	default:
 		return nil, fmt.Errorf("dhcpMode %q: must be %q or %q", c.DHCPMode, DHCPModeProxy, DHCPModeFull)
+	}
+
+	// Normalize the relay-reply destination the same way: empty means the
+	// RFC default, typos fail Load loudly rather than silently changing
+	// where replies go on a live wire.
+	switch strings.ToLower(strings.TrimSpace(c.DHCPReplyTarget)) {
+	case "":
+		c.DHCPReplyTarget = "giaddr"
+	case "giaddr", "source":
+		c.DHCPReplyTarget = strings.ToLower(strings.TrimSpace(c.DHCPReplyTarget))
+	default:
+		return nil, fmt.Errorf("dhcpReplyTarget %q: must be %q or %q", c.DHCPReplyTarget, "giaddr", "source")
 	}
 
 	if c.DHCPMode == DHCPModeFull {

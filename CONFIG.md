@@ -70,6 +70,23 @@ dhcpPool:
     - 192.168.10.50
 ```
 
+### Relayed Replies (dhcpReplyTarget)
+
+When clients reach the server through a DHCP relay (`giaddr` set in requests),
+RFC 2131 §4.1 mandates replies go unicast to `giaddr:67`. Some relay
+appliances, however, only accept replies on the address they send requests
+from — RFC-compliant replies to `giaddr` are silently dropped and clients
+never get their OFFER (endless DISCOVER retry loops).
+
+For those networks, point replies at the request source instead:
+
+```yaml
+dhcpReplyTarget: source    # default "giaddr" (RFC 2131 §4.1)
+```
+
+Both settings only affect relayed requests; direct (same-L2) clients behave
+identically.
+
 ## Deployment on Different Networks
 
 With auto-detection, you can use the **same configuration file** across different networks:
