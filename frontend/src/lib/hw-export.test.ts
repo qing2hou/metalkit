@@ -16,12 +16,20 @@ const sample: Report = {
   cpu: { arch: 'amd64', vendor: 'GenuineIntel', sockets: 2, total_cores: 20, total_threads: 40, per_socket: [{ socket: 'CPU1', model: 'Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz', cores: 10, threads: 20 }] },
   memory: {
     total_bytes: 64 * 1024 ** 3,
-    dimms: [{ slot: 'A1', size_bytes: 32 * 1024 ** 3, speed_mt_s: 2400, type: 'DDR4', manufacturer: 'Samsung' }],
+    dimms: [
+      {
+        locator: 'DIMM_A1', size_bytes: 32 * 1024 ** 3, speed_mts: 2400, configured_speed_mts: 2133,
+        type: 'DDR4', manufacturer: 'Samsung', part_number: 'M393A4K40DB1-CVF', serial: '3582D1AF', rank: 2,
+      },
+    ],
   },
   disks: [
-    { kname: 'sda', path: '/dev/sda', type: 'ssd', size_bytes: 480_000_000_000, model: 'Dell SSD 480GB', wwn: '0x5000c500a1' },
+    { kname: 'sda', path: '/dev/sda', type: 'ssd', size_bytes: 480_000_000_000, model: 'Dell SSD 480GB', serial: 'S6XENA0R409123', wwn: '0x5000c500a1' },
   ],
-  nics: [{ name: 'eno1', mac: 'aa:bb:cc:dd:ee:ff', speed_mbps: 1000, driver: 'tg3' }],
+  nics: [
+    { name: 'eno1', mac: 'aa:bb:cc:dd:ee:ff', speed_mbps: 1000, driver: 'tg3' },
+    { name: 'eno2np0', mac: 'aa:bb:cc:dd:ee:01', speed_mbps: 25000, driver: 'mlx5_core', sfp: { vendor: 'HG GENUINE', part_number: 'MTRA-3E31A-01', serial: '7000282830002' } },
+  ],
 }
 
 describe('hardwareToCsv', () => {
@@ -31,11 +39,14 @@ describe('hardwareToCsv', () => {
     expect(csv).toContain('Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz')
     expect(csv).toContain('93MPG82')
     expect(csv).toContain('内存')
-    expect(csv).toContain('A1,32,2400,DDR4,Samsung')
+    expect(csv).toContain('插槽,容量 (GiB),频率 (MT/s),类型,厂商,PN,序列号,Rank')
+    expect(csv).toContain('DIMM_A1,32,2133,DDR4,Samsung,M393A4K40DB1-CVF,3582D1AF,2')
     expect(csv).toContain('磁盘')
-    expect(csv).toContain('sda,ssd,447.0,Dell SSD 480GB,0x5000c500a1')
+    expect(csv).toContain('sda,ssd,447.0,Dell SSD 480GB,S6XENA0R409123,0x5000c500a1')
     expect(csv).toContain('网卡')
-    expect(csv).toContain('eno1,aa:bb:cc:dd:ee:ff,1000,tg3')
+    expect(csv).toContain('接口,MAC,速率 (Mb/s),驱动,光模块厂商,光模块 PN,光模块 SN')
+    expect(csv).toContain('eno1,aa:bb:cc:dd:ee:ff,1000,tg3,,,')
+    expect(csv).toContain('HG GENUINE,MTRA-3E31A-01,7000282830002')
   })
 
   it('字段含逗号/引号时正确转义（RFC4180）', () => {
@@ -62,10 +73,12 @@ describe('hardwareToTxt', () => {
     expect(txt).toContain('备　注: 数据库节点')
     expect(txt).toContain('CPU:　　 Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz（2 路 20 核 40 线程）')
     expect(txt).toContain('── 内存（1 条）──')
-    expect(txt).toContain('A1  32G  2400MT/s  DDR4  Samsung')
+    expect(txt).toContain('DIMM_A1  32G  2133MT/s  DDR4  Samsung  PN M393A4K40DB1-CVF  SN 3582D1AF  R2')
     expect(txt).toContain('── 磁盘（1 块）──')
-    expect(txt).toContain('── 网卡（1 个）──')
+    expect(txt).toContain('SN S6XENA0R409123')
+    expect(txt).toContain('── 网卡（2 个）──')
     expect(txt).toContain('eno1  aa:bb:cc:dd:ee:ff  1000Mb/s  tg3')
+    expect(txt).toContain('SFP: HG GENUINE / MTRA-3E31A-01 / 7000282830002')
   })
 
   it('无位置/备注时头两行省略且不出现 —', () => {

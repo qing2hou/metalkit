@@ -50,27 +50,28 @@ export function hardwareToCsv(r: Report): string {
 
   const dimms = r.memory?.dimms ?? []
   out.push(csvRow(['内存', , `共 ${dimms.length} 条`]))
-  out.push(csvRow(['插槽', '容量 (GiB)', '频率 (MT/s)', '类型', '厂商']))
+  out.push(csvRow(['插槽', '容量 (GiB)', '频率 (MT/s)', '类型', '厂商', 'PN', '序列号', 'Rank']))
   for (const d of dimms) {
     const gib = d.size_bytes ? (d.size_bytes / 1024 ** 3).toFixed(0) : ''
-    out.push(csvRow([d.slot, gib, d.speed_mt_s, d.type, d.manufacturer]))
+    const speed = d.configured_speed_mts || d.speed_mts || ''
+    out.push(csvRow([d.locator, gib, speed, d.type, d.manufacturer, d.part_number, d.serial, d.rank || '']))
   }
   out.push('')
 
   const disks = r.disks ?? []
   out.push(csvRow(['磁盘', , `共 ${disks.length} 块`]))
-  out.push(csvRow(['设备', '类型', '容量 (GiB)', '型号', 'WWN', '路径']))
+  out.push(csvRow(['设备', '类型', '容量 (GiB)', '型号', '序列号', 'WWN', '路径']))
   for (const d of disks) {
     const gib = (d.size_bytes ?? 0) > 0 ? (d.size_bytes! / 1024 ** 3).toFixed(1) : ''
-    out.push(csvRow([d.kname, d.type, gib, d.model, d.wwn, d.path]))
+    out.push(csvRow([d.kname, d.type, gib, d.model, d.serial, d.wwn, d.path]))
   }
   out.push('')
 
   const nics = r.nics ?? []
   out.push(csvRow(['网卡', , `共 ${nics.length} 个`]))
-  out.push(csvRow(['接口', 'MAC', '速率 (Mb/s)', '驱动']))
+  out.push(csvRow(['接口', 'MAC', '速率 (Mb/s)', '驱动', '光模块厂商', '光模块 PN', '光模块 SN']))
   for (const n of nics) {
-    out.push(csvRow([n.name, n.mac, n.speed_mbps, n.driver]))
+    out.push(csvRow([n.name, n.mac, n.speed_mbps, n.driver, n.sfp?.vendor, n.sfp?.part_number, n.sfp?.serial]))
   }
   return out.join('\n') + '\n'
 }
@@ -105,7 +106,9 @@ export function hardwareToTxt(r: Report, header: { serial?: string; location?: s
   L.push(`── 内存（${dimms.length} 条）──`)
   for (const d of dimms) {
     const gib = d.size_bytes ? `${(d.size_bytes / 1024 ** 3).toFixed(0)}G` : '?'
-    L.push(`${cell(d.slot)}  ${gib}  ${cell(d.speed_mt_s)}MT/s  ${cell(d.type)}  ${cell(d.manufacturer)}`)
+    const speed = d.configured_speed_mts || d.speed_mts
+    const pnSn = [d.part_number ? `PN ${d.part_number}` : '', d.serial ? `SN ${d.serial}` : ''].filter(Boolean).join('  ')
+    L.push(`${cell(d.locator)}  ${gib}  ${cell(speed)}MT/s  ${cell(d.type)}  ${cell(d.manufacturer)}  ${pnSn}${d.rank ? `  R${d.rank}` : ''}`)
   }
   L.push('')
 
@@ -113,7 +116,8 @@ export function hardwareToTxt(r: Report, header: { serial?: string; location?: s
   L.push(`── 磁盘（${disks.length} 块）──`)
   for (const d of disks) {
     const gib = (d.size_bytes ?? 0) > 0 ? `${(d.size_bytes! / 1024 ** 3).toFixed(1)}G` : '?'
-    L.push(`${cell(d.kname)}  ${gib}  ${cell(d.type)}  ${cell(d.model)}  ${cell(d.wwn)}`)
+    const sn = d.serial ? `SN ${d.serial}` : ''
+    L.push(`${cell(d.kname)}  ${gib}  ${cell(d.type)}  ${cell(d.model)}  ${cell(sn)}${d.wwn ? `  ${d.wwn}` : ''}`)
   }
   L.push('')
 
@@ -121,7 +125,8 @@ export function hardwareToTxt(r: Report, header: { serial?: string; location?: s
   L.push(`── 网卡（${nics.length} 个）──`)
   for (const n of nics) {
     const speed = n.speed_mbps ? `${n.speed_mbps}Mb/s` : '?'
-    L.push(`${cell(n.name)}  ${cell(n.mac)}  ${speed}  ${cell(n.driver)}`)
+    const sfp = n.sfp ? `  SFP: ${[n.sfp.vendor, n.sfp.part_number, n.sfp.serial].filter(Boolean).join(' / ')}` : ''
+    L.push(`${cell(n.name)}  ${cell(n.mac)}  ${speed}  ${cell(n.driver)}${sfp}`)
   }
   return L.join('\n') + '\n'
 }

@@ -32,12 +32,17 @@ export interface ReportMeta {
 }
 
 export interface Dimm {
-  slot?: string
+  locator?: string
+  bank?: string
   size_bytes?: number
-  speed_mt_s?: number
-  manufacturer?: string
-  form_factor?: string
   type?: string
+  speed_mts?: number
+  configured_speed_mts?: number
+  manufacturer?: string
+  serial?: string
+  part_number?: string
+  rank?: number
+  voltage?: string
 }
 
 export interface Disk {
@@ -47,12 +52,24 @@ export interface Disk {
   size_bytes: number
   model?: string
   serial?: string
+  vendor?: string
+  firmware?: string
   rotational?: boolean
   transport?: string
   wwn?: string
   by_path?: string
+  pci_address?: string
   smart?: Record<string, unknown>
   nvme?: Record<string, unknown>
+}
+
+/** SFP/QSFP 光模块（ethtool -m 采集；电口/无模块时缺省） */
+export interface Sfp {
+  vendor?: string
+  part_number?: string
+  serial?: string
+  type?: string
+  wavelength_nm?: number
 }
 
 export interface Nic {
@@ -64,10 +81,13 @@ export interface Nic {
   link?: boolean
   mtu?: number
   driver?: string
+  driver_version?: string
+  firmware_version?: string
   pci_address?: string
+  bus_info?: string
   /** CIDR 字符串，如 "192.168.50.20/24" */
   addresses?: string[]
-  sfp?: Record<string, unknown>
+  sfp?: Sfp
 }
 
 export interface CpuSocket {

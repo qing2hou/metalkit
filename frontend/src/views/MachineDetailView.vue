@@ -358,6 +358,7 @@ function viewHistoryItem(meta: ReportMeta): void {
             <div class="mk-kv"><dt>Profile</dt><dd>{{ bindingProfile?.name ?? binding.profile_id ?? '—' }}</dd></div>
             <div class="mk-kv"><dt>子网</dt><dd>{{ bindingSubnet?.name ?? binding.subnet_id ?? 'DHCP' }}</dd></div>
             <div class="mk-kv"><dt>静态 IP</dt><dd>{{ binding.static_address || '自动分配' }}</dd></div>
+            <div class="mk-kv"><dt>主机名</dt><dd>{{ binding.hostname || '按模板生成' }}</dd></div>
           </dl>
         </template>
         <el-empty
@@ -533,13 +534,24 @@ function viewHistoryItem(meta: ReportMeta): void {
 
           <el-collapse-item :title="`内存（${fmtBytes(report?.memory?.total_bytes)}）`" name="memory">
             <el-table class="mk-table" :data="report?.memory?.dimms ?? []" stripe size="small">
-              <el-table-column prop="slot" label="插槽" width="100" />
-              <el-table-column label="容量" width="110">
+              <el-table-column prop="locator" label="插槽" min-width="130" />
+              <el-table-column label="容量" width="100">
                 <template #default="{ row }">{{ fmtBytes(row.size_bytes) }}</template>
               </el-table-column>
-              <el-table-column prop="speed_mt_s" label="频率 (MT/s)" width="110" />
-              <el-table-column prop="type" label="类型" width="100" />
-              <el-table-column prop="manufacturer" label="厂商" min-width="120" />
+              <el-table-column label="频率 (MT/s)" width="110">
+                <template #default="{ row }">{{ row.configured_speed_mts || row.speed_mts || '—' }}</template>
+              </el-table-column>
+              <el-table-column prop="type" label="类型" width="90" />
+              <el-table-column prop="manufacturer" label="厂商" min-width="100" />
+              <el-table-column prop="part_number" label="PN" min-width="180">
+                <template #default="{ row }"><span class="mono">{{ row.part_number || '—' }}</span></template>
+              </el-table-column>
+              <el-table-column prop="serial" label="序列号" min-width="120">
+                <template #default="{ row }"><span class="mono">{{ row.serial || '—' }}</span></template>
+              </el-table-column>
+              <el-table-column label="Rank" width="70">
+                <template #default="{ row }">{{ row.rank || '—' }}</template>
+              </el-table-column>
               <template #empty><span class="mk-subtle">无 DIMM 明细</span></template>
             </el-table>
           </el-collapse-item>
@@ -553,6 +565,9 @@ function viewHistoryItem(meta: ReportMeta): void {
               </el-table-column>
               <el-table-column prop="model" label="型号" min-width="160">
                 <template #default="{ row }">{{ row.model || '—' }}</template>
+              </el-table-column>
+              <el-table-column label="序列号" min-width="220">
+                <template #default="{ row }"><span class="mono">{{ row.serial || '—' }}</span></template>
               </el-table-column>
               <el-table-column label="WWN" min-width="180">
                 <template #default="{ row }"><span class="mono">{{ row.wwn || '—' }}</span></template>
@@ -579,6 +594,14 @@ function viewHistoryItem(meta: ReportMeta): void {
                 </template>
               </el-table-column>
               <el-table-column prop="driver" label="驱动" width="110" />
+              <el-table-column label="光模块 (厂商 / PN / SN)" min-width="280">
+                <template #default="{ row }">
+                  <span v-if="row.sfp" class="mono">
+                    {{ [row.sfp.vendor, row.sfp.part_number, row.sfp.serial].filter(Boolean).join(' / ') }}
+                  </span>
+                  <span v-else class="mk-subtle">—</span>
+                </template>
+              </el-table-column>
               <el-table-column label="地址" min-width="180">
                 <template #default="{ row }">
                   <span class="mono">{{ (row.addresses ?? []).join(', ') || '—' }}</span>
