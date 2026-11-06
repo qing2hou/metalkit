@@ -273,8 +273,6 @@ const pagedTable = usePagedTable(filtered)
           :data="pagedTable.paged.value"
           stripe
           row-key="uuid"
-          @row-click="openDetail"
-          style="cursor: pointer"
         >
           <el-table-column label="状态" min-width="70">
             <template #default="{ row }">
@@ -364,7 +362,7 @@ const pagedTable = usePagedTable(filtered)
           </el-table-column>
           <el-table-column label="操作" min-width="150">
             <template #default="{ row }">
-              <el-button text size="small" @click.stop="openDetail(asRow<MachineSummary>(row))">详情</el-button>
+              <el-button text size="small" @click="openDetail(asRow<MachineSummary>(row))">详情</el-button>
               <el-button
                 text
                 size="small"
