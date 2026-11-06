@@ -14,6 +14,13 @@
 /live-image/chroot/
 /live-image/auto/local
 
+# live-build 的 tftpboot 网络启动中间产物（vmlinuz/initrd.img 及 syslinux
+# 文件）：部署用的是 build-live.sh 拷出的 boot/ 目录，不跟踪这些大二进制
+/live-image/tftpboot/
+
+# 调试工具的编译产物（源码在 cmd/probecheck）
+/probecheck
+
 # 临时文件
 *.deb
 *.iso
@@ -30,3 +37,9 @@ frontend/node_modules/
 
 # Claude Code
 .claude/
+
+# AI 工具会话工件
+.reasonix/
+.zcode/
+.zcodeignore
+CLAUDE.md

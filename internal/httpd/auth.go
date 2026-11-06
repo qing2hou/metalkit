@@ -136,77 +136,54 @@ func isHTMLRequest(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
-// needsAuth returns true for paths that must be authenticated:
-//   - the Web UI (/ui, /ui/*) — except /ui/login and /ui/assets/* which must
-//     remain reachable without auth so the login page itself can render.
-//   - the read side of the inventory API (/api/v1/machines*, /api/v1/lookup)
-//   - the entire images API (/api/v1/images*) — uploads, listing, delete; agents
-//     do not upload images, so the whole subtree is admin-only.
-//   - the entire profiles API (/api/v1/profiles*) — install templates; admins
-//     edit these, agents only read them indirectly via jobs.
-//   - the entire bindings API (/api/v1/bindings*) — per-machine install
-//     assignments; admins only.
-//   - the entire BMC credentials API (/api/v1/bmc*) — IPMI credentials; admins
-//     only. Passwords never appear in GET responses (encrypted at rest, returned
-//     plaintext only to the in-process ipmitool wrapper).
-//   - the operator side of the jobs API (/api/v1/jobs*) — read/cancel install
-//     jobs. The agent-facing endpoints (/api/v1/agent/jobs/*) stay open / use
-//     token auth (M2.3-6).
-//   - the util API (/api/v1/util*) — admin-only helpers like SHA-512 crypt;
-//     never exposed to live-boot agents.
-//   - the auth me endpoint (/api/v1/auth/me) — a who-am-I echo; login and
-//     logout are open so unauthenticated browsers can reach them.
+// needsAuth is fail-closed: everything under /api/v1/ (and the whole /ui
+// subtree except login/assets) requires authentication unless it is on the
+// explicit open list below. A new route registered without touching this
+// function therefore ends up AUTHENTICATED, not exposed — that is the point
+// of the default-true design (it used to be default-open: a forgotten entry
+// silently published the endpoint).
 //
-// Agent POST endpoints (/api/v1/report, /api/v1/heartbeat/*) stay open because
-// live-boot agents have no credential store. /healthz and /boot/* are open so
-// PXE clients and load balancers can reach them.
+// Open (no auth) by design:
+//   - /api/v1/report, /api/v1/heartbeat/* — live-boot inventory agents have
+//     no credential store; machine identity is the SMBIOS UUID in the path.
+//   - /api/v1/agent/* — the same agents' job/report/blob endpoints. The
+//     job/image IDs in the paths are 32-hex unguessables.
+//   - /api/v1/auth/login, /api/v1/auth/logout — the login page needs them.
+//   - /healthz — load balancers and install checks.
+//   - /boot/* — PXE/iPXE clients pull the live system over plain HTTP.
+//   - / — the redirect handler to /ui/.
+//   - /ui, /ui/* — EXCEPT /ui/login and /ui/assets/*, which must stay open
+//     so an unauthenticated browser can render the login page at all.
+//
+// Regression safety net: TestNeedsAuth_AllRegisteredRoutes walks every route
+// the server registers and asserts its intended policy — adding a route
+// without deciding its auth status fails the test.
 func needsAuth(path string) bool {
-	// Explicit overrides — these MUST come before the /ui prefix match so
-	// /ui/login (open) wins over the generic /ui/* (closed).
+	// 1. Always-open paths (exact matches).
 	switch path {
-	case "/ui/login":
-		return false
-	case "/api/v1/auth/login", "/api/v1/auth/logout":
+	case "/api/v1/report",
+		"/api/v1/auth/login",
+		"/api/v1/auth/logout",
+		"/healthz",
+		"/",
+		"/ui/login":
 		return false
 	}
-	if strings.HasPrefix(path, "/ui/assets/") {
-		return false
+	// 2. Always-open prefixes. Order matters where prefixes overlap.
+	for _, p := range []string{
+		"/api/v1/heartbeat/", // live agents, UUID in path
+		"/api/v1/agent/",     // live agents' job/image endpoints
+		"/boot/",             // PXE kernel/initrd/squashfs over plain HTTP
+		"/ui/assets/",        // static assets: the login page must render
+	} {
+		if strings.HasPrefix(path, p) {
+			return false
+		}
 	}
-	// Any other /api/v1/auth* (currently just /me, plus future siblings)
-	// requires auth.
-	if path == "/api/v1/auth" || strings.HasPrefix(path, "/api/v1/auth/") {
-		return true
-	}
-
-	switch {
-	case path == "/ui", strings.HasPrefix(path, "/ui/"):
-		return true
-	case path == "/api/v1/machines", strings.HasPrefix(path, "/api/v1/machines/"):
-		return true
-	case path == "/api/v1/lookup":
-		return true
-	case path == "/api/v1/images", strings.HasPrefix(path, "/api/v1/images/"):
-		return true
-	case path == "/api/v1/profiles", strings.HasPrefix(path, "/api/v1/profiles/"):
-		return true
-	case path == "/api/v1/bindings", strings.HasPrefix(path, "/api/v1/bindings/"):
-		return true
-	case path == "/api/v1/bmc", strings.HasPrefix(path, "/api/v1/bmc/"):
-		return true
-	case path == "/api/v1/jobs", strings.HasPrefix(path, "/api/v1/jobs/"):
-		return true
-	case path == "/api/v1/metrics", strings.HasPrefix(path, "/api/v1/metrics/"):
-		// Operator-side metrics queries (monitoring dashboards). The agent
-		// push lives under /api/v1/agent/metrics, which — like the other
-		// /api/v1/agent/* paths — stays open for credential-less monitors.
-		return true
-	case path == "/api/v1/util", strings.HasPrefix(path, "/api/v1/util/"):
-		return true
-	case path == "/api/v1/settings", strings.HasPrefix(path, "/api/v1/settings/"):
-		return true
-	case path == "/api/v1/subnets", strings.HasPrefix(path, "/api/v1/subnets/"):
-		return true
-	case path == "/api/v1/audit":
+	// 3. The /api/v1 tree and the /ui subtree are closed by default.
+	//    (Bare "/api" and "/api/v1" land here too — closed, like before.)
+	if strings.HasPrefix(path, "/api/") || path == "/api" ||
+		path == "/ui" || strings.HasPrefix(path, "/ui/") {
 		return true
 	}
 	return false

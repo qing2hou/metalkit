@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ArrowDown, Plus } from '@element-plus/icons-vue'
+import { usePagedTable } from '@/composables/usePagedTable'
 import type { FormInstance, FormRules, UploadFile } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
@@ -227,13 +228,16 @@ async function doImport(): Promise<void> {
     importing.value = false
   }
 }
+
+const pagedTable = usePagedTable(list)
 </script>
 
 <template>
   <AppShell>
     <div class="mk-page">
       <header class="mk-page-header">
-        <h1 class="mk-page-title">BMC 凭据</h1>
+        <h1 class="mk-page-title">BMC</h1>
+        <p class="mk-page-sub">带外管理凭据 — 支持电源控制与 PXE 引导</p>
         <div>
           <el-button @click="importVisible = true">CSV 导入</el-button>
           <el-button type="primary" :icon="Plus" @click="openCreate">新建凭据</el-button>
@@ -241,7 +245,7 @@ async function doImport(): Promise<void> {
       </header>
 
       <el-card class="mk-card">
-        <el-table v-loading="loading" :data="list" stripe>
+        <el-table class="mk-table" v-loading="loading" :data="pagedTable.paged.value" stripe>
           <el-table-column prop="ip" label="BMC IP" min-width="140">
             <template #default="{ row }"><span class="mono">{{ row.ip }}</span></template>
           </el-table-column>
@@ -255,7 +259,7 @@ async function doImport(): Promise<void> {
           <el-table-column label="更新时间" width="150">
             <template #default="{ row }">{{ fmtAbsolute(row.updated_at ?? row.created_at) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="300" fixed="right">
+          <el-table-column label="操作" min-width="240">
             <template #default="{ row }">
               <el-button text size="small" @click="test(asRow<BmcCredential>(row))">测试</el-button>
               <el-button text size="small" @click="onboard(asRow<BmcCredential>(row))">PXE 纳管</el-button>
@@ -284,6 +288,15 @@ async function doImport(): Promise<void> {
             <el-empty description="还没有 BMC 凭据" :image-size="72" />
           </template>
         </el-table>
+        <el-pagination
+          v-if="pagedTable.total.value > pagedTable.pageSize.value"
+          v-model:current-page="pagedTable.currentPage.value"
+          v-model:page-size="pagedTable.pageSize.value"
+          :page-sizes="[20, 50, 100]"
+          :total="pagedTable.total.value"
+          layout="total, sizes, prev, pager, next, jumper"
+          style="margin-top: 16px; justify-content: flex-end"
+        />
       </el-card>
 
       <el-dialog

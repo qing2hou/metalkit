@@ -3,9 +3,11 @@ package images
 import (
 	"context"
 	"encoding/json"
+
 	"errors"
 	"fmt"
 	"log/slog"
+	"metalkit/internal/apiutil"
 	"net/http"
 	"strconv"
 	"strings"
@@ -131,7 +133,7 @@ func (a *API) initUpload(w http.ResponseWriter, r *http.Request) {
 		ExpectedSHA256: strings.ToLower(strings.TrimSpace(in.ExpectedSHA256)),
 		TotalSize:      in.TotalSize,
 		ChunkSize:      in.ChunkSize,
-		UploadedBy:     basicAuthUser(r),
+		UploadedBy:     apiutil.RequestActor(r),
 	}
 	det := DetectFromFilename(in.Name)
 	// Reject obvious operator-vs-detection conflicts on family at the API
@@ -221,16 +223,20 @@ func (a *API) putChunk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "upload session not found")
 		return
 	}
+	if errors.Is(err, ErrSessionBusy) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if errors.As(err, &ErrSHAMismatch{}) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Client-declared shape violations → 400; everything else is a 500.
+	if errors.Is(err, ErrChunkRange) || errors.Is(err, ErrChunkLength) || errors.Is(err, ErrSHAFormat) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err != nil {
-		// Validation errors (length mismatch, chunk out of range) surface as 400.
-		if strings.Contains(err.Error(), "length") || strings.Contains(err.Error(), "out of range") || strings.Contains(err.Error(), "sha256") {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
 		a.logger.Error("write chunk", "err", err, "uid", uid, "n", n)
 		writeError(w, http.StatusInternalServerError, "chunk write failed")
 		return
@@ -255,16 +261,20 @@ func (a *API) finalize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
+	if errors.Is(err, ErrSessionBusy) {
+		writeError(w, http.StatusConflict, "another finalize is already running for this session")
+		return
+	}
 	if errors.As(err, &ErrSHAMismatch{}) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Missing chunks / size mismatch are client error; the rest is a 500.
+	if errors.Is(err, ErrChunkMissing) || errors.Is(err, ErrSizeMismatch) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err != nil {
-		// "missing" or size-mismatch is client error; everything else is 500.
-		if strings.Contains(err.Error(), "missing") || strings.Contains(err.Error(), "size") {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
 		a.logger.Error("finalize", "err", err, "uid", uid)
 		writeError(w, http.StatusInternalServerError, "finalize failed")
 		return
@@ -388,15 +398,6 @@ func validImageID(w http.ResponseWriter, raw string) (string, bool) {
 		return "", false
 	}
 	return id, true
-}
-
-// basicAuthUser returns the Basic Auth username from the request, or "" if
-// auth was not present. Used as the audit "uploaded_by" field.
-func basicAuthUser(r *http.Request) string {
-	if u, _, ok := r.BasicAuth(); ok {
-		return u
-	}
-	return "anonymous"
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

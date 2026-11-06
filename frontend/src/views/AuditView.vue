@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 
 import { auditApi } from '@/api'
 import type { AuditEvent } from '@/api/types'
 import AppShell from '@/components/AppShell.vue'
 import { useQuerySync } from '@/composables/useQuerySync'
+import { usePagedTable } from '@/composables/usePagedTable'
 import { fmtAbsolute } from '@/lib/format'
+import { asRow } from '@/lib/typed'
 
 const list = ref<AuditEvent[]>([])
 const loading = ref(false)
@@ -57,14 +60,67 @@ const actionFilters = [
   'DELETE /api/v1/machines',
   'POST /api/v1/bmc',
 ]
+
+// 删除单条审计记录（Admin 操作；删除会新记一条审计）
+async function remove(row: AuditEvent): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `删除这条审计记录（#${row.id} ${row.action}）？`,
+      '删除审计记录',
+      { type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await auditApi.remove(row.id)
+    ElMessage.success('已删除')
+    await load()
+  } catch (err) {
+    ElMessage.error(`删除失败: ${(err as Error).message}`)
+  }
+}
+
+// 清空全部审计记录（两步确认）
+async function purgeAll(): Promise<void> {
+  try {
+    await ElMessageBox.confirm(`清空全部 ${pagedTable.total.value} 条审计记录？此操作不可恢复。`, '清空审计', {
+      type: 'warning',
+    })
+  } catch {
+    return
+  }
+  try {
+    const { value } = await ElMessageBox.prompt('请输入「清空」两个字以确认执行', '最终确认', {
+      confirmButtonText: '执行清空',
+      cancelButtonText: '取消',
+      inputValidator: (v: string) => v.trim() === '清空' || '输入不正确，请输入「清空」',
+    })
+    if (value.trim() !== '清空') return
+  } catch {
+    return
+  }
+  try {
+    const r = await auditApi.purge()
+    ElMessage.success(`已清空 ${r.deleted} 条记录`)
+    await load()
+  } catch (err) {
+    ElMessage.error(`清空失败: ${(err as Error).message}`)
+  }
+}
+
+const pagedTable = usePagedTable(list)
 </script>
 
 <template>
   <AppShell>
     <div class="mk-page">
       <header class="mk-page-header">
-        <h1 class="mk-page-title">审计日志</h1>
-        <el-button :icon="Refresh" circle aria-label="刷新" @click="load" />
+        <h1 class="mk-page-title">审计</h1>
+        <div class="mk-header-actions">
+          <el-button type="danger" plain :disabled="!pagedTable.total.value" @click="purgeAll">清空</el-button>
+          <el-button :icon="Refresh" circle aria-label="刷新" @click="load" />
+        </div>
       </header>
 
       <el-alert v-if="loadError" :title="loadError" type="error" show-icon :closable="false" style="margin-bottom: 12px" />
@@ -91,7 +147,7 @@ const actionFilters = [
           </el-select>
         </div>
 
-        <el-table v-loading="loading" :data="list" stripe size="small">
+        <el-table class="mk-table" v-loading="loading" :data="pagedTable.paged.value" stripe size="small">
           <el-table-column label="时间" width="170">
             <template #default="{ row }">{{ fmtAbsolute(row.ts) }}</template>
           </el-table-column>
@@ -122,10 +178,24 @@ const actionFilters = [
               <span v-else class="mk-subtle">—</span>
             </template>
           </el-table-column>
+          <el-table-column label="操作" min-width="70">
+            <template #default="{ row }">
+              <el-button text size="small" type="danger" @click.stop="remove(asRow<AuditEvent>(row))">删除</el-button>
+            </template>
+          </el-table-column>
           <template #empty>
             <el-empty description="暂无审计记录" :image-size="72" />
           </template>
         </el-table>
+        <el-pagination
+          v-if="pagedTable.total.value > pagedTable.pageSize.value"
+          v-model:current-page="pagedTable.currentPage.value"
+          v-model:page-size="pagedTable.pageSize.value"
+          :page-sizes="[20, 50, 100]"
+          :total="pagedTable.total.value"
+          layout="total, sizes, prev, pager, next, jumper"
+          style="margin-top: 16px; justify-content: flex-end"
+        />
         <div class="mk-subtle" style="margin-top: 8px">
           记录所有变更类 API 调用（含失败）与敏感操作（如装机密码查看）。只读，追加写。
         </div>

@@ -52,9 +52,9 @@ async function submit(): Promise<void> {
 
 <template>
   <main class="login-page">
-    <el-card class="login-card">
+    <el-card class="login-card mk-card">
       <h1 class="brand">metalkit</h1>
-      <p class="muted">运维控制台</p>
+      <p class="muted">裸金属装机平台 · 运维控制台</p>
       <el-alert v-if="errorMsg" :title="errorMsg" type="error" show-icon :closable="false" />
       <el-form
         ref="formRef"
@@ -97,33 +97,34 @@ async function submit(): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--el-bg-color-page);
+  background: var(--mk-page-bg);
 }
 
 .login-card {
   width: 360px;
-  padding: 8px 4px;
+  padding: var(--mk-space-2) var(--mk-space-1);
 }
 
 .brand {
   font-size: 20px;
   font-weight: 700;
-  margin: 4px 0 2px;
+  margin: var(--mk-space-1) 0 2px;
   text-align: left;
+  letter-spacing: 0.01em;
 }
 
 .muted {
   color: var(--el-text-color-secondary);
-  margin: 0 0 16px;
-  font-size: 13px;
+  margin: 0 0 var(--mk-space-4);
+  font-size: var(--mk-font-sm);
 }
 
 .el-alert {
-  margin-bottom: 12px;
+  margin-bottom: var(--mk-space-3);
 }
 
 .login-submit {
   width: 100%;
-  margin-top: 4px;
+  margin-top: var(--mk-space-1);
 }
 </style>

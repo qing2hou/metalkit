@@ -3,8 +3,10 @@ package settings
 import (
 	"context"
 	"encoding/json"
+
 	"fmt"
 	"io"
+	"metalkit/internal/apiutil"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -124,7 +126,7 @@ func (a *API) putStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.store.SetMany(r.Context(), map[string]string{KeyStorageImagesDir: newDir}, basicAuthUser(r)); err != nil {
+	if err := a.store.SetMany(r.Context(), map[string]string{KeyStorageImagesDir: newDir}, apiutil.RequestActor(r)); err != nil {
 		// DB failed after files moved — push them back so state stays coherent.
 		if rbErr := rollbackImages(newDir, cur.ImagesDir, moved); rbErr != nil {
 			a.logger.Error("storage rollback after db failure failed", "err", rbErr,
@@ -134,7 +136,7 @@ func (a *API) putStorage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "save failed")
 		return
 	}
-	a.logger.Info("storage settings updated", "user", basicAuthUser(r),
+	a.logger.Info("storage settings updated", "user", apiutil.RequestActor(r),
 		"images_dir", newDir, "migrated_files", len(moved))
 
 	writeJSON(w, http.StatusOK, StorageSettingsResponse{

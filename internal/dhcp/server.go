@@ -23,12 +23,24 @@ const (
 	ModeFull  Mode = "full"
 )
 
+// ReplyTarget selects the destination of replies to relayed requests (giaddr
+// set). RFC 2131 §4.1 says giaddr; some relay appliances only accept replies
+// on the address they send from, which is "source". Empty defaults to
+// "giaddr" so the default stays RFC-compliant.
+type ReplyTarget string
+
+const (
+	ReplyTargetGiaddr ReplyTarget = "giaddr"
+	ReplyTargetSource ReplyTarget = "source"
+)
+
 type Config struct {
-	Interface  string
-	ListenAddr string
-	ServerIP   string
-	HTTPURL    string
-	Logger     *slog.Logger
+	Interface   string
+	ListenAddr  string
+	ServerIP    string
+	HTTPURL     string
+	ReplyTarget ReplyTarget
+	Logger      *slog.Logger
 
 	// Full-mode-only fields. When Mode == ModeProxy these are ignored.
 	Mode   Mode
@@ -86,6 +98,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.Mode == "" {
 		cfg.Mode = ModeProxy
+	}
+	if cfg.ReplyTarget == "" {
+		cfg.ReplyTarget = ReplyTargetGiaddr
 	}
 	if cfg.Mode == ModeFull {
 		if cfg.Pools == nil {
@@ -232,7 +247,12 @@ func (s *Server) makeHandler(ctx context.Context) server4.Handler {
 }
 
 func (s *Server) handle(ctx context.Context, conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCPv4) {
-	s.logger.Info("dhcp: received",
+	// Received-packet logging stays at Debug: a rack powering on sends a
+	// burst of DISCOVERs per machine (PXE retries), and Info-per-packet
+	// floods the log and drowns the warnings that matter during real
+	// install campaigns. The reply below stays at Info — one line per
+	// served boot stage is the useful signal.
+	s.logger.Debug("dhcp: received",
 		"mac", req.ClientHWAddr.String(),
 		"xid", req.TransactionID.String(),
 		"msg_type", req.MessageType().String(),
@@ -280,7 +300,7 @@ func (s *Server) handle(ctx context.Context, conn net.PacketConn, peer net.Addr,
 		"xid", req.TransactionID.String(),
 	)
 
-	dest := destFor(req, peer)
+	dest := destFor(req, peer, s.cfg.ReplyTarget)
 	if _, err := conn.WriteTo(reply.ToBytes(), dest); err != nil {
 		s.logger.Warn("dhcp: write failed", "err", err, "dest", dest.String())
 	}
@@ -474,7 +494,7 @@ func (s *Server) handler(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCPv4)
 	s.handle(context.Background(), conn, peer, req)
 }
 
-func destFor(req *dhcpv4.DHCPv4, peer net.Addr) net.Addr {
+func destFor(req *dhcpv4.DHCPv4, peer net.Addr, target ReplyTarget) net.Addr {
 	// RFC 2131 §4.1: if giaddr is set, the reply MUST be unicast to the
 	// relay agent at giaddr:67, regardless of the client's broadcast flag.
 	// The relay is responsible for delivering the reply to the client
@@ -483,6 +503,13 @@ func destFor(req *dhcpv4.DHCPv4, peer net.Addr) net.Addr {
 	// L2 broadcasts on the server's own subnet — the relay never saw them
 	// and the client never received the OFFER.
 	if !req.GatewayIPAddr.IsUnspecified() {
+		// Interop opt-out: relays that listen on their outgoing address
+		// instead of giaddr never see RFC-compliant replies. With
+		// ReplyTargetSource we send the reply to wherever the request came
+		// from (peer is the kernel-reported source of the relayed packet).
+		if target == ReplyTargetSource && peer != nil && !isZeroPeer(peer) {
+			return peer
+		}
 		return &net.UDPAddr{IP: req.GatewayIPAddr, Port: 67}
 	}
 	if req.IsBroadcast() || (peer == nil || isZeroPeer(peer)) {

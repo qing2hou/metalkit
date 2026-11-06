@@ -17,7 +17,7 @@ import (
 func TestMigrateLegacyPoolColumns(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	path := filepath.Join(t.TempDir(), "mig.db")
-	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger})
+	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger, NoSync: true})
 	if err != nil {
 		t.Fatal(err)
 	}

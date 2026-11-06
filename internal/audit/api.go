@@ -3,6 +3,7 @@ package audit
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -29,6 +30,8 @@ func (a *API) Store() *Store {
 
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/audit", a.list)
+	mux.HandleFunc("DELETE /api/v1/audit/{id}", a.remove)
+	mux.HandleFunc("POST /api/v1/audit/purge", a.purge)
 }
 
 func (a *API) list(w http.ResponseWriter, r *http.Request) {
@@ -63,6 +66,46 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, events)
+}
+
+// remove deletes one audit event. Admin-only: the audit trail is the
+// record of who did what — trimming it is an admin act, and the deletion
+// itself is audited.
+func (a *API) remove(w http.ResponseWriter, r *http.Request) {
+	if !sessions.IsAdmin(r.Context()) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "deleting audit events requires the admin role"})
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid event id"})
+		return
+	}
+	if err := a.store.DeleteEvent(r.Context(), id); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "event not found"})
+			return
+		}
+		a.logger.Error("audit delete", "err", err, "id", id)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete failed"})
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+// purge deletes every audit event; returns the count removed. Admin-only.
+func (a *API) purge(w http.ResponseWriter, r *http.Request) {
+	if !sessions.IsAdmin(r.Context()) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "purging the audit trail requires the admin role"})
+		return
+	}
+	n, err := a.store.DeleteAll(r.Context())
+	if err != nil {
+		a.logger.Error("audit purge", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "purge failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{"deleted": n})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

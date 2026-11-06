@@ -3,9 +3,11 @@ package subnets
 import (
 	"context"
 	"encoding/json"
+
 	"errors"
 	"fmt"
 	"log/slog"
+	"metalkit/internal/apiutil"
 	"net/http"
 	"strings"
 )
@@ -93,7 +95,7 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	in.CreatedBy = basicAuthUser(r)
+	in.CreatedBy = apiutil.RequestActor(r)
 	sn, err := a.store.Create(r.Context(), in)
 	if errors.Is(err, ErrDuplicateName) {
 		writeError(w, http.StatusConflict, err.Error())
@@ -138,7 +140,7 @@ func (a *API) update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	in.UpdatedBy = basicAuthUser(r)
+	in.UpdatedBy = apiutil.RequestActor(r)
 	sn, err := a.store.Update(r.Context(), id, in)
 	if errors.Is(err, ErrNotFound) {
 		writeError(w, http.StatusNotFound, "subnet not found")
@@ -190,13 +192,6 @@ func validSubnetID(w http.ResponseWriter, raw string) (string, bool) {
 		return "", false
 	}
 	return id, true
-}
-
-func basicAuthUser(r *http.Request) string {
-	if u, _, ok := r.BasicAuth(); ok {
-		return u
-	}
-	return "anonymous"
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

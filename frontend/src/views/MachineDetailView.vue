@@ -12,6 +12,7 @@ import InstallDialog from '@/components/InstallDialog.vue'
 import { usePollHealth } from '@/composables/usePollHealth'
 import StatusTag from '@/components/StatusTag.vue'
 import { fmtAbsolute, fmtBytes, fmtRelative } from '@/lib/format'
+import { hardwareToCsv, hardwareToTxt } from '@/lib/hw-export'
 import { asRow } from '@/lib/typed'
 
 const route = useRoute()
@@ -48,9 +49,10 @@ const rawJsonVisible = ref(false)
 
 const health = usePollHealth()
 
-async function load(): Promise<void> {
+async function load(opts: { silent?: boolean } = {}): Promise<void> {
   if (!uuid.value) return
-  loading.value = true
+  // silent=后台轮询：不拉整页遮罩，避免填报单/看明细时被周期性打断
+  if (!opts.silent) loading.value = true
   try {
     const [machines, rep, bindings] = await Promise.all([
       machinesApi.list(),
@@ -85,9 +87,10 @@ async function load(): Promise<void> {
 // 轮询：详情页 10s（装机期间作业状态变化主要看作业页）
 let pollTimer: ReturnType<typeof setInterval> | null = null
 onMounted(() => {
+  void loadMachineExtras()
   void load()
   pollTimer = setInterval(() => {
-    if (!document.hidden) void load()
+    if (!document.hidden) void load({ silent: true })
   }, 10_000)
 })
 onUnmounted(() => {
@@ -105,6 +108,60 @@ const bindingProfile = computed(() =>
 const bindingSubnet = computed(() =>
   binding.value?.subnet_id ? subnets.value.find((s) => s.id === binding.value?.subnet_id) : undefined,
 )
+
+// ---- 存储 / RAID 控制器：从 pci_devices 里按 class 归类（0104 RAID、0106 SATA、
+// 0107 SAS、0108 NVMe、0100/0101 SCSI/IDE），并把盘按 pci_address 挂到卡上 ----
+const STORAGE_CLASS_PREFIXES = ['0100', '0101', '0104', '0106', '0107', '0108']
+const storageControllers = computed(() => {
+  const all = report.value?.pci_devices ?? []
+  const disks = report.value?.disks ?? []
+  return all
+    .filter((p) => STORAGE_CLASS_PREFIXES.some((c) => (p.class_id ?? '').startsWith(c)))
+    .map((p) => {
+      const attached = disks.filter(
+        (d) => d.pci_address && d.pci_address.replace(/^0000:/, '') === p.address,
+      )
+      return { ...p, attached: attached.map((d) => d.kname) }
+    })
+})
+
+// ---- 硬件清单导出（CSV 给 Excel；TXT 贴工单） ----
+const machineExtras = ref<{ location?: string; notes?: string } | null>(null)
+
+async function loadMachineExtras(): Promise<void> {
+  try {
+    const all = await machinesApi.list()
+    const me = all.find((m) => m.uuid === uuid.value)
+    machineExtras.value = me ? { location: me.location, notes: me.notes } : null
+  } catch {
+    /* 导出发回时兜底：缺位置/备注不影响清单本体 */
+  }
+}
+
+function downloadHardware(kind: 'csv' | 'txt'): void {
+  const rep = report.value
+  if (!rep) {
+    ElMessage.warning('暂无硬件上报，无法导出')
+    return
+  }
+  const serial = summary.value?.serial ?? rep.machine?.serial ?? uuid.value.slice(0, 8)
+  const text = kind === 'csv'
+    ? hardwareToCsv(rep)
+    : hardwareToTxt(rep, { serial, location: machineExtras.value?.location, notes: machineExtras.value?.notes })
+  const blob = new Blob([text], { type: kind === 'csv' ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `hardware-${serial}.${kind}`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// CPU 型号摘要：去重后的每颗型号（多路同型号只显示一次）
+const cpuModelSummary = computed(() => {
+  const models = [...new Set((report.value?.cpu?.per_socket ?? []).map((s) => s.model).filter(Boolean))]
+  return models.join(' + ')
+})
 
 const biosVersion = computed(() => {
   const bios = (report.value?.firmware as { bios?: { vendor?: string; version?: string } } | undefined)?.bios
@@ -247,9 +304,10 @@ function viewHistoryItem(meta: ReportMeta): void {
       />
       <header class="mk-page-header">
         <h1 class="mk-page-title">机器详情</h1>
-        <div class="mk-header-right">
+        <p class="mk-page-sub">硬件清单 / 装机绑定 / 作业历史与 BMC 控制</p>
+        <div class="mk-header-actions">
           <el-button v-if="summary?.bmc_ip" @click="syncBmc">同步 BMC</el-button>
-          <el-button :icon="Refresh" circle aria-label="刷新" @click="load" />
+          <el-button :icon="Refresh" circle aria-label="刷新" @click="load()"/>
         </div>
       </header>
 
@@ -279,7 +337,7 @@ function viewHistoryItem(meta: ReportMeta): void {
                 <span v-else class="mk-subtle">未上报</span>
               </dd>
             </div>
-            <div class="mk-kv"><dt>CPU 架构</dt><dd>{{ report?.cpu?.arch || '—' }}</dd></div>
+            <div class="mk-kv"><dt>CPU</dt><dd>{{ cpuModelSummary || '—' }}<span v-if="report?.cpu?.arch" class="mk-subtle"> · {{ report.cpu.arch }}</span></dd></div>
             <div class="mk-kv"><dt>固件</dt><dd>{{ biosVersion || '—' }}</dd></div>
             <div class="mk-kv"><dt>Live 版本</dt><dd>{{ (report?.system as any)?.live_image_version || '—' }}</dd></div>
           </dl>
@@ -317,6 +375,7 @@ function viewHistoryItem(meta: ReportMeta): void {
             <div class="mk-kv"><dt>Profile</dt><dd>{{ bindingProfile?.name ?? binding.profile_id ?? '—' }}</dd></div>
             <div class="mk-kv"><dt>子网</dt><dd>{{ bindingSubnet?.name ?? binding.subnet_id ?? 'DHCP' }}</dd></div>
             <div class="mk-kv"><dt>静态 IP</dt><dd>{{ binding.static_address || '自动分配' }}</dd></div>
+            <div class="mk-kv"><dt>主机名</dt><dd>{{ binding.hostname || '按模板生成' }}</dd></div>
           </dl>
         </template>
         <el-empty
@@ -384,7 +443,7 @@ function viewHistoryItem(meta: ReportMeta): void {
             <router-link to="/jobs"><el-button text size="small">全部作业 →</el-button></router-link>
           </div>
         </template>
-        <el-table :data="recentJobs" stripe size="small">
+        <el-table class="mk-table" :data="recentJobs" stripe size="small">
           <el-table-column label="状态" width="90">
             <template #default="{ row }"><StatusTag :status="row.status" /></template>
           </el-table-column>
@@ -413,7 +472,7 @@ function viewHistoryItem(meta: ReportMeta): void {
       <!-- 上报历史 -->
       <el-card class="mk-card">
         <template #header><span>上报历史（最近 20 次）</span></template>
-        <el-table :data="reportHistory" stripe size="small">
+        <el-table class="mk-table" :data="reportHistory" stripe size="small">
           <el-table-column prop="id" label="ID" width="80" />
           <el-table-column label="采集时间" width="180">
             <template #default="{ row }">{{ fmtAbsolute(row.collected_at) }}</template>
@@ -430,7 +489,15 @@ function viewHistoryItem(meta: ReportMeta): void {
 
       <!-- 硬件报告折叠区 -->
       <el-card class="mk-card">
-        <template #header><span>硬件报告</span></template>
+        <template #header>
+          <div class="mk-card-header">
+            <span>硬件报告</span>
+            <div>
+              <el-button size="small" :disabled="!report" @click="downloadHardware('csv')">导出 CSV</el-button>
+              <el-button size="small" :disabled="!report" @click="downloadHardware('txt')">导出 TXT</el-button>
+            </div>
+          </div>
+        </template>
         <el-collapse>
           <el-collapse-item title="机器 / 固件" name="machine">
             <dl class="mk-kv-grid">
@@ -445,7 +512,7 @@ function viewHistoryItem(meta: ReportMeta): void {
             </dl>
           </el-collapse-item>
 
-          <el-collapse-item title="CPU" name="cpu">
+          <el-collapse-item :title="`CPU（${cpuModelSummary || '未上报型号'}）`" name="cpu">
             <dl class="mk-kv-grid">
               <div class="mk-kv"><dt>架构</dt><dd>
                 <el-tag v-if="report?.cpu?.arch" :type="report?.cpu?.arch === 'arm64' ? 'warning' : 'info'" size="small" disable-transitions>
@@ -453,27 +520,61 @@ function viewHistoryItem(meta: ReportMeta): void {
                 </el-tag>
                 <span v-else class="mk-subtle">未上报</span>
               </dd></div>
+              <div class="mk-kv"><dt>厂商</dt><dd>{{ report?.cpu?.vendor || '—' }}</dd></div>
               <div class="mk-kv"><dt>插槽数</dt><dd>{{ report?.cpu?.sockets ?? '—' }}</dd></div>
               <div class="mk-kv"><dt>物理核</dt><dd>{{ report?.cpu?.total_cores ?? '—' }}</dd></div>
               <div class="mk-kv"><dt>逻辑核</dt><dd>{{ report?.cpu?.total_threads ?? '—' }}</dd></div>
+              <div class="mk-kv"><dt>NUMA 节点</dt><dd>{{ report?.cpu?.numa_nodes ?? '—' }}</dd></div>
             </dl>
+            <el-table
+              v-if="report?.cpu?.per_socket?.length"
+              class="mk-table"
+              :data="report.cpu.per_socket"
+              stripe
+              size="small"
+              style="margin-top: 10px"
+            >
+              <el-table-column prop="socket" label="插槽" min-width="70" />
+              <el-table-column prop="model" label="型号" min-width="260" />
+              <el-table-column label="核/线程" min-width="90">
+                <template #default="{ row }">{{ row.cores ?? '—' }} 核 / {{ row.threads ?? '—' }} 线程</template>
+              </el-table-column>
+              <el-table-column label="主频" min-width="90">
+                <template #default="{ row }">
+                  {{ row.base_freq_mhz ? `${(row.base_freq_mhz / 1000).toFixed(2)} GHz` : '—' }}
+                  <span v-if="row.max_freq_mhz" class="mk-subtle">（睿频 {{ (row.max_freq_mhz / 1000).toFixed(1) }}）</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="microcode" label="微码" min-width="110" />
+            </el-table>
           </el-collapse-item>
 
           <el-collapse-item :title="`内存（${fmtBytes(report?.memory?.total_bytes)}）`" name="memory">
-            <el-table :data="report?.memory?.dimms ?? []" stripe size="small">
-              <el-table-column prop="slot" label="插槽" width="100" />
-              <el-table-column label="容量" width="110">
+            <el-table class="mk-table" :data="report?.memory?.dimms ?? []" stripe size="small">
+              <el-table-column prop="locator" label="插槽" min-width="130" />
+              <el-table-column label="容量" width="100">
                 <template #default="{ row }">{{ fmtBytes(row.size_bytes) }}</template>
               </el-table-column>
-              <el-table-column prop="speed_mt_s" label="频率 (MT/s)" width="110" />
-              <el-table-column prop="type" label="类型" width="100" />
-              <el-table-column prop="manufacturer" label="厂商" min-width="120" />
+              <el-table-column label="频率 (MT/s)" width="110">
+                <template #default="{ row }">{{ row.configured_speed_mts || row.speed_mts || '—' }}</template>
+              </el-table-column>
+              <el-table-column prop="type" label="类型" width="90" />
+              <el-table-column prop="manufacturer" label="厂商" min-width="100" />
+              <el-table-column prop="part_number" label="PN" min-width="180">
+                <template #default="{ row }"><span class="mono">{{ row.part_number || '—' }}</span></template>
+              </el-table-column>
+              <el-table-column prop="serial" label="序列号" min-width="120">
+                <template #default="{ row }"><span class="mono">{{ row.serial || '—' }}</span></template>
+              </el-table-column>
+              <el-table-column label="Rank" width="70">
+                <template #default="{ row }">{{ row.rank || '—' }}</template>
+              </el-table-column>
               <template #empty><span class="mk-subtle">无 DIMM 明细</span></template>
             </el-table>
           </el-collapse-item>
 
           <el-collapse-item title="磁盘" name="disks">
-            <el-table :data="report?.disks ?? []" stripe size="small">
+            <el-table class="mk-table" :data="report?.disks ?? []" stripe size="small">
               <el-table-column prop="kname" label="设备" width="80" />
               <el-table-column prop="type" label="类型" width="70" />
               <el-table-column label="容量" width="100">
@@ -481,6 +582,9 @@ function viewHistoryItem(meta: ReportMeta): void {
               </el-table-column>
               <el-table-column prop="model" label="型号" min-width="160">
                 <template #default="{ row }">{{ row.model || '—' }}</template>
+              </el-table-column>
+              <el-table-column label="序列号" min-width="220">
+                <template #default="{ row }"><span class="mono">{{ row.serial || '—' }}</span></template>
               </el-table-column>
               <el-table-column label="WWN" min-width="180">
                 <template #default="{ row }"><span class="mono">{{ row.wwn || '—' }}</span></template>
@@ -493,7 +597,7 @@ function viewHistoryItem(meta: ReportMeta): void {
           </el-collapse-item>
 
           <el-collapse-item title="网卡" name="nics">
-            <el-table :data="report?.nics ?? []" stripe size="small">
+            <el-table class="mk-table" :data="report?.nics ?? []" stripe size="small">
               <el-table-column prop="name" label="接口" width="90" />
               <el-table-column label="MAC" min-width="170">
                 <template #default="{ row }"><span class="mono">{{ row.mac }}</span></template>
@@ -507,12 +611,71 @@ function viewHistoryItem(meta: ReportMeta): void {
                 </template>
               </el-table-column>
               <el-table-column prop="driver" label="驱动" width="110" />
+              <el-table-column label="光模块 (厂商 / PN / SN)" min-width="280">
+                <template #default="{ row }">
+                  <span v-if="row.sfp" class="mono">
+                    {{ [row.sfp.vendor, row.sfp.part_number, row.sfp.serial].filter(Boolean).join(' / ') }}
+                  </span>
+                  <span v-else class="mk-subtle">—</span>
+                </template>
+              </el-table-column>
               <el-table-column label="地址" min-width="180">
                 <template #default="{ row }">
                   <span class="mono">{{ (row.addresses ?? []).join(', ') || '—' }}</span>
                 </template>
               </el-table-column>
               <template #empty><span class="mk-subtle">未检出网卡</span></template>
+            </el-table>
+          </el-collapse-item>
+
+          <el-collapse-item v-if="storageControllers.length" :title="`存储 / RAID 控制器（${storageControllers.length} 张）`" name="storagectrl">
+            <el-table class="mk-table" :data="storageControllers" stripe size="small">
+              <el-table-column label="类别" width="160">
+                <template #default="{ row }">{{ row.class_name || row.class_id || '—' }}</template>
+              </el-table-column>
+              <el-table-column label="厂商 / 型号" min-width="260">
+                <template #default="{ row }">
+                  {{ [row.vendor_name, row.device_name].filter(Boolean).join(' ') || '—' }}
+                </template>
+              </el-table-column>
+              <el-table-column label="PCI 地址" width="110">
+                <template #default="{ row }"><span class="mono">{{ row.address }}</span></template>
+              </el-table-column>
+              <el-table-column prop="driver" label="驱动" width="130">
+                <template #default="{ row }"><span class="mono">{{ row.driver || '—' }}</span></template>
+              </el-table-column>
+              <el-table-column label="链路" width="150">
+                <template #default="{ row }">
+                  {{ row.link_speed && row.link_width ? `${row.link_width}x ${row.link_speed}` : '—' }}
+                </template>
+              </el-table-column>
+              <el-table-column label="挂载盘" min-width="140">
+                <template #default="{ row }">
+                  <span class="mono">{{ row.attached.length ? row.attached.join(', ') : '—' }}</span>
+                </template>
+              </el-table-column>
+              <template #empty><span class="mk-subtle">未检出存储控制器</span></template>
+            </el-table>
+          </el-collapse-item>
+
+          <el-collapse-item v-if="(report?.power_supplies ?? []).length" :title="`电源（${(report?.power_supplies ?? []).length} 个）`" name="power">
+            <el-table class="mk-table" :data="report?.power_supplies ?? []" stripe size="small">
+              <el-table-column label="位置" min-width="120">
+                <template #default="{ row }">{{ [row.location, row.name].filter(Boolean).join(' · ') || '—' }}</template>
+              </el-table-column>
+              <el-table-column prop="manufacturer" label="厂商" min-width="120">
+                <template #default="{ row }">{{ row.manufacturer || '—' }}</template>
+              </el-table-column>
+              <el-table-column prop="part_number" label="PN" min-width="180">
+                <template #default="{ row }"><span class="mono">{{ [row.part_number, row.revision].filter(Boolean).join(' / ') || '—' }}</span></template>
+              </el-table-column>
+              <el-table-column prop="serial" label="序列号" min-width="140">
+                <template #default="{ row }"><span class="mono">{{ row.serial || '—' }}</span></template>
+              </el-table-column>
+              <el-table-column label="功率" width="90">
+                <template #default="{ row }">{{ row.max_power_w ? `${row.max_power_w} W` : '—' }}</template>
+              </el-table-column>
+              <template #empty><span class="mk-subtle">未上报电源信息</span></template>
             </el-table>
           </el-collapse-item>
 
@@ -587,7 +750,7 @@ function viewHistoryItem(meta: ReportMeta): void {
         :profiles="profiles"
         :subnets="subnets"
         :binding="binding"
-        @saved="load"
+        @saved="load()"
         :intent="installIntent"
       />
 
@@ -607,7 +770,7 @@ function viewHistoryItem(meta: ReportMeta): void {
 </template>
 
 <style scoped>
-.mk-header-right {
+.mk-header-actions {
   display: flex;
   gap: 10px;
   align-items: center;

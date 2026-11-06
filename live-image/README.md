@@ -28,7 +28,7 @@ Build time: ~10-25 minutes on first run; ~2-5 minutes once apt cache is warm.
 After a successful build, artifacts are copied to:
 
 ```
-/opt/claude/devops/boot/
+<你的源码目录>/boot/
   vmlinuz
   initrd.img
   filesystem.squashfs

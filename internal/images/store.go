@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -65,6 +66,33 @@ func NewStore(ctx context.Context, db *sql.DB, logger *slog.Logger, dir string) 
 			}
 		}
 	}
+	// UNIQUE(filename) — see indexSQL. Empty-string filenames (legacy rows
+	// not yet backfilled) would collide under a unique index, so skip empty
+	// values via a partial index (SQLite: WHERE filename != '').
+	if _, err := db.ExecContext(ctx, indexSQLPartial); err != nil {
+		if !strings.Contains(err.Error(), "already exists") {
+			// Most likely cause: real duplicate filenames in a hand-edited
+			// database. Surface the rows so the operator can rename one.
+			rows, qerr := db.QueryContext(ctx,
+				`SELECT filename, id, name FROM images WHERE filename != '' AND filename IN
+				 (SELECT filename FROM images WHERE filename != '' GROUP BY filename HAVING COUNT(*) > 1)`)
+			if qerr == nil {
+				var dup []string
+				for rows.Next() {
+					var fn, id, nm string
+					if rows.Scan(&fn, &id, &nm) == nil {
+						dup = append(dup, fmt.Sprintf("%s (id=%s, name=%s)", fn, id, nm))
+					}
+				}
+				rows.Close()
+				if len(dup) > 0 {
+					return nil, fmt.Errorf("images: duplicate filenames block the unique index; rename one of: %s",
+						strings.Join(dup, "; "))
+				}
+			}
+			return nil, fmt.Errorf("apply images filename unique index: %w", err)
+		}
+	}
 	s := &Store{db: db, logger: logger, dir: dir}
 	if err := s.ensureDirs(); err != nil {
 		return nil, err
@@ -106,6 +134,7 @@ type UploadSession struct {
 	ChunkSize      int64     `json:"chunk_size"`
 	NumChunks      int       `json:"num_chunks"`
 	UploadedChunks int       `json:"uploaded_chunks"`
+	State          string    `json:"state"` // "uploading" | "finalizing"
 	UploadedBy     string    `json:"uploaded_by"`
 	StartedAt      time.Time `json:"started_at"`
 }
@@ -140,7 +169,7 @@ func (s *Store) CreateUpload(ctx context.Context, in CreateUploadInput) (*Upload
 	// naming, dedup, and the images.sha256 column. When non-empty, it must be
 	// a valid 64-hex string and the server verifies it post-assembly.
 	if in.ExpectedSHA256 != "" && !sha256RE.MatchString(in.ExpectedSHA256) {
-		return nil, errors.New("images: expected_sha256 must be 64 lowercase hex chars")
+		return nil, fmt.Errorf("%w: expected_sha256 must be 64 lowercase hex chars", ErrSHAFormat)
 	}
 	chunkSize := in.ChunkSize
 	if chunkSize <= 0 {
@@ -190,8 +219,8 @@ func (s *Store) CreateUpload(ctx context.Context, in CreateUploadInput) (*Upload
 	if _, err := s.db.ExecContext(ctx, `
         INSERT INTO upload_sessions
             (id, name, version, family, arch, notes, expected_sha256, total_size,
-             chunk_size, num_chunks, uploaded_chunks, uploaded_by, started_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+             chunk_size, num_chunks, uploaded_chunks, state, uploaded_by, started_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'uploading', ?, ?)`,
 		id, in.Name, in.Version, in.Family, in.Arch, in.Notes, in.ExpectedSHA256,
 		in.TotalSize, chunkSize, numChunks, in.UploadedBy, started,
 	); err != nil {
@@ -210,6 +239,7 @@ func (s *Store) CreateUpload(ctx context.Context, in CreateUploadInput) (*Upload
 		ChunkSize:      chunkSize,
 		NumChunks:      numChunks,
 		UploadedChunks: 0,
+		State:          stateUploading,
 		UploadedBy:     in.UploadedBy,
 		StartedAt:      time.Unix(started, 0).UTC(),
 	}, nil
@@ -222,10 +252,10 @@ func (s *Store) GetUpload(ctx context.Context, id string) (*UploadSession, error
 	var version, family, notes sql.NullString
 	err := s.db.QueryRowContext(ctx, `
         SELECT id, name, version, family, COALESCE(arch,''), notes, expected_sha256, total_size,
-               chunk_size, num_chunks, uploaded_chunks, uploaded_by, started_at
+               chunk_size, num_chunks, uploaded_chunks, COALESCE(state,'uploading'), uploaded_by, started_at
         FROM upload_sessions WHERE id = ?`, id).Scan(
 		&u.ID, &u.Name, &version, &family, &u.Arch, &notes, &u.ExpectedSHA256, &u.TotalSize,
-		&u.ChunkSize, &u.NumChunks, &u.UploadedChunks, &u.UploadedBy, &started,
+		&u.ChunkSize, &u.NumChunks, &u.UploadedChunks, &u.State, &u.UploadedBy, &started,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -302,13 +332,9 @@ type FinalizeInput struct {
 // hash suffix is appended so both can coexist on disk.
 func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, error) {
 	if !sha256RE.MatchString(in.SHA256) {
-		return nil, errors.New("images: sha256 must be 64 lowercase hex chars")
+		return nil, fmt.Errorf("%w: sha256 must be 64 lowercase hex chars", ErrSHAFormat)
 	}
 	id, err := newImageID()
-	if err != nil {
-		return nil, err
-	}
-	filename, err := s.uniqueFilename(ctx, in.Name, in.Format, in.SHA256)
 	if err != nil {
 		return nil, err
 	}
@@ -329,15 +355,29 @@ func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, er
 		return nil, fmt.Errorf("dedupe check: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-        INSERT INTO images
-            (id, name, version, family, arch, format, size_bytes, virtual_size,
-             sha256, filename, uploaded_at, uploaded_by, notes, metadata_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, in.Name, in.Version, in.Family, in.Arch, in.Format, in.SizeBytes, in.VirtualSize,
-		in.SHA256, filename, uploadedAt, in.UploadedBy, in.Notes, in.MetadataJSON,
-	); err != nil {
-		return nil, fmt.Errorf("insert image: %w", err)
+	// Derive the filename INSIDE the transaction: the check-SELECT and the
+	// INSERT below share this write lock, so a concurrent FinalizeImage for
+	// the same name either sees our row (and suffixes its own name) or fails
+	// its INSERT on the UNIQUE index (retried with a suffix below).
+	filename, err := s.uniqueFilenameTx(ctx, tx, in.Name, in.Format, in.SHA256)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := s.insertImageTx(ctx, tx, id, filename, uploadedAt, in); err != nil {
+		var conflict *uniqueConstraintError
+		if errors.As(err, &conflict) {
+			// Lost the name race despite the lock (e.g. the UNIQUE index
+			// caught what the SELECT's snapshot missed). Re-derive with the
+			// forced -sha8 suffix and retry once — this name now belongs to us.
+			ext := filepath.Ext(filename)
+			filename = suffixedName(filename, ext, in.SHA256)
+			if _, err := s.insertImageTx(ctx, tx, id, filename, uploadedAt, in); err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 
 	if in.SessionID != "" {
@@ -367,6 +407,32 @@ func (s *Store) FinalizeImage(ctx context.Context, in FinalizeInput) (*Image, er
 		Notes:        in.Notes,
 		MetadataJSON: in.MetadataJSON,
 	}, nil
+}
+
+// uniqueConstraintError marks an INSERT that failed on the filename UNIQUE
+// index (see isUniqueConstraint); FinalizeImage retries once with a suffixed
+// name.
+type uniqueConstraintError struct{ err error }
+
+func (e *uniqueConstraintError) Error() string { return e.err.Error() }
+func (e *uniqueConstraintError) Unwrap() error { return e.err }
+
+func (s *Store) insertImageTx(ctx context.Context, tx *sql.Tx, id, filename string, uploadedAt int64, in FinalizeInput) (sql.Result, error) {
+	res, err := tx.ExecContext(ctx, `
+        INSERT INTO images
+            (id, name, version, family, arch, format, size_bytes, virtual_size,
+             sha256, filename, uploaded_at, uploaded_by, notes, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, in.Name, in.Version, in.Family, in.Arch, in.Format, in.SizeBytes, in.VirtualSize,
+		in.SHA256, filename, uploadedAt, in.UploadedBy, in.Notes, in.MetadataJSON,
+	)
+	if err != nil {
+		if isUniqueConstraint(err) && strings.Contains(err.Error(), "images.filename") {
+			return nil, &uniqueConstraintError{err: fmt.Errorf("insert image: %w", err)}
+		}
+		return nil, fmt.Errorf("insert image: %w", err)
+	}
+	return res, nil
 }
 
 // ListImages returns all images, most-recently-uploaded first.

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"metalkit/internal/sqlitedb"
 )
@@ -17,6 +18,7 @@ func newTestStore(t *testing.T) *Store {
 	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{
 		Path:   filepath.Join(t.TempDir(), "test.db"),
 		Logger: logger,
+		NoSync: true,
 	})
 	if err != nil {
 		t.Fatalf("sqlitedb.Open: %v", err)
@@ -88,4 +90,46 @@ func TestRecordBrokenDBDoesNotPanic(t *testing.T) {
 	s := newTestStore(t)
 	_ = s.db.Close()
 	s.Record(context.Background(), "x", "y", "", "ok", nil)
+}
+
+// TestPruneAndGCLoop: retention pruning removes only out-of-window events
+// and the GC loop stops on ctx cancel.
+func TestPruneAndGCLoop(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	// One event inside the window, one aged past 180d.
+	s.now = func() time.Time { return now }
+	s.Record(ctx, "admin", "test.action", "t1", "ok", nil)
+	old := now.Add(-DefaultRetention - time.Hour)
+	s.now = func() time.Time { return old }
+	s.Record(ctx, "admin", "test.action", "t2", "ok", nil)
+	s.now = func() time.Time { return now }
+
+	n, err := s.Prune(ctx, 0)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("Prune removed %d events, want 1 (the aged one)", n)
+	}
+	events, err := s.List(ctx, ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(events) != 1 || events[0].Target != "t1" {
+		t.Fatalf("post-prune events = %+v, want only the fresh one", events)
+	}
+
+	// The loop exits with the context; a short interval keeps the test fast.
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { s.GCLoop(runCtx, 50*time.Millisecond); close(done) }()
+	time.Sleep(120 * time.Millisecond) // let at least one tick fire
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("GCLoop did not exit after ctx cancel")
+	}
 }

@@ -20,7 +20,7 @@ func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	path := filepath.Join(t.TempDir(), "test.db")
-	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger})
+	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger, NoSync: true})
 	if err != nil {
 		t.Fatalf("sqlitedb.Open: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestCreateGet(t *testing.T) {
 func TestCreateUsesDefaultRootHash(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	path := filepath.Join(t.TempDir(), "test.db")
-	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger})
+	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger, NoSync: true})
 	if err != nil {
 		t.Fatalf("sqlitedb.Open: %v", err)
 	}

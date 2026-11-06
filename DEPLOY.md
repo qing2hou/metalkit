@@ -19,7 +19,7 @@
 
 ### 开发机要求（打包用）
 
-- Go 1.21+（推荐 1.25）
+- Go 1.25+（go.mod 钉死 1.25.0，旧版拒绝构建）
 - Docker（仅在需要重新构建 live 镜像时）
 
 ---
@@ -29,7 +29,7 @@
 ### 1. 在开发机打包最新版本
 
 ```bash
-cd /opt/claude/metalkit
+cd /opt/metalkit
 
 # 构建二进制（包含最新代码修复）
 /usr/local/go/bin/go build -buildvcs=false -o bin/controller ./cmd/controller
@@ -119,7 +119,7 @@ journalctl -u metalkit-controller -f
 
 ```bash
 # 开发机
-cd /opt/claude/metalkit
+cd /opt/metalkit
 /usr/local/go/bin/go build -buildvcs=false -o bin/controller ./cmd/controller
 /usr/local/go/bin/go build -buildvcs=false -o bin/agent      ./cmd/agent
 ./scripts/package.sh
@@ -141,7 +141,7 @@ sudo ./scripts/install.sh --yes  # 保留现有配置
 
 ```bash
 # 开发机
-cd /opt/claude/metalkit
+cd /opt/metalkit
 /usr/local/go/bin/go build -buildvcs=false -o bin/controller ./cmd/controller
 scp bin/controller root@<target-ip>:/tmp/
 
@@ -161,7 +161,7 @@ journalctl -u metalkit-controller -f
 
 ```bash
 # 开发机（需要 Docker，耗时 10-30 分钟）
-cd /opt/claude/metalkit
+cd /opt/metalkit
 ./scripts/build-live.sh --docker
 
 # 然后按方式 A 完整更新

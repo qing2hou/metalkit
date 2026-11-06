@@ -3,9 +3,11 @@ package settings
 import (
 	"context"
 	"encoding/json"
+
 	"errors"
 	"fmt"
 	"log/slog"
+	"metalkit/internal/apiutil"
 	"net"
 	"net/http"
 	"net/netip"
@@ -232,12 +234,12 @@ func (a *API) putDHCP(w http.ResponseWriter, r *http.Request) {
 	if in.Interface != "" {
 		kv[KeyDHCPInterface] = in.Interface
 	}
-	if err := a.store.SetMany(r.Context(), kv, basicAuthUser(r)); err != nil {
+	if err := a.store.SetMany(r.Context(), kv, apiutil.RequestActor(r)); err != nil {
 		a.logger.Error("settings put dhcp", "err", err)
 		writeError(w, http.StatusInternalServerError, "save failed")
 		return
 	}
-	a.logger.Info("dhcp settings updated", "user", basicAuthUser(r), "mode", in.Mode,
+	a.logger.Info("dhcp settings updated", "user", apiutil.RequestActor(r), "mode", in.Mode,
 		"start", in.Start, "end", in.End)
 
 	// Try to hot-reload the running DHCP server. If it succeeds, the UI can
@@ -540,13 +542,6 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
-}
-
-func basicAuthUser(r *http.Request) string {
-	if u, _, ok := r.BasicAuth(); ok {
-		return u
-	}
-	return "anonymous"
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

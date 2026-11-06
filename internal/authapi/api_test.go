@@ -21,6 +21,7 @@ func newTestStore(t *testing.T) *sessions.Store {
 	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{
 		Path:   ":memory:",
 		Logger: logger,
+		NoSync: true,
 	})
 	if err != nil {
 		t.Fatalf("sqlitedb.Open: %v", err)

@@ -20,6 +20,10 @@ export interface MachineSummary {
   /** 当前绑定配置的装机目标 IP（静态方式时即装好后的业务地址，优先于上报地址显示）。 */
   install_ip?: string
   bmc_managed?: boolean
+  /** 运维手工备注（用途/警示），不随 agent 上报变化 */
+  notes?: string
+  /** 机器物理位置（机房/机柜/U位），手工维护 */
+  location?: string
 }
 
 export interface ReportMeta {
@@ -28,12 +32,17 @@ export interface ReportMeta {
 }
 
 export interface Dimm {
-  slot?: string
+  locator?: string
+  bank?: string
   size_bytes?: number
-  speed_mt_s?: number
-  manufacturer?: string
-  form_factor?: string
   type?: string
+  speed_mts?: number
+  configured_speed_mts?: number
+  manufacturer?: string
+  serial?: string
+  part_number?: string
+  rank?: number
+  voltage?: string
 }
 
 export interface Disk {
@@ -43,12 +52,52 @@ export interface Disk {
   size_bytes: number
   model?: string
   serial?: string
+  vendor?: string
+  firmware?: string
   rotational?: boolean
   transport?: string
   wwn?: string
   by_path?: string
+  pci_address?: string
   smart?: Record<string, unknown>
   nvme?: Record<string, unknown>
+}
+
+/** SFP/QSFP 光模块（ethtool -m 采集；电口/无模块时缺省） */
+export interface Sfp {
+  vendor?: string
+  part_number?: string
+  serial?: string
+  type?: string
+  wavelength_nm?: number
+}
+
+/** 电源（SMBIOS Type 39；整机名版信息） */
+export interface PowerSupply {
+  location?: string
+  name?: string
+  manufacturer?: string
+  part_number?: string
+  revision?: string
+  serial?: string
+  asset_tag?: string
+  max_power_w?: number
+}
+
+export interface PciDevice {
+  address: string
+  class_id?: string
+  class_name?: string
+  vendor_id?: string
+  vendor_name?: string
+  device_id?: string
+  device_name?: string
+  subsystem_vendor?: string
+  subsystem_device?: string
+  driver?: string
+  kernel_modules?: string[]
+  link_speed?: string
+  link_width?: string
 }
 
 export interface Nic {
@@ -60,10 +109,34 @@ export interface Nic {
   link?: boolean
   mtu?: number
   driver?: string
+  driver_version?: string
+  firmware_version?: string
   pci_address?: string
+  bus_info?: string
   /** CIDR 字符串，如 "192.168.50.20/24" */
   addresses?: string[]
-  sfp?: Record<string, unknown>
+  sfp?: Sfp
+}
+
+export interface CpuSocket {
+  socket?: string
+  model?: string
+  cores?: number
+  threads?: number
+  base_freq_mhz?: number
+  max_freq_mhz?: number
+  microcode?: string
+}
+
+export interface CpuInfo {
+  arch?: string
+  vendor?: string
+  sockets?: number
+  total_cores?: number
+  total_threads?: number
+  numa_nodes?: number
+  per_socket?: CpuSocket[]
+  flags?: string[]
 }
 
 export interface Report {
@@ -80,14 +153,7 @@ export interface Report {
     chassis?: Record<string, unknown>
   }
   firmware?: Record<string, unknown>
-  cpu?: {
-    arch?: string
-    sockets?: number
-    total_cores?: number
-    total_threads?: number
-    per_socket?: Array<Record<string, unknown>>
-    flags?: string[]
-  }
+  cpu?: CpuInfo
   memory?: {
     total_bytes?: number
     ecc?: boolean
@@ -95,8 +161,9 @@ export interface Report {
   }
   disks?: Disk[]
   nics?: Nic[]
-  pci_devices?: Array<Record<string, unknown>>
+  pci_devices?: PciDevice[]
   accelerators?: Array<Record<string, unknown>>
+  power_supplies?: PowerSupply[]
   bmc?: Record<string, unknown>
   sensors?: Array<Record<string, unknown>>
   system?: Record<string, unknown>

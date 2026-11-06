@@ -29,7 +29,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	path := filepath.Join(t.TempDir(), "test.db")
-	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger})
+	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{Path: path, Logger: logger, NoSync: true})
 	if err != nil {
 		t.Fatalf("sqlitedb.Open: %v", err)
 	}

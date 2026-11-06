@@ -5,6 +5,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { bindingsApi } from '@/api'
 import type { Binding, Image, Profile, Report, Subnet } from '@/api/types'
 import { generatePassword } from '@/lib/filename'
+import { validateHostname } from '@/lib/hostname'
 import { hostInSubnet, isValidIPv4 } from '@/lib/net'
 import { fmtBytes } from '@/lib/format'
 
@@ -27,6 +28,14 @@ const emit = defineEmits<{
 }>()
 
 const isReinstall = computed(() => props.intent === 'reinstall')
+
+// 底部操作提示：把「哪个按钮会动真格」写明，防止把「仅保存」当成触发装机
+// （真实事故：2026-10-09 运维点「仅保存」后以为重装在排队）。
+const dispatchHint = computed(() =>
+  isReinstall.value
+    ? '「仅保存配置」不会重装；重装需走右侧红色按钮并二次确认'
+    : '「仅保存配置」不发装机；「保存并发装」才会触发装机',
+)
 
 const visible = computed({
   get: () => props.modelValue,
@@ -60,6 +69,8 @@ const form = reactive({
   bondPrimary: '',
   // 监控 agent 植入（三态：跟随 profile / 强制开 / 强制关）
   agentMode: 'inherit' as 'inherit' | 'on' | 'off',
+  // 主机名（空 = 不覆盖，由 profile.hostname_template 展开）
+  hostname: '',
 })
 
 const saving = ref(false)
@@ -112,7 +123,15 @@ watch(
     const b = props.binding
     form.imageId = b?.image_id ?? ''
     form.profileId = b?.profile_id ?? ''
-    form.desiredState = isReinstall.value ? 'reinstall' : ((b?.desired_state as 'install') ?? 'install')
+    // 期望状态预填：binding 的 none 不是「用户上次想要 none」，而是
+    // 「意图已消费/未表达」——必须回落到 install，否则表单会把 none
+    // 原样发回（两个 radio 都不选中，提交后 orchestrator 永不建 job）。
+    // 真实事故：连续三次「保存并发装」toast 全绿但零作业，因为预填把
+    // 上一轮消费完的 none 带进了 payload。
+    const persisted = b?.desired_state === 'install' || b?.desired_state === 'reinstall'
+      ? b.desired_state
+      : 'install'
+    form.desiredState = isReinstall.value ? 'reinstall' : persisted
     form.subnetId = b?.subnet_id ?? ''
     if (b?.static_address) {
       form.ipMode = 'static'
@@ -127,6 +146,8 @@ watch(
     }
     form.usePasswordOverride = false
     form.rootPassword = ''
+    // 主机名：binding 上存的是本机覆盖值；空 = 按 profile 模板展开
+    form.hostname = b?.hostname ?? ''
     // 目标盘：上次的覆盖值优先；无覆盖（smallest）回退 profile 默认
     if (b?.target_disk) {
       form.diskMode = (['smallest', 'by-wwn', 'by-path', 'by-model'] as const).includes(
@@ -183,6 +204,17 @@ const staticIpError = computed(() => {
   return ''
 })
 
+// 切换子网时自动清空静态 IP：旧子网的地址换个网段几乎必然非法
+// （staticIpError 会拦「IP 不在子网内」，但当场清空比让用户撞一次
+// 校验错误再手删的体验好）。prefilling 期间不触发（预填本身就会设子网）。
+watch(
+  () => form.subnetId,
+  (_n, old) => {
+    if (prefilling || old === undefined) return
+    form.staticIp = ''
+  },
+)
+
 // 装机密码：勾选覆盖后若填写则需 8-128 字符（后端 bindings.validatePassword 同规则）
 const passwordError = computed(() => {
   if (!form.usePasswordOverride) return ''
@@ -193,16 +225,32 @@ const passwordError = computed(() => {
   return ''
 })
 
-const canSubmit = computed(
-  () =>
-    form.imageId !== '' &&
-    form.profileId !== '' &&
-    (form.ipMode !== 'static' || !staticIpError.value) &&
-    !passwordError.value &&
-    (form.diskMode === 'smallest' || form.diskValue !== '') &&
-    (form.nicMode === 'auto' || form.nicMac !== '') &&
-    (!form.useBond || form.bondSlaves.length >= 2),
-)
+// 自定义主机名：留空合法（= 按 profile 模板展开），填了则须符合 RFC-1123
+const hostnameError = computed(() => validateHostname(form.hostname))
+
+// 禁用时点按钮/悬停：明确告诉用户差什么——按钮静默无反应是今天
+// 「点保存并发装没建任务」事故的直接体验（静态 IP 填一半按钮灰死无声）。
+const blockedReasons = computed<string[]>(() => {
+  const why: string[] = []
+  if (!form.imageId) why.push('未选择镜像')
+  if (!form.profileId) why.push('未选择安装配置')
+  if (form.ipMode === 'static' && staticIpError.value) why.push(staticIpError.value)
+  if (passwordError.value) why.push(passwordError.value)
+  if (hostnameError.value) why.push(hostnameError.value)
+  if (form.diskMode !== 'smallest' && !form.diskValue) why.push('目标盘选择了按 WWN/路径/型号但未填匹配值')
+  if (form.nicMode !== 'auto' && !form.nicMac) why.push('引导网卡选了按 MAC 但未填')
+  if (form.useBond && form.bondSlaves.length < 2) why.push('Bond 至少需要 2 个成员口')
+  return why
+})
+
+function showWhyBlocked(): void {
+  const why = blockedReasons.value
+  if (why.length) {
+    ElMessage.warning(`尚不能提交：${why.join('；')}`)
+  }
+}
+
+const canSubmit = computed(() => blockedReasons.value.length === 0)
 
 // ---------- 密码 ----------
 
@@ -308,6 +356,10 @@ async function submit(dispatch: boolean): Promise<void> {
         : {}),
       // NIC：by-mac 覆盖；auto 显式清空（回退 profile 默认）
       nic_selector_override: form.nicMode === 'mac' ? `by-mac:${form.nicMac}` : '',
+      // 主机名：留空显式发 ""（清除覆盖 → 按 profile 模板展开）。
+      // 键必须发：hostname 是三态字段，键不传等于保持原值，用户就
+      // 没法通过清空输入框来撤销自定义主机名。
+      hostname: form.hostname.trim(),
       // 监控 agent 植入：覆盖值（true/false）改写本机行为；inherit 清除覆盖（回 profile）
       ...(form.agentMode !== 'inherit'
         ? { agent_installed_override: form.agentMode === 'on' }
@@ -600,6 +652,25 @@ async function submit(dispatch: boolean): Promise<void> {
         </el-col>
       </el-row>
 
+      <el-divider content-position="left">主机名</el-divider>
+
+      <el-form-item label="自定义" :error="hostnameError || undefined">
+        <el-input
+          v-model="form.hostname"
+          class="mono"
+          clearable
+          placeholder="留空 = 按 Profile 主机名模板生成"
+        />
+        <div class="mk-subtle" style="width: 100%">
+          仅对本机生效；
+          {{
+            selectedProfile?.hostname_template
+              ? `留空则用 Profile 模板「${selectedProfile.hostname_template}」展开`
+              : '当前 Profile 未设置主机名模板'
+          }}
+        </div>
+      </el-form-item>
+
       <el-divider content-position="left">root 密码</el-divider>
 
       <el-form-item label="覆盖 profile">
@@ -627,22 +698,41 @@ async function submit(dispatch: boolean): Promise<void> {
     </el-form>
 
     <template #footer>
-      <el-button @click="visible = false">取消</el-button>
-      <el-button :loading="saving" :disabled="!canSubmit" @click="submit(false)">
-        仅保存配置
-      </el-button>
-      <el-button
-        v-if="isReinstall"
-        type="danger"
-        :loading="saving"
-        :disabled="!canSubmit"
-        @click="confirmReinstall"
-      >
-        确认重装并执行
-      </el-button>
-      <el-button v-else type="primary" :loading="saving" :disabled="!canSubmit" @click="submit(true)">
-        保存并发装
-      </el-button>
+      <div class="mk-dialog-footer">
+        <div class="mk-footer-main">
+          <el-tooltip :disabled="canSubmit" :content="blockedReasons.join('；')" placement="top">
+            <span class="mk-disabled-wrap" @click="!canSubmit && showWhyBlocked()">
+              <el-button text :loading="saving" :disabled="!canSubmit" @click="submit(false)">
+                仅保存配置
+              </el-button>
+            </span>
+          </el-tooltip>
+          <span class="mk-footer-hint mk-subtle">
+            {{ dispatchHint }}
+          </span>
+        </div>
+        <div class="mk-footer-actions">
+          <el-tooltip :disabled="canSubmit" :content="blockedReasons.join('；')" placement="top">
+            <span class="mk-disabled-wrap" @click="!canSubmit && showWhyBlocked()">
+              <el-button v-if="isReinstall" type="danger" plain :loading="saving" :disabled="!canSubmit" @click="submit(false)">
+                仅保存配置（不重装）
+              </el-button>
+              <el-button
+                v-if="isReinstall"
+                type="danger"
+                :loading="saving"
+                :disabled="!canSubmit"
+                @click="confirmReinstall"
+              >
+                确认重装并执行
+              </el-button>
+              <el-button v-else type="primary" :loading="saving" :disabled="!canSubmit" @click="submit(true)">
+                保存并发装
+              </el-button>
+            </span>
+          </el-tooltip>
+        </div>
+      </div>
     </template>
   </el-dialog>
 </template>
@@ -652,5 +742,37 @@ async function submit(dispatch: boolean): Promise<void> {
   display: flex;
   gap: 8px;
   width: 100%;
+}
+
+/* 弹窗底部的两区布局：左侧仅保存+说明，右侧主/危险操作。
+   视觉权重从左到右递增，防止把「仅保存」当成触发装机的按钮。 */
+.mk-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--mk-space-4);
+  width: 100%;
+}
+
+.mk-footer-main {
+  display: flex;
+  align-items: center;
+  gap: var(--mk-space-3);
+  min-width: 0;
+}
+
+.mk-footer-hint {
+  line-height: 1.4;
+}
+
+.mk-disabled-wrap {
+  display: inline-flex;
+}
+
+.mk-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--mk-space-2);
+  flex-shrink: 0;
 }
 </style>

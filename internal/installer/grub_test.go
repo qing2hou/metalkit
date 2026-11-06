@@ -1000,3 +1000,37 @@ func TestSetDefaultBootKernelToDriverComplete_GrubbyFailsFallsBackToGrubenv(t *t
 		t.Fatalf("expected saved_entry=%s in grubenv, got: %s", kver, string(data))
 	}
 }
+
+// TestMaskBootLatencyHogs: wait-online / snapd 被 mask（裸机首启两大拖累：
+// 未插线口 2 分钟超时 + snapd 48 秒种子），已 mask 时幂等。
+func TestMaskBootLatencyHogs(t *testing.T) {
+	// mockFS 的 Symlink 落在 files map（值内容 "symlink:..."），不是真
+	// 磁盘链接——断言走 FS 语义而非 os.Lstat。
+	var fs FS = newMockFS()
+	d := Deps{Exec: newMockExec(), FS: fs}
+	ctx := context.Background()
+	mnt := "/target"
+
+	maskBootLatencyHogs(ctx, d, mnt)
+
+	for _, unit := range []string{"systemd-networkd-wait-online.service", "snapd.seeded.service", "snapd.service"} {
+		p := filepath.Join(mnt, "etc/systemd/system", unit)
+		data, err := fs.ReadFile(p)
+		if err != nil {
+			t.Errorf("%s: not created: %v", unit, err)
+			continue
+		}
+		if !bytes.HasPrefix(data, []byte("symlink:/dev/null")) {
+			t.Errorf("%s: masked to %q, want /dev/null", unit, data)
+		}
+	}
+
+	// 幂等：再跑一遍不报错、mask 保持
+	maskBootLatencyHogs(ctx, d, mnt)
+	for _, unit := range []string{"systemd-networkd-wait-online.service", "snapd.seeded.service"} {
+		p := filepath.Join(mnt, "etc/systemd/system", unit)
+		if _, err := fs.ReadFile(p); err != nil {
+			t.Errorf("second run removed mask for %s: %v", unit, err)
+		}
+	}
+}

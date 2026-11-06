@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Moon, Sunny } from '@element-plus/icons-vue'
+import { Moon, Sunny, User } from '@element-plus/icons-vue'
 import { useDark } from '@vueuse/core'
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
@@ -43,7 +43,10 @@ function isActive(item: NavItem): boolean {
   <el-container class="mk-shell">
     <el-header class="mk-topbar" height="56px">
       <div class="mk-topbar-inner">
-        <router-link to="/" class="mk-brand"> metalkit </router-link>
+        <router-link to="/" class="mk-brand">
+          <span class="mk-brand-name">metalkit</span>
+          <span class="mk-brand-sub">裸金属装机平台</span>
+        </router-link>
         <nav class="mk-nav">
           <router-link
             v-for="item in navItems"
@@ -61,7 +64,10 @@ function isActive(item: NavItem): boolean {
               <el-icon><component :is="themeIcon" /></el-icon>
             </el-button>
           </el-tooltip>
-          <span v-if="auth.username" class="mk-user">{{ auth.username }}</span>
+          <span v-if="auth.username" class="mk-user">
+            <el-icon class="mk-user-icon"><User /></el-icon>
+            {{ auth.username }}
+          </span>
           <el-button v-if="auth.username" text size="small" @click="auth.logout()">退出</el-button>
         </div>
       </div>
@@ -77,44 +83,63 @@ function isActive(item: NavItem): boolean {
   min-height: 100vh;
 }
 
+.mk-main {
+  padding: 0;
+  background: var(--mk-page-bg);
+}
+
 .mk-topbar {
   background: var(--el-bg-color);
-  border-bottom: 1px solid var(--el-border-color-light);
+  border-bottom: 1px solid var(--mk-border);
   position: sticky;
   top: 0;
   z-index: 100;
 }
 
 .mk-topbar-inner {
-  max-width: 1240px;
+  max-width: 1280px;
   margin: 0 auto;
   height: 100%;
   display: flex;
   align-items: center;
-  gap: 28px;
-  padding: 0 24px;
+  gap: var(--mk-space-6);
+  padding: 0 var(--mk-space-6);
 }
 
+/* 品牌区：名称 + 产品定位，纵向紧凑排 */
 .mk-brand {
-  font-weight: 700;
-  font-size: 16px;
-  letter-spacing: 0.02em;
-  color: var(--el-text-color-primary);
+  display: flex;
+  flex-direction: column;
   text-decoration: none;
+  line-height: 1.15;
+  flex-shrink: 0;
+}
+
+.mk-brand-name {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.01em;
+  color: var(--el-text-color-primary);
+}
+
+.mk-brand-sub {
+  font-size: var(--mk-font-xs);
+  color: var(--el-text-color-placeholder);
+  margin-top: 1px;
 }
 
 .mk-nav {
   display: flex;
-  gap: 4px;
+  gap: var(--mk-space-1);
   flex: 1;
 }
 
 .mk-nav-link {
-  padding: 6px 12px;
-  border-radius: 6px;
+  padding: 5px 10px;
+  border-radius: var(--mk-radius);
   color: var(--el-text-color-regular);
   text-decoration: none;
-  font-size: 14px;
+  font-size: var(--mk-font-sm);
 }
 
 .mk-nav-link:hover {
@@ -131,11 +156,18 @@ function isActive(item: NavItem): boolean {
 .mk-topbar-right {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--mk-space-2);
 }
 
 .mk-user {
   color: var(--el-text-color-secondary);
-  font-size: 13px;
+  font-size: var(--mk-font-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--mk-space-1);
+}
+
+.mk-user-icon {
+  font-size: var(--mk-font-sm);
 }
 </style>

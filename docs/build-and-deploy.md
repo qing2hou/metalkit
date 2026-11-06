@@ -71,7 +71,7 @@ Dell BIOS PXE
 ## 3. 构建步骤
 
 ```bash
-cd /opt/claude/devops
+cd <你的源码目录>
 
 # 1) 拉取 iPXE 第一阶段二进制（undionly.kpxe / snponly.efi / ipxe.efi）
 make ipxe

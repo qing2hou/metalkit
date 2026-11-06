@@ -78,7 +78,7 @@ export function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
 }
 
 export function apiSend<T>(
-  method: 'POST' | 'PUT' | 'DELETE',
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   path: string,
   body?: unknown,
 ): Promise<T> {

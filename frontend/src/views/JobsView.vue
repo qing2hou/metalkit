@@ -9,6 +9,7 @@ import AppShell from '@/components/AppShell.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import { usePollHealth } from '@/composables/usePollHealth'
 import { useQuerySync } from '@/composables/useQuerySync'
+import { usePagedTable } from '@/composables/usePagedTable'
 import { fmtAbsolute, fmtRelative } from '@/lib/format'
 import { asRow } from '@/lib/typed'
 
@@ -49,8 +50,9 @@ useQuerySync(
 
 const health = usePollHealth()
 
-async function load(): Promise<void> {
-  loading.value = true
+async function load(opts: { silent?: boolean } = {}): Promise<void> {
+  // silent=后台轮询：不拉遮罩——5s 一次的 mask 会打断正在查看作业的用户
+  if (!opts.silent) loading.value = true
   try {
     list.value = await jobsApi.list({ limit: 200 })
     health.noteOk()
@@ -70,7 +72,7 @@ function onVisibility(): void {
     if (timer) clearInterval(timer)
     timer = null
   } else {
-    void load()
+    void load({ silent: true })
     startTimer()
   }
 }
@@ -78,7 +80,7 @@ function onVisibility(): void {
 function startTimer(): void {
   if (timer) clearInterval(timer)
   timer = setInterval(() => {
-    if (!document.hidden) void load()
+    if (!document.hidden) void load({ silent: true })
   }, POLL_MS)
 }
 
@@ -140,6 +142,8 @@ async function purgeFinished(): Promise<void> {
 }
 
 const runningCount = computed(() => list.value.filter((j) => j.status === 'running' || j.status === 'pending').length)
+
+const pagedTable = usePagedTable(filtered)
 </script>
 
 <template>
@@ -154,10 +158,11 @@ const runningCount = computed(() => list.value.filter((j) => j.status === 'runni
         style="margin-bottom: 12px"
       />
       <header class="mk-page-header">
-        <h1 class="mk-page-title">装机作业</h1>
-        <div class="mk-header-right">
+        <h1 class="mk-page-title">作业</h1>
+        <p class="mk-page-sub">装机任务的执行记录与实时进度</p>
+        <div class="mk-header-actions">
           <span v-if="runningCount" class="mk-subtle">{{ runningCount }} 个进行中 · 5s 自动刷新</span>
-          <el-button :icon="Refresh" circle aria-label="刷新" @click="load" />
+          <el-button :icon="Refresh" circle aria-label="刷新" @click="load()"/>
           <el-button type="danger" plain @click="purgeFinished">清除已完成</el-button>
         </div>
       </header>
@@ -181,7 +186,7 @@ const runningCount = computed(() => list.value.filter((j) => j.status === 'runni
           <el-checkbox v-model="filters.last24h">最近 24 小时</el-checkbox>
         </div>
 
-        <el-table v-loading="loading" :data="filtered" stripe size="small">
+        <el-table class="mk-table" v-loading="loading" :data="pagedTable.paged.value" stripe size="small">
           <el-table-column label="状态" width="90">
             <template #default="{ row }"><StatusTag :status="row.status" /></template>
           </el-table-column>
@@ -189,7 +194,7 @@ const runningCount = computed(() => list.value.filter((j) => j.status === 'runni
           <el-table-column label="机器" min-width="200">
             <template #default="{ row }">
               <router-link :to="`/m/${row.machine_uuid}`" class="mk-link mono" @click.stop>
-                {{ row.machine_uuid.slice(0, 13) }}…
+                {{ row.machine_uuid }}
               </router-link>
             </template>
           </el-table-column>
@@ -206,7 +211,7 @@ const runningCount = computed(() => list.value.filter((j) => j.status === 'runni
               <span v-else class="mk-subtle">—</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="130" fixed="right">
+          <el-table-column label="操作" min-width="110">
             <template #default="{ row }">
               <router-link :to="`/jobs/${row.id}`"><el-button text size="small">详情</el-button></router-link>
               <el-button
@@ -229,6 +234,15 @@ const runningCount = computed(() => list.value.filter((j) => j.status === 'runni
             <el-empty description="没有作业" :image-size="72" />
           </template>
         </el-table>
+        <el-pagination
+          v-if="pagedTable.total.value > pagedTable.pageSize.value"
+          v-model:current-page="pagedTable.currentPage.value"
+          v-model:page-size="pagedTable.pageSize.value"
+          :page-sizes="[20, 50, 100]"
+          :total="pagedTable.total.value"
+          layout="total, sizes, prev, pager, next, jumper"
+          style="margin-top: 16px; justify-content: flex-end"
+        />
       </el-card>
     </div>
   </AppShell>
@@ -243,7 +257,7 @@ const runningCount = computed(() => list.value.filter((j) => j.status === 'runni
   margin-bottom: 14px;
 }
 
-.mk-header-right {
+.mk-header-actions {
   display: flex;
   gap: 10px;
   align-items: center;

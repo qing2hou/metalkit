@@ -23,6 +23,7 @@ func newTestStore(t *testing.T) *Store {
 	db, err := sqlitedb.Open(context.Background(), sqlitedb.Options{
 		Path:   filepath.Join(t.TempDir(), "test.db"),
 		Logger: logger,
+		NoSync: true,
 	})
 	if err != nil {
 		t.Fatalf("sqlitedb.Open: %v", err)

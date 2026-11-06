@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { FormInstance, FormRules } from 'element-plus'
+import { usePagedTable } from '@/composables/usePagedTable'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 
@@ -165,7 +166,10 @@ async function save(): Promise<void> {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean),
-      vlan_id: form.vlanId,
+      // el-input-number 清空后是 undefined，JSON 序列化会丢字段——
+      // 后端三态语义里"不传 = 保持原值"，于是"删掉 VLAN"保存后永远不生效。
+      // 显式发 0（后端明确约定 0 = 清除 VLAN/untagged）。
+      vlan_id: form.vlanId ?? 0,
       dhcp_ranges: form.pools
         .filter((p) => p.start.trim() && p.end.trim())
         .map((p) => ({ start: p.start.trim(), end: p.end.trim() })),
@@ -201,6 +205,8 @@ async function remove(row: Subnet): Promise<void> {
     ElMessage.error(`删除失败: ${(err as Error).message}`)
   }
 }
+
+const pagedTable = usePagedTable(list)
 </script>
 
 <template>
@@ -208,11 +214,12 @@ async function remove(row: Subnet): Promise<void> {
     <div class="mk-page">
       <header class="mk-page-header">
         <h1 class="mk-page-title">子网</h1>
+        <p class="mk-page-sub">装机网络段 — 网关 / DNS / DHCP 池与静态地址分配</p>
         <el-button type="primary" @click="openCreate">新建子网</el-button>
       </header>
 
       <el-card class="mk-card">
-        <el-table v-loading="loading" :data="list" stripe>
+        <el-table class="mk-table" v-loading="loading" :data="pagedTable.paged.value" stripe>
           <el-table-column prop="name" label="名称" min-width="140" />
           <el-table-column prop="cidr" label="CIDR" min-width="160">
             <template #default="{ row }"><span class="mono">{{ row.cidr }}</span></template>
@@ -239,7 +246,7 @@ async function remove(row: Subnet): Promise<void> {
           <el-table-column label="创建时间" width="150">
             <template #default="{ row }">{{ fmtAbsolute(row.created_at) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="140" fixed="right">
+          <el-table-column label="操作" min-width="120">
             <template #default="{ row }">
               <el-button text size="small" @click="openEdit(asRow<Subnet>(row))">编辑</el-button>
               <el-button text size="small" type="danger" @click="remove(asRow<Subnet>(row))">删除</el-button>
@@ -249,6 +256,15 @@ async function remove(row: Subnet): Promise<void> {
             <el-empty description="还没有子网" :image-size="72" />
           </template>
         </el-table>
+        <el-pagination
+          v-if="pagedTable.total.value > pagedTable.pageSize.value"
+          v-model:current-page="pagedTable.currentPage.value"
+          v-model:page-size="pagedTable.pageSize.value"
+          :page-sizes="[20, 50, 100]"
+          :total="pagedTable.total.value"
+          layout="total, sizes, prev, pager, next, jumper"
+          style="margin-top: 16px; justify-content: flex-end"
+        />
       </el-card>
 
       <el-dialog

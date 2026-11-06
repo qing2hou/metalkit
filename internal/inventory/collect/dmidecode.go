@@ -44,6 +44,9 @@ func collectDMIDecode(ctx context.Context, r *inventory.Report) error {
 	if dimmOut, err := runCmd(ctx, 8*time.Second, "dmidecode", "-t", "17"); err == nil {
 		r.Memory.DIMMs = parseDIMMs(dimmOut)
 	}
+	if psuOut, err := runCmd(ctx, 8*time.Second, "dmidecode", "-t", "39"); err == nil {
+		r.PowerSupplies = parsePowerSupplies(psuOut)
+	}
 	return nil
 }
 
@@ -209,6 +212,38 @@ func parseDIMMs(out []byte) []inventory.DIMM {
 		dimms = append(dimms, d)
 	}
 	return dimms
+}
+
+// parsePowerSupplies extracts SMBIOS Type 39 (power supply nameplate). Blocks
+// that carry no identifying fact at all — some BIOSes emit dummy records
+// reading all-"Not Specified" — are skipped.
+func parsePowerSupplies(out []byte) []inventory.PowerSupply {
+	var psus []inventory.PowerSupply
+	for _, blk := range parseDMIBlocks(out) {
+		if blk.dmiType != 39 {
+			continue
+		}
+		p := inventory.PowerSupply{
+			Location:     dmiClean(blk.kv["Location"]),
+			Name:         dmiClean(blk.kv["Name"]),
+			Manufacturer: dmiClean(blk.kv["Manufacturer"]),
+			Serial:       dmiClean(blk.kv["Serial Number"]),
+			AssetTag:     dmiClean(blk.kv["Asset Tag"]),
+			PartNumber:   dmiClean(blk.kv["Model Part Number"]),
+			Revision:     dmiClean(blk.kv["Revision"]),
+		}
+		// "Max Power Capacity: 625 W" — "Unknown"/absent leaves 0.
+		if fields := strings.Fields(blk.kv["Max Power Capacity"]); len(fields) >= 1 {
+			if w, err := strconv.Atoi(fields[0]); err == nil {
+				p.MaxPowerW = w
+			}
+		}
+		if p.Name == "" && p.Manufacturer == "" && p.PartNumber == "" && p.Serial == "" && p.MaxPowerW == 0 {
+			continue
+		}
+		psus = append(psus, p)
+	}
+	return psus
 }
 
 // parseDIMMSize converts "32 GB" / "16384 MB" / "8 GiB" → bytes.

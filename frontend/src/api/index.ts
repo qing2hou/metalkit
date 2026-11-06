@@ -42,6 +42,10 @@ export const machinesApi = {
   reports: (uuid: string) => apiGet<ReportMeta[]>(`/machines/${uuid}/reports`),
   report: (uuid: string, id: number) => apiGet<Report>(`/machines/${uuid}/reports/${id}`),
   remove: (uuid: string) => apiSend<null>('DELETE', `/machines/${uuid}`),
+  setNotes: (uuid: string, notes: string) =>
+    apiSend<MachineSummary>('PATCH', `/machines/${uuid}/notes`, { notes }),
+  setLocation: (uuid: string, location: string) =>
+    apiSend<MachineSummary>('PATCH', `/machines/${uuid}/location`, { location }),
 }
 
 // ---------- images ----------
@@ -167,6 +171,8 @@ export const auditApi = {
     const q = qs.toString()
     return apiGet<AuditEvent[]>(`/audit${q ? `?${q}` : ''}`)
   },
+  remove: (id: number) => apiSend<null>('DELETE', `/audit/${id}`),
+  purge: () => apiSend<{ deleted: number }>('POST', '/audit/purge', {}),
 }
 
 // ---------- util ----------

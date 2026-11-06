@@ -22,6 +22,7 @@ func TestAuditMiddlewareAttributesActor(t *testing.T) {
 	db, err := sqlitedb.Open(t.Context(), sqlitedb.Options{
 		Path:   filepath.Join(t.TempDir(), "t.db"),
 		Logger: logger,
+		NoSync: true,
 	})
 	if err != nil {
 		t.Fatalf("open db: %v", err)

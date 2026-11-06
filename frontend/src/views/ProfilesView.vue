@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Plus } from '@element-plus/icons-vue'
+import { usePagedTable } from '@/composables/usePagedTable'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
@@ -205,18 +206,21 @@ async function remove(row: Profile): Promise<void> {
     ElMessage.error(`删除失败: ${(err as Error).message}`)
   }
 }
+
+const pagedTable = usePagedTable(list)
 </script>
 
 <template>
   <AppShell>
     <div class="mk-page">
       <header class="mk-page-header">
-        <h1 class="mk-page-title">安装配置（Profiles）</h1>
+        <h1 class="mk-page-title">安装配置</h1>
+        <p class="mk-page-sub">装机模板 — 镜像 / 磁盘 / 网络 / 密码策略</p>
         <el-button type="primary" :icon="Plus" @click="openCreate">新建 Profile</el-button>
       </header>
 
       <el-card class="mk-card">
-        <el-table v-loading="loading" :data="list" stripe>
+        <el-table class="mk-table" v-loading="loading" :data="pagedTable.paged.value" stripe>
           <el-table-column prop="name" label="名称" min-width="160" />
           <el-table-column prop="os_family" label="OS 家族" width="110" />
           <el-table-column label="主机名模板" min-width="180">
@@ -254,6 +258,15 @@ async function remove(row: Profile): Promise<void> {
             <el-empty description="还没有 profile" :image-size="72" />
           </template>
         </el-table>
+        <el-pagination
+          v-if="pagedTable.total.value > pagedTable.pageSize.value"
+          v-model:current-page="pagedTable.currentPage.value"
+          v-model:page-size="pagedTable.pageSize.value"
+          :page-sizes="[20, 50, 100]"
+          :total="pagedTable.total.value"
+          layout="total, sizes, prev, pager, next, jumper"
+          style="margin-top: 16px; justify-content: flex-end"
+        />
       </el-card>
 
       <el-dialog

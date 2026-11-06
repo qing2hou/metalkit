@@ -17,18 +17,19 @@ type Report struct {
 	CollectedAt          time.Time `json:"collected_at"`
 	CollectionDurationMS int64     `json:"collection_duration_ms"`
 
-	Machine      Machine       `json:"machine"`
-	Firmware     Firmware      `json:"firmware"`
-	CPU          CPU           `json:"cpu"`
-	Memory       Memory        `json:"memory"`
-	Disks        []Disk        `json:"disks"`
-	NICs         []NIC         `json:"nics"`
-	PCIDevices   []PCIDevice   `json:"pci_devices"`
-	Accelerators []Accelerator `json:"accelerators"`
-	BMC          *BMC          `json:"bmc,omitempty"`
-	Sensors      []Sensor      `json:"sensors"`
-	System       System        `json:"system"`
-	Agent        AgentMeta     `json:"agent"`
+	Machine       Machine       `json:"machine"`
+	Firmware      Firmware      `json:"firmware"`
+	CPU           CPU           `json:"cpu"`
+	Memory        Memory        `json:"memory"`
+	Disks         []Disk        `json:"disks"`
+	NICs          []NIC         `json:"nics"`
+	PCIDevices    []PCIDevice   `json:"pci_devices"`
+	Accelerators  []Accelerator `json:"accelerators"`
+	PowerSupplies []PowerSupply `json:"power_supplies,omitempty"`
+	BMC           *BMC          `json:"bmc,omitempty"`
+	Sensors       []Sensor      `json:"sensors"`
+	System        System        `json:"system"`
+	Agent         AgentMeta     `json:"agent"`
 }
 
 // Machine — top-level identity from SMBIOS.
@@ -188,6 +189,18 @@ type SFP struct {
 	Serial       string `json:"serial,omitempty"`
 	Type         string `json:"type,omitempty"`
 	WavelengthNM int    `json:"wavelength_nm,omitempty"`
+}
+
+// PowerSupply — one SMBIOS Type 39 record: nameplate info per PSU.
+type PowerSupply struct {
+	Location     string `json:"location,omitempty"`
+	Name         string `json:"name,omitempty"`
+	Manufacturer string `json:"manufacturer,omitempty"`
+	PartNumber   string `json:"part_number,omitempty"`
+	Revision     string `json:"revision,omitempty"`
+	Serial       string `json:"serial,omitempty"`
+	AssetTag     string `json:"asset_tag,omitempty"`
+	MaxPowerW    int    `json:"max_power_w,omitempty"`
 }
 
 // PCIDevice — every PCI device on the bus.

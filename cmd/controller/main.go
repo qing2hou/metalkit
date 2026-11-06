@@ -201,8 +201,8 @@ func (r *dhcpReloader) ReloadDHCP(ctx context.Context, s settings.DHCPSettings) 
 		return fmt.Errorf("rebuild local pool: %w", err)
 	}
 	input := dhcp.SubnetPoolInput{
-		Pools:    []dhcp.PoolRange{{Start: local.Start.String(), End: local.End.String()}},
-		Netmask:  local.Netmask.String(), Gateway: local.Gateway.String(),
+		Pools:   []dhcp.PoolRange{{Start: local.Start.String(), End: local.End.String()}},
+		Netmask: local.Netmask.String(), Gateway: local.Gateway.String(),
 		LeaseSec: local.LeaseSec, Exclude: s.Exclude,
 	}
 	pools, err := r.buildPools(ctx, input)
@@ -403,13 +403,14 @@ func run() int {
 
 	leasesForDHCP := &leasesAdapter{store: leaseStore}
 	dhcpCfg := dhcp.Config{
-		Interface:  cfg.Interface,
-		ListenAddr: cfg.DHCPAddr,
-		ServerIP:   cfg.ServerIP,
-		HTTPURL:    httpURL,
-		Logger:     logger.With("component", "dhcp"),
-		Mode:       dhcp.Mode(cfg.DHCPMode),
-		Pool:       dhcpPool,
+		Interface:   cfg.Interface,
+		ListenAddr:  cfg.DHCPAddr,
+		ServerIP:    cfg.ServerIP,
+		HTTPURL:     httpURL,
+		Logger:      logger.With("component", "dhcp"),
+		Mode:        dhcp.Mode(cfg.DHCPMode),
+		ReplyTarget: dhcp.ReplyTarget(cfg.DHCPReplyTarget),
+		Pool:        dhcpPool,
 	}
 	if cfg.DHCPMode == config.DHCPModeFull {
 		dhcpCfg.Leases = leasesForDHCP
@@ -543,8 +544,8 @@ func run() int {
 	// and the subnets API triggers a refresh after catalog edits.
 	if cfg.DHCPMode == config.DHCPModeFull && dhcpPool != nil {
 		input := dhcp.SubnetPoolInput{
-			Pools:    []dhcp.PoolRange{{Start: dhcpPool.Start.String(), End: dhcpPool.End.String()}},
-			Netmask:  dhcpPool.Netmask.String(), Gateway: dhcpPool.Gateway.String(),
+			Pools:   []dhcp.PoolRange{{Start: dhcpPool.Start.String(), End: dhcpPool.End.String()}},
+			Netmask: dhcpPool.Netmask.String(), Gateway: dhcpPool.Gateway.String(),
 			LeaseSec: dhcpPool.LeaseSec,
 		}
 		pools, err := subnetsToPools(input, mustListSubnets(runCtx, subnetStore, logger))
@@ -637,6 +638,11 @@ func run() int {
 	}
 	go monitorStore.GCLoop(runCtx, monitor.JanitorInterval)
 	monitorAPI := monitor.NewAPI(monitorStore, logger.With("component", "monitor-api"))
+
+	// Audit events grow without bound otherwise — every operator request
+	// appends one row; 180-day retention (audit.DefaultRetention), pruned
+	// every 6h, same lifecycle as the monitor GC above.
+	go auditStore.GCLoop(runCtx, audit.JanitorInterval)
 
 	// Browser-UI sessions (cookie auth). Basic Auth keeps working for curl
 	// and agents; the cookie path is what makes the form-based login page

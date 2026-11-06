@@ -6,7 +6,7 @@
 
 ## 📋 开发环境要求
 
-- **Go**：1.21+ (推荐 1.25)
+- **Go**：1.25+（`go.mod` 钉死 1.25.0，旧版拒绝构建；系统 Go 太旧可用 `GOTOOLCHAIN=auto make build`）
 - **Docker**：用于构建 live 镜像（可选，仅在修改 live 镜像时需要）
 - **操作系统**：Linux（推荐 Ubuntu 22.04+ 或 Debian 12+）
 - **工具**：
@@ -19,7 +19,7 @@
 ## 🏗️ 项目结构
 
 ```
-/opt/claude/metalkit/              # 开发源码（git 仓库）
+/opt/metalkit/              # 开发源码（git 仓库）
 ├── cmd/                           # 主程序入口
 │   ├── controller/                # metalkit-controller（服务端）
 │   └── agent/                     # metalkit-agent（live 镜像内运行）
@@ -63,8 +63,8 @@
 ### 1. 克隆仓库
 
 ```bash
-git clone <repo-url> /opt/claude/metalkit
-cd /opt/claude/metalkit
+git clone <repo-url> /opt/metalkit
+cd /opt/metalkit
 ```
 
 ---

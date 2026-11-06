@@ -9,6 +9,7 @@ import { imagesApi } from '@/api'
 import type { Image } from '@/api/types'
 import AppShell from '@/components/AppShell.vue'
 import { useQuerySync } from '@/composables/useQuerySync'
+import { usePagedTable } from '@/composables/usePagedTable'
 import { detectArchFromFilename, detectFromFilename } from '@/lib/filename'
 import { fmtAbsolute, fmtBytes } from '@/lib/format'
 import { asRow } from '@/lib/typed'
@@ -329,6 +330,8 @@ async function remove(row: Image): Promise<void> {
     ElMessage.error(`删除失败: ${(err as Error).message}`)
   }
 }
+
+const pagedTable = usePagedTable(filtered)
 </script>
 
 <template>
@@ -336,6 +339,7 @@ async function remove(row: Image): Promise<void> {
     <div class="mk-page">
       <header class="mk-page-header">
         <h1 class="mk-page-title">镜像</h1>
+        <p class="mk-page-sub">可部署的操作系统镜像，上传后按内容寻址存储</p>
         <el-button type="primary" :icon="Plus" @click="uploadVisible = true">上传镜像</el-button>
       </header>
 
@@ -348,7 +352,7 @@ async function remove(row: Image): Promise<void> {
             <el-radio-button value="unknown">未知 ({{ archCounts.unknown }})</el-radio-button>
           </el-radio-group>
         </div>
-        <el-table v-loading="loading" :data="filtered" stripe>
+        <el-table class="mk-table" v-loading="loading" :data="pagedTable.paged.value" stripe>
           <el-table-column prop="name" label="名称" min-width="180" />
           <el-table-column prop="version" label="版本" width="110" />
           <el-table-column prop="family" label="OS 家族" width="110" />
@@ -376,7 +380,7 @@ async function remove(row: Image): Promise<void> {
             <template #default="{ row }">{{ fmtAbsolute(row.uploaded_at) }}</template>
 
           </el-table-column>
-          <el-table-column label="操作" width="90" fixed="right">
+          <el-table-column label="操作" min-width="80">
             <template #default="{ row }">
               <el-button text size="small" type="danger" @click="remove(asRow<Image>(row))">删除</el-button>
             </template>
@@ -390,6 +394,15 @@ async function remove(row: Image): Promise<void> {
           </template>
 
         </el-table>
+        <el-pagination
+          v-if="pagedTable.total.value > pagedTable.pageSize.value"
+          v-model:current-page="pagedTable.currentPage.value"
+          v-model:page-size="pagedTable.pageSize.value"
+          :page-sizes="[20, 50, 100]"
+          :total="pagedTable.total.value"
+          layout="total, sizes, prev, pager, next, jumper"
+          style="margin-top: 16px; justify-content: flex-end"
+        />
       </el-card>
 
       <el-dialog v-model="uploadVisible" title="上传镜像" width="520px" :close-on-click-modal="false" @close="cancelUpload">
