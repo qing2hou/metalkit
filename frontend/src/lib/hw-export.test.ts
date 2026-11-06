@@ -24,11 +24,20 @@ const sample: Report = {
     ],
   },
   disks: [
-    { kname: 'sda', path: '/dev/sda', type: 'ssd', size_bytes: 480_000_000_000, model: 'Dell SSD 480GB', serial: 'S6XENA0R409123', wwn: '0x5000c500a1' },
+    { kname: 'sda', path: '/dev/sda', type: 'ssd', size_bytes: 480_000_000_000, model: 'Dell SSD 480GB', serial: 'S6XENA0R409123', wwn: '0x5000c500a1', pci_address: '0000:17:00.0' },
   ],
   nics: [
     { name: 'eno1', mac: 'aa:bb:cc:dd:ee:ff', speed_mbps: 1000, driver: 'tg3' },
     { name: 'eno2np0', mac: 'aa:bb:cc:dd:ee:01', speed_mbps: 25000, driver: 'mlx5_core', sfp: { vendor: 'HG GENUINE', part_number: 'MTRA-3E31A-01', serial: '7000282830002' } },
+  ],
+  pci_devices: [
+    { address: '00:17.0', class_id: '0106', class_name: 'SATA controller', vendor_name: 'Intel Corporation', device_name: 'C620 SATA [AHCI]', driver: 'ahci' },
+    { address: '17:00.0', class_id: '0104', class_name: 'RAID bus controller', vendor_name: 'Broadcom / LSI', device_name: 'MegaRAID SAS-3 3108 [Invader]', driver: 'megaraid_sas', link_speed: '8.0 GT/s PCIe', link_width: '8' },
+    { address: '18:00.0', class_id: '0200', class_name: 'Ethernet controller', vendor_name: 'Mellanox', device_name: 'MT27800', driver: 'mlx5_core' },
+  ],
+  power_supplies: [
+    { location: 'PSU1', name: 'Power Supply 1', manufacturer: 'Flextronics', part_number: '7100000000AA', revision: 'F', serial: '5E1CB45KL06', max_power_w: 550 },
+    { location: 'PSU2', name: 'Power Supply 2', manufacturer: 'Flextronics', part_number: '7100000000AA', revision: 'F', serial: '5E1CB45NX2Q', max_power_w: 550 },
   ],
 }
 
@@ -47,6 +56,11 @@ describe('hardwareToCsv', () => {
     expect(csv).toContain('接口,MAC,速率 (Mb/s),驱动,光模块厂商,光模块 PN,光模块 SN')
     expect(csv).toContain('eno1,aa:bb:cc:dd:ee:ff,1000,tg3,,,')
     expect(csv).toContain('HG GENUINE,MTRA-3E31A-01,7000282830002')
+    expect(csv).toContain('存储 / RAID 控制器,,共 2 张')
+    expect(csv).toContain('RAID bus controller,Broadcom / LSI,MegaRAID SAS-3 3108 [Invader],17:00.0,megaraid_sas,8x 8.0 GT/s PCIe,sda')
+    expect(csv).not.toContain('MT27800') // 以太网卡不进存储控制器段
+    expect(csv).toContain('电源,,共 2 个')
+    expect(csv).toContain('PSU1,Power Supply 1,Flextronics,7100000000AA,5E1CB45KL06,550')
   })
 
   it('字段含逗号/引号时正确转义（RFC4180）', () => {
@@ -76,9 +90,13 @@ describe('hardwareToTxt', () => {
     expect(txt).toContain('DIMM_A1  32G  2133MT/s  DDR4  Samsung  PN M393A4K40DB1-CVF  SN 3582D1AF  R2')
     expect(txt).toContain('── 磁盘（1 块）──')
     expect(txt).toContain('SN S6XENA0R409123')
+    expect(txt).toContain('── 存储 / RAID 控制器（2 张）──')
+    expect(txt).toContain('RAID bus controller  Broadcom / LSI MegaRAID SAS-3 3108 [Invader]  17:00.0  megaraid_sas  8x 8.0 GT/s PCIe  盘: sda')
     expect(txt).toContain('── 网卡（2 个）──')
     expect(txt).toContain('eno1  aa:bb:cc:dd:ee:ff  1000Mb/s  tg3')
     expect(txt).toContain('SFP: HG GENUINE / MTRA-3E31A-01 / 7000282830002')
+    expect(txt).toContain('── 电源（2 个）──')
+    expect(txt).toContain('PSU1 · Power Supply 1  Flextronics  PN 7100000000AA/F  SN 5E1CB45KL06  550W')
   })
 
   it('无位置/备注时头两行省略且不出现 —', () => {

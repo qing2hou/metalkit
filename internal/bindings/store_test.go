@@ -167,13 +167,14 @@ func TestUpsertHappyStatic(t *testing.T) {
 	im := f.seedImage(t, "a")
 	pr := f.seedProfile(t, "p-static", "static")
 
+	host := "host42"
 	b, err := f.bindings.Upsert(context.Background(), UpsertInput{
 		MachineUUID:   mu,
 		ImageID:       im,
 		ProfileID:     pr,
 		DesiredState:  "install",
 		StaticAddress: "10.0.0.42",
-		Hostname:      "host42",
+		Hostname:      &host,
 		UpdatedBy:     "admin",
 	})
 	if err != nil {
@@ -404,7 +405,7 @@ func TestBadInputs(t *testing.T) {
 		{"bad image_id", func(in *UpsertInput) { in.ImageID = "short" }, "image_id"},
 		{"bad profile_id", func(in *UpsertInput) { in.ProfileID = "short" }, "profile_id"},
 		{"bad desired_state", func(in *UpsertInput) { in.DesiredState = "running" }, "desired_state"},
-		{"bad hostname", func(in *UpsertInput) { in.Hostname = "host!name" }, "hostname"},
+		{"bad hostname", func(in *UpsertInput) { in.Hostname = ptrStr("host!name") }, "hostname"},
 	}
 
 	for _, c := range cases {

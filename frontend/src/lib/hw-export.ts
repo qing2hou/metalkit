@@ -17,6 +17,22 @@ function cpuModel(r: Report): string {
   return [...new Set((r.cpu?.per_socket ?? []).map((s) => s.model).filter(Boolean))].join(' + ')
 }
 
+/** 存储/RAID 控制器的 PCI class 前缀：0100/0101 SCSI·IDE、0104 RAID、0106 SATA、0107 SAS、0108 NVMe。与 MachineDetailView 的分类口径一致。 */
+const STORAGE_CLASS_PREFIXES = ['0100', '0101', '0104', '0106', '0107', '0108']
+
+function storageControllers(r: Report) {
+  return (r.pci_devices ?? []).filter((p) =>
+    STORAGE_CLASS_PREFIXES.some((c) => (p.class_id ?? '').startsWith(c)),
+  )
+}
+
+function attachedDisks(r: Report, pciAddr: string): string {
+  return (r.disks ?? [])
+    .filter((d) => d.pci_address && d.pci_address.replace(/^0000:/, '') === pciAddr)
+    .map((d) => d.kname)
+    .join(' / ')
+}
+
 function csvRow(cells: unknown[]): string {
   return cells.map(csvField).join(',')
 }
@@ -67,11 +83,31 @@ export function hardwareToCsv(r: Report): string {
   }
   out.push('')
 
+  const ctrls = storageControllers(r)
+  out.push(csvRow(['存储 / RAID 控制器', , `共 ${ctrls.length} 张`]))
+  out.push(csvRow(['类别', '厂商', '型号', 'PCI 地址', '驱动', '链路', '挂载盘']))
+  for (const c of ctrls) {
+    out.push(csvRow([
+      c.class_name, c.vendor_name, c.device_name, c.address, c.driver,
+      c.link_speed && c.link_width ? `${c.link_width}x ${c.link_speed}` : '',
+      attachedDisks(r, c.address),
+    ]))
+  }
+  out.push('')
+
   const nics = r.nics ?? []
   out.push(csvRow(['网卡', , `共 ${nics.length} 个`]))
   out.push(csvRow(['接口', 'MAC', '速率 (Mb/s)', '驱动', '光模块厂商', '光模块 PN', '光模块 SN']))
   for (const n of nics) {
     out.push(csvRow([n.name, n.mac, n.speed_mbps, n.driver, n.sfp?.vendor, n.sfp?.part_number, n.sfp?.serial]))
+  }
+  out.push('')
+
+  const psus = r.power_supplies ?? []
+  out.push(csvRow(['电源', , `共 ${psus.length} 个`]))
+  out.push(csvRow(['位置', '名称', '厂商', 'PN', '序列号', '功率 (W)']))
+  for (const p of psus) {
+    out.push(csvRow([p.location, p.name, p.manufacturer, p.part_number, p.serial, p.max_power_w || '']))
   }
   return out.join('\n') + '\n'
 }
@@ -121,12 +157,32 @@ export function hardwareToTxt(r: Report, header: { serial?: string; location?: s
   }
   L.push('')
 
+  const ctrls = storageControllers(r)
+  L.push(`── 存储 / RAID 控制器（${ctrls.length} 张）──`)
+  for (const c of ctrls) {
+    const link = c.link_speed && c.link_width ? `  ${c.link_width}x ${c.link_speed}` : ''
+    const att = attachedDisks(r, c.address)
+    L.push(`${cell(c.class_name)}  ${cell([c.vendor_name, c.device_name].filter(Boolean).join(' '))}  ${cell(c.address)}  ${cell(c.driver)}${link}${att ? `  盘: ${att}` : ''}`)
+  }
+  L.push('')
+
   const nics = r.nics ?? []
   L.push(`── 网卡（${nics.length} 个）──`)
   for (const n of nics) {
     const speed = n.speed_mbps ? `${n.speed_mbps}Mb/s` : '?'
     const sfp = n.sfp ? `  SFP: ${[n.sfp.vendor, n.sfp.part_number, n.sfp.serial].filter(Boolean).join(' / ')}` : ''
     L.push(`${cell(n.name)}  ${cell(n.mac)}  ${speed}  ${cell(n.driver)}${sfp}`)
+  }
+  L.push('')
+
+  const psus = r.power_supplies ?? []
+  L.push(`── 电源（${psus.length} 个）──`)
+  for (const p of psus) {
+    const loc = [p.location, p.name].filter(Boolean).join(' · ')
+    const pnSn = [p.part_number ? `PN ${[p.part_number, p.revision].filter(Boolean).join('/')}` : '', p.serial ? `SN ${p.serial}` : '']
+      .filter(Boolean)
+      .join('  ')
+    L.push(`${cell(loc)}  ${cell(p.manufacturer)}  ${pnSn}${p.max_power_w ? `  ${p.max_power_w}W` : ''}`)
   }
   return L.join('\n') + '\n'
 }

@@ -5,6 +5,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { bindingsApi } from '@/api'
 import type { Binding, Image, Profile, Report, Subnet } from '@/api/types'
 import { generatePassword } from '@/lib/filename'
+import { validateHostname } from '@/lib/hostname'
 import { hostInSubnet, isValidIPv4 } from '@/lib/net'
 import { fmtBytes } from '@/lib/format'
 
@@ -68,6 +69,8 @@ const form = reactive({
   bondPrimary: '',
   // 监控 agent 植入（三态：跟随 profile / 强制开 / 强制关）
   agentMode: 'inherit' as 'inherit' | 'on' | 'off',
+  // 主机名（空 = 不覆盖，由 profile.hostname_template 展开）
+  hostname: '',
 })
 
 const saving = ref(false)
@@ -143,6 +146,8 @@ watch(
     }
     form.usePasswordOverride = false
     form.rootPassword = ''
+    // 主机名：binding 上存的是本机覆盖值；空 = 按 profile 模板展开
+    form.hostname = b?.hostname ?? ''
     // 目标盘：上次的覆盖值优先；无覆盖（smallest）回退 profile 默认
     if (b?.target_disk) {
       form.diskMode = (['smallest', 'by-wwn', 'by-path', 'by-model'] as const).includes(
@@ -220,6 +225,9 @@ const passwordError = computed(() => {
   return ''
 })
 
+// 自定义主机名：留空合法（= 按 profile 模板展开），填了则须符合 RFC-1123
+const hostnameError = computed(() => validateHostname(form.hostname))
+
 // 禁用时点按钮/悬停：明确告诉用户差什么——按钮静默无反应是今天
 // 「点保存并发装没建任务」事故的直接体验（静态 IP 填一半按钮灰死无声）。
 const blockedReasons = computed<string[]>(() => {
@@ -228,6 +236,7 @@ const blockedReasons = computed<string[]>(() => {
   if (!form.profileId) why.push('未选择安装配置')
   if (form.ipMode === 'static' && staticIpError.value) why.push(staticIpError.value)
   if (passwordError.value) why.push(passwordError.value)
+  if (hostnameError.value) why.push(hostnameError.value)
   if (form.diskMode !== 'smallest' && !form.diskValue) why.push('目标盘选择了按 WWN/路径/型号但未填匹配值')
   if (form.nicMode !== 'auto' && !form.nicMac) why.push('引导网卡选了按 MAC 但未填')
   if (form.useBond && form.bondSlaves.length < 2) why.push('Bond 至少需要 2 个成员口')
@@ -347,6 +356,10 @@ async function submit(dispatch: boolean): Promise<void> {
         : {}),
       // NIC：by-mac 覆盖；auto 显式清空（回退 profile 默认）
       nic_selector_override: form.nicMode === 'mac' ? `by-mac:${form.nicMac}` : '',
+      // 主机名：留空显式发 ""（清除覆盖 → 按 profile 模板展开）。
+      // 键必须发：hostname 是三态字段，键不传等于保持原值，用户就
+      // 没法通过清空输入框来撤销自定义主机名。
+      hostname: form.hostname.trim(),
       // 监控 agent 植入：覆盖值（true/false）改写本机行为；inherit 清除覆盖（回 profile）
       ...(form.agentMode !== 'inherit'
         ? { agent_installed_override: form.agentMode === 'on' }
@@ -638,6 +651,25 @@ async function submit(dispatch: boolean): Promise<void> {
           </el-form-item>
         </el-col>
       </el-row>
+
+      <el-divider content-position="left">主机名</el-divider>
+
+      <el-form-item label="自定义" :error="hostnameError || undefined">
+        <el-input
+          v-model="form.hostname"
+          class="mono"
+          clearable
+          placeholder="留空 = 按 Profile 主机名模板生成"
+        />
+        <div class="mk-subtle" style="width: 100%">
+          仅对本机生效；
+          {{
+            selectedProfile?.hostname_template
+              ? `留空则用 Profile 模板「${selectedProfile.hostname_template}」展开`
+              : '当前 Profile 未设置主机名模板'
+          }}
+        </div>
+      </el-form-item>
 
       <el-divider content-position="left">root 密码</el-divider>
 

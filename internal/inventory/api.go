@@ -230,7 +230,8 @@ func (h *apiHandlers) patchLocation(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotFound, "machine not found")
 }
 
-func (h *apiHandlers) listReports(w http.ResponseWriter, r *http.Request) {	uuid, ok := validUUID(w, r.PathValue("uuid"))
+func (h *apiHandlers) listReports(w http.ResponseWriter, r *http.Request) {
+	uuid, ok := validUUID(w, r.PathValue("uuid"))
 	if !ok {
 		return
 	}
@@ -349,7 +350,8 @@ func validUUID(w http.ResponseWriter, raw string) (string, bool) {
 	return u, true
 }
 
-func writeJSON(w http.ResponseWriter, code int, v any) {	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }

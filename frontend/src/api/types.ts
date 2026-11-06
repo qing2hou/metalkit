@@ -72,6 +72,34 @@ export interface Sfp {
   wavelength_nm?: number
 }
 
+/** 电源（SMBIOS Type 39；整机名版信息） */
+export interface PowerSupply {
+  location?: string
+  name?: string
+  manufacturer?: string
+  part_number?: string
+  revision?: string
+  serial?: string
+  asset_tag?: string
+  max_power_w?: number
+}
+
+export interface PciDevice {
+  address: string
+  class_id?: string
+  class_name?: string
+  vendor_id?: string
+  vendor_name?: string
+  device_id?: string
+  device_name?: string
+  subsystem_vendor?: string
+  subsystem_device?: string
+  driver?: string
+  kernel_modules?: string[]
+  link_speed?: string
+  link_width?: string
+}
+
 export interface Nic {
   name: string
   mac: string
@@ -133,8 +161,9 @@ export interface Report {
   }
   disks?: Disk[]
   nics?: Nic[]
-  pci_devices?: Array<Record<string, unknown>>
+  pci_devices?: PciDevice[]
   accelerators?: Array<Record<string, unknown>>
+  power_supplies?: PowerSupply[]
   bmc?: Record<string, unknown>
   sensors?: Array<Record<string, unknown>>
   system?: Record<string, unknown>

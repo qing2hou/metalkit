@@ -191,3 +191,27 @@ func TestParseDIMMSize(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePowerSupplies(t *testing.T) {
+	psus := parsePowerSupplies(readFixture(t, "dmidecode-psu.txt"))
+	// 两块实名 PSU；全 "Not Specified" 的占位记录跳过
+	if len(psus) != 2 {
+		t.Fatalf("got %d PSUs, want 2: %+v", len(psus), psus)
+	}
+	p1 := psus[0]
+	if p1.Location != "PSU1" || p1.Name != "Power Supply 1" || p1.Manufacturer != "Flextronics" {
+		t.Errorf("PSU1 identity mismatch: %+v", p1)
+	}
+	if p1.Serial != "5E1CB45KL06" || p1.PartNumber != "7100000000AA" || p1.Revision != "F" {
+		t.Errorf("PSU1 nameplate mismatch: %+v", p1)
+	}
+	if p1.MaxPowerW != 550 {
+		t.Errorf("PSU1 MaxPowerW = %d, want 550", p1.MaxPowerW)
+	}
+	if psus[1].Location != "PSU2" || psus[1].Serial != "5E1CB45NX2Q" {
+		t.Errorf("PSU2 mismatch: %+v", psus[1])
+	}
+	if parsePowerSupplies(nil) != nil {
+		t.Errorf("empty input with results is wrong")
+	}
+}

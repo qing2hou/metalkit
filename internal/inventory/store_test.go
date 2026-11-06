@@ -2,10 +2,10 @@ package inventory
 
 import (
 	"context"
-	"strings"
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 

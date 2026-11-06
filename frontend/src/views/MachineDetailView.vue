@@ -109,6 +109,22 @@ const bindingSubnet = computed(() =>
   binding.value?.subnet_id ? subnets.value.find((s) => s.id === binding.value?.subnet_id) : undefined,
 )
 
+// ---- 存储 / RAID 控制器：从 pci_devices 里按 class 归类（0104 RAID、0106 SATA、
+// 0107 SAS、0108 NVMe、0100/0101 SCSI/IDE），并把盘按 pci_address 挂到卡上 ----
+const STORAGE_CLASS_PREFIXES = ['0100', '0101', '0104', '0106', '0107', '0108']
+const storageControllers = computed(() => {
+  const all = report.value?.pci_devices ?? []
+  const disks = report.value?.disks ?? []
+  return all
+    .filter((p) => STORAGE_CLASS_PREFIXES.some((c) => (p.class_id ?? '').startsWith(c)))
+    .map((p) => {
+      const attached = disks.filter(
+        (d) => d.pci_address && d.pci_address.replace(/^0000:/, '') === p.address,
+      )
+      return { ...p, attached: attached.map((d) => d.kname) }
+    })
+})
+
 // ---- 硬件清单导出（CSV 给 Excel；TXT 贴工单） ----
 const machineExtras = ref<{ location?: string; notes?: string } | null>(null)
 
@@ -609,6 +625,57 @@ function viewHistoryItem(meta: ReportMeta): void {
                 </template>
               </el-table-column>
               <template #empty><span class="mk-subtle">未检出网卡</span></template>
+            </el-table>
+          </el-collapse-item>
+
+          <el-collapse-item v-if="storageControllers.length" :title="`存储 / RAID 控制器（${storageControllers.length} 张）`" name="storagectrl">
+            <el-table class="mk-table" :data="storageControllers" stripe size="small">
+              <el-table-column label="类别" width="160">
+                <template #default="{ row }">{{ row.class_name || row.class_id || '—' }}</template>
+              </el-table-column>
+              <el-table-column label="厂商 / 型号" min-width="260">
+                <template #default="{ row }">
+                  {{ [row.vendor_name, row.device_name].filter(Boolean).join(' ') || '—' }}
+                </template>
+              </el-table-column>
+              <el-table-column label="PCI 地址" width="110">
+                <template #default="{ row }"><span class="mono">{{ row.address }}</span></template>
+              </el-table-column>
+              <el-table-column prop="driver" label="驱动" width="130">
+                <template #default="{ row }"><span class="mono">{{ row.driver || '—' }}</span></template>
+              </el-table-column>
+              <el-table-column label="链路" width="150">
+                <template #default="{ row }">
+                  {{ row.link_speed && row.link_width ? `${row.link_width}x ${row.link_speed}` : '—' }}
+                </template>
+              </el-table-column>
+              <el-table-column label="挂载盘" min-width="140">
+                <template #default="{ row }">
+                  <span class="mono">{{ row.attached.length ? row.attached.join(', ') : '—' }}</span>
+                </template>
+              </el-table-column>
+              <template #empty><span class="mk-subtle">未检出存储控制器</span></template>
+            </el-table>
+          </el-collapse-item>
+
+          <el-collapse-item v-if="(report?.power_supplies ?? []).length" :title="`电源（${(report?.power_supplies ?? []).length} 个）`" name="power">
+            <el-table class="mk-table" :data="report?.power_supplies ?? []" stripe size="small">
+              <el-table-column label="位置" min-width="120">
+                <template #default="{ row }">{{ [row.location, row.name].filter(Boolean).join(' · ') || '—' }}</template>
+              </el-table-column>
+              <el-table-column prop="manufacturer" label="厂商" min-width="120">
+                <template #default="{ row }">{{ row.manufacturer || '—' }}</template>
+              </el-table-column>
+              <el-table-column prop="part_number" label="PN" min-width="180">
+                <template #default="{ row }"><span class="mono">{{ [row.part_number, row.revision].filter(Boolean).join(' / ') || '—' }}</span></template>
+              </el-table-column>
+              <el-table-column prop="serial" label="序列号" min-width="140">
+                <template #default="{ row }"><span class="mono">{{ row.serial || '—' }}</span></template>
+              </el-table-column>
+              <el-table-column label="功率" width="90">
+                <template #default="{ row }">{{ row.max_power_w ? `${row.max_power_w} W` : '—' }}</template>
+              </el-table-column>
+              <template #empty><span class="mk-subtle">未上报电源信息</span></template>
             </el-table>
           </el-collapse-item>
 

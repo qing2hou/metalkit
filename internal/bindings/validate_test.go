@@ -87,6 +87,8 @@ func TestValidateSubnetID(t *testing.T) {
 
 func ptrInt(v int) *int { return &v }
 
+func ptrStr(v string) *string { return &v }
+
 // TestValidateMachineUUID_TypedError: the API layer classifies 400 vs 500
 // via errors.Is(err, ErrInvalidUUID) — the sentinel must survive wrapping.
 func TestValidateMachineUUID_TypedError(t *testing.T) {

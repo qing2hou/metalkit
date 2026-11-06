@@ -171,13 +171,24 @@ type Binding struct {
 // Bond is a three-state field with the same semantics as TargetDisk —
 // nil keeps existing, "null"/"{}" clears, anything else is validated via
 // profiles.ValidateBondJSON and stored.
+//
+// Hostname is a three-state field via *string:
+//
+//	nil      → keep existing (default)
+//	""       → explicit clear (NULL → agent expands profile.hostname_template)
+//	non-empty → validate (RFC-1123) and store as the per-machine override
+//
+// It is three-state for the same reason as the other overrides: a PUT that
+// doesn't mention hostname must not silently wipe it. Re-arming a binding
+// (e.g. the job page's retry) sends only image/profile/desired_state, and a
+// plain string field would clear a custom hostname every time.
 type UpsertInput struct {
 	MachineUUID   string          `json:"-"` // taken from URL path
 	ImageID       string          `json:"image_id"`
 	ProfileID     string          `json:"profile_id"`
 	DesiredState  string          `json:"desired_state"`
 	StaticAddress string          `json:"static_address,omitempty"`
-	Hostname      string          `json:"hostname,omitempty"`
+	Hostname      *string         `json:"hostname,omitempty"`
 	RootPassword  *string         `json:"root_password,omitempty"`
 	TargetDisk    json.RawMessage `json:"target_disk,omitempty"`
 	Bond          json.RawMessage `json:"bond,omitempty"`
@@ -267,9 +278,14 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 	if err != nil {
 		return nil, err
 	}
-	hostname, err := validateHostname(in.Hostname)
-	if err != nil {
-		return nil, err
+	// Validate up front (outside the lock): shape checks need no shared state,
+	// and a bad value must not serialize behind other Upserts.
+	var hostname string
+	if in.Hostname != nil {
+		hostname, err = validateHostname(*in.Hostname)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// From here on we read "existing row" state and (possibly) auto-allocate
@@ -279,26 +295,27 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 	s.allocMu.Lock()
 	defer s.allocMu.Unlock()
 
-	// Three-state subnet_id, vlan_override and nic_selector_override
-	// resolution. Defaults: keep whatever the row currently holds. Empty
-	// string / 0 = clear (NULL).
+	// Three-state subnet_id, vlan_override, nic_selector_override, hostname
+	// and agent_installed_override resolution. Defaults: keep whatever the
+	// row currently holds. Empty string / 0 = clear (NULL).
 	keepExistingSubnet := in.SubnetID == nil
 	keepExistingVLAN := in.VLANOverride == nil
 	keepExistingNICSel := in.NICSelectorOverride == nil
+	keepExistingHostname := in.Hostname == nil
 	keepExistingAgentInstalled := in.AgentInstalledOverride == nil
 
-	var existingSubnet sql.NullString
+	var existingSubnet, existingHostname sql.NullString
 	var existingVLAN sql.NullInt64
 	var existingNICSel sql.NullString
 	var existingAgentInstalled sql.NullInt64
-	if keepExistingSubnet || keepExistingVLAN || keepExistingNICSel || keepExistingAgentInstalled {
+	if keepExistingSubnet || keepExistingVLAN || keepExistingNICSel || keepExistingHostname || keepExistingAgentInstalled {
 		err = s.db.QueryRowContext(ctx,
-			`SELECT subnet_id, vlan_override, nic_selector_override, agent_installed_override FROM bindings WHERE machine_uuid = ?`, muuid).
-			Scan(&existingSubnet, &existingVLAN, &existingNICSel, &existingAgentInstalled)
+			`SELECT subnet_id, vlan_override, nic_selector_override, hostname, agent_installed_override FROM bindings WHERE machine_uuid = ?`, muuid).
+			Scan(&existingSubnet, &existingVLAN, &existingNICSel, &existingHostname, &existingAgentInstalled)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			// Degrading to "nothing to keep" here would silently clear the
 			// overrides the caller asked to preserve.
-			return nil, fmt.Errorf("load existing subnet/vlan/nic/agent overrides: %w", err)
+			return nil, fmt.Errorf("load existing subnet/vlan/nic/hostname/agent overrides: %w", err)
 		}
 	}
 
@@ -404,17 +421,23 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 		agentInstalledSQL = 0
 	}
 
+	// hostname: three-state, same shape as the other overrides. NULL means
+	// "let the agent expand profile.hostname_template".
+	var hostnameSQL any
+	if keepExistingHostname {
+		if existingHostname.Valid && existingHostname.String != "" {
+			hostnameSQL = existingHostname.String
+		}
+	} else if hostname != "" {
+		hostnameSQL = hostname
+	}
+
 	now := time.Now().Unix()
-	var addrSQL, hostnameSQL any
+	var addrSQL any
 	if addr == "" {
 		addrSQL = nil
 	} else {
 		addrSQL = addr
-	}
-	if hostname == "" {
-		hostnameSQL = nil
-	} else {
-		hostnameSQL = hostname
 	}
 
 	// Three-state password handling:
