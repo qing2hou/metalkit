@@ -64,8 +64,9 @@ useQuerySync(
 
 const health = usePollHealth()
 
-async function load(): Promise<void> {
-  loading.value = true
+async function load(opts: { silent?: boolean } = {}): Promise<void> {
+  // silent=后台轮询：数据照换但不拉遮罩——周期性 mask 会打断正在操作的用户
+  if (!opts.silent) loading.value = true
   try {
     list.value = await machinesApi.list()
     health.noteOk()
@@ -188,7 +189,7 @@ function onVisibility(): void {
     stopTimers()
   } else {
     startPolling()
-    void load()
+    void load({ silent: true })
   }
 }
 
@@ -199,7 +200,7 @@ function startPolling(): void {
     if (remainingSec.value > 0) remainingSec.value--
   }, 1000)
   pollTimer = setInterval(() => {
-    void load()
+    void load({ silent: true })
   }, POLL_LIST_MS)
 }
 
@@ -404,7 +405,7 @@ const pagedTable = usePagedTable(filtered)
         :subnets="installSubnets"
         :binding="installBinding"
         :intent="installIntent"
-        @saved="load"
+        @saved="load()"
       />
     </div>
   </AppShell>

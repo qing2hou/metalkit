@@ -50,8 +50,9 @@ useQuerySync(
 
 const health = usePollHealth()
 
-async function load(): Promise<void> {
-  loading.value = true
+async function load(opts: { silent?: boolean } = {}): Promise<void> {
+  // silent=后台轮询：不拉遮罩——5s 一次的 mask 会打断正在查看作业的用户
+  if (!opts.silent) loading.value = true
   try {
     list.value = await jobsApi.list({ limit: 200 })
     health.noteOk()
@@ -71,7 +72,7 @@ function onVisibility(): void {
     if (timer) clearInterval(timer)
     timer = null
   } else {
-    void load()
+    void load({ silent: true })
     startTimer()
   }
 }
@@ -79,7 +80,7 @@ function onVisibility(): void {
 function startTimer(): void {
   if (timer) clearInterval(timer)
   timer = setInterval(() => {
-    if (!document.hidden) void load()
+    if (!document.hidden) void load({ silent: true })
   }, POLL_MS)
 }
 
@@ -161,7 +162,7 @@ const pagedTable = usePagedTable(filtered)
         <p class="mk-page-sub">装机任务的执行记录与实时进度</p>
         <div class="mk-header-actions">
           <span v-if="runningCount" class="mk-subtle">{{ runningCount }} 个进行中 · 5s 自动刷新</span>
-          <el-button :icon="Refresh" circle aria-label="刷新" @click="load" />
+          <el-button :icon="Refresh" circle aria-label="刷新" @click="load()"/>
           <el-button type="danger" plain @click="purgeFinished">清除已完成</el-button>
         </div>
       </header>

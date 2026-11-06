@@ -49,9 +49,10 @@ const rawJsonVisible = ref(false)
 
 const health = usePollHealth()
 
-async function load(): Promise<void> {
+async function load(opts: { silent?: boolean } = {}): Promise<void> {
   if (!uuid.value) return
-  loading.value = true
+  // silent=后台轮询：不拉整页遮罩，避免填报单/看明细时被周期性打断
+  if (!opts.silent) loading.value = true
   try {
     const [machines, rep, bindings] = await Promise.all([
       machinesApi.list(),
@@ -89,7 +90,7 @@ onMounted(() => {
   void loadMachineExtras()
   void load()
   pollTimer = setInterval(() => {
-    if (!document.hidden) void load()
+    if (!document.hidden) void load({ silent: true })
   }, 10_000)
 })
 onUnmounted(() => {
@@ -290,7 +291,7 @@ function viewHistoryItem(meta: ReportMeta): void {
         <p class="mk-page-sub">硬件清单 / 装机绑定 / 作业历史与 BMC 控制</p>
         <div class="mk-header-actions">
           <el-button v-if="summary?.bmc_ip" @click="syncBmc">同步 BMC</el-button>
-          <el-button :icon="Refresh" circle aria-label="刷新" @click="load" />
+          <el-button :icon="Refresh" circle aria-label="刷新" @click="load()"/>
         </div>
       </header>
 
@@ -682,7 +683,7 @@ function viewHistoryItem(meta: ReportMeta): void {
         :profiles="profiles"
         :subnets="subnets"
         :binding="binding"
-        @saved="load"
+        @saved="load()"
         :intent="installIntent"
       />
 
