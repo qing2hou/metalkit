@@ -366,6 +366,7 @@ Profile 可以自带三个 Go template（留空走内置默认）：
 | VLAN Override | 单机指定 VLAN（覆盖 subnet） |
 | NIC Selector | 单机指定网卡（覆盖 profile 的 bond_slaves 选择逻辑） |
 | Target Disk Override | 单机指定目标盘（覆盖 profile 的 target_disk） |
+| Hostname | 单机自定义主机名（留空 = 按 profile 的 hostname_template 展开） |
 | Password Override | 单机临时 root 密码 hash（覆盖 profile） |
 | Desired State | `none` / `install` / `reinstall` —— 选 `install` 表示创建 binding 后立即触发装机 |
 

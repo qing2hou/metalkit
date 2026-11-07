@@ -129,7 +129,7 @@
 |---|---|---|
 | **CRUD** | `GET/POST/PATCH/DELETE /api/v1/bindings` | `internal/bindings/` |
 | **三方关联** | `machine_uuid` + `profile_id` + `subnet_id` 都要存在(referential 检查) | validate.go |
-| **每机覆盖项** | `ip_override` / `vlan_override` / `bond_override` / `nic_selector` / `target_disk` 单机微调,不污染 profile | schema.go |
+| **每机覆盖项** | `ip_override` / `vlan_override` / `bond_override` / `nic_selector` / `target_disk` / `hostname` 单机微调,不污染 profile | schema.go |
 | **desired_state 状态机** | `none` / `install` / `reinstall` —— orchestrator 据此决定是否触发装机 | schema.go |
 | **password_override** | 单机临时密码,覆盖 profile 默认 | schema.go |
 | **referential 完整** | 删 profile / subnet 时先看 binding 是否还引用 | store.go |

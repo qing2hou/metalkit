@@ -329,7 +329,7 @@ URL 已经指明了哪台机器，PUT 既是新增也是覆盖。
   "profile_id":   "<32 hex>",
   "desired_state": "none" | "install" | "reinstall",
   "static_address": "10.0.0.7",     // 仅 profile.network.method=static 时给值，dhcp 时必须省略
-  "hostname":       "node7",        // 可选；覆盖 profile.hostname_template 的展开结果
+  "hostname":       "node7",        // 可选；覆盖 profile.hostname_template；"" = 清除，不传 = 保持
   "updated_at":     "2026-05-24T07:51:05Z",
   "updated_by":     "admin"
 }
@@ -341,8 +341,9 @@ URL 已经指明了哪台机器，PUT 既是新增也是覆盖。
 - `image_id` / `profile_id`：32 字符小写 hex（同 images / profiles 表的 PK 格式）
 - `desired_state`：`none` / `install` / `reinstall` 之一
 - `static_address`：profile.network.method=static 时必填 IPv4 字面量；method=dhcp 时必须为空
-- `hostname`：可选；RFC-1123 字符集 + 各段 1–63 字符 + 总长 ≤253；空则 agent 会展开
-  profile.hostname_template
+- `hostname`：三态字段——**不传 = 保持现值**；`""` = 清除覆盖（agent 展开
+  profile.hostname_template）；非空 = 校验后存为本机覆盖。校验规则：RFC-1123 字符集 +
+  各段 1–63 字符 + 总长 ≤253
 
 ### 10.2 端点
 
