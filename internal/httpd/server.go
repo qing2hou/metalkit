@@ -24,6 +24,7 @@ import (
 	"metalkit/internal/profiles"
 	"metalkit/internal/sessions"
 	"metalkit/internal/settings"
+	"metalkit/internal/sshkeys"
 	"metalkit/internal/subnets"
 	"metalkit/internal/util"
 )
@@ -52,6 +53,9 @@ type Config struct {
 
 	// Optional subnets API. When set, mounts the /api/v1/subnets* endpoints.
 	Subnets *subnets.API
+
+	// Optional SSH keys API. When set, mounts the /api/v1/sshkeys* endpoints.
+	SSHKeys *sshkeys.API
 
 	// Optional bindings API. When set, mounts the /api/v1/bindings* endpoints.
 	Bindings *bindings.API
@@ -323,6 +327,9 @@ func (s *Server) routes() *http.ServeMux {
 	}
 	if s.cfg.Subnets != nil {
 		s.cfg.Subnets.RegisterRoutes(mux)
+	}
+	if s.cfg.SSHKeys != nil {
+		s.cfg.SSHKeys.RegisterRoutes(mux)
 	}
 	if s.cfg.Bindings != nil {
 		s.cfg.Bindings.RegisterRoutes(mux)
