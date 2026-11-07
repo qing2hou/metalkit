@@ -18,6 +18,7 @@ import (
 	"metalkit/internal/inventory"
 	"metalkit/internal/profiles"
 	"metalkit/internal/sqlitedb"
+	"metalkit/internal/sshkeys"
 	"metalkit/internal/subnets"
 )
 
@@ -28,6 +29,7 @@ type testFixture struct {
 	images   *images.Store
 	profiles *profiles.Store
 	subnets  *subnets.Store
+	sshkeys  *sshkeys.Store
 	bindings *Store
 }
 
@@ -57,6 +59,10 @@ func newFixture(t *testing.T) *testFixture {
 	if err != nil {
 		t.Fatalf("subnets.NewStore: %v", err)
 	}
+	sshStore, err := sshkeys.NewStore(context.Background(), db, logger)
+	if err != nil {
+		t.Fatalf("sshkeys.NewStore: %v", err)
+	}
 	bindStore, err := NewStore(context.Background(), db, logger, nil)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
@@ -69,6 +75,7 @@ func newFixture(t *testing.T) *testFixture {
 		images:   imgStore,
 		profiles: profStore,
 		subnets:  subStore,
+		sshkeys:  sshStore,
 		bindings: bindStore,
 	}
 }

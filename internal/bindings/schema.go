@@ -57,4 +57,10 @@ var migrations = []string{
 	// NULL = inherit profile; 0 = never implant the monitor; 1 = implant it.
 	// Same three-state semantics as the other *_override columns.
 	`ALTER TABLE bindings ADD COLUMN agent_installed_override INTEGER`,
+	// ssh_key_ids_json (per-binding selection of sshkeys catalog rows to
+	// inject into /root/.ssh/authorized_keys at install time). NULL = none
+	// selected; a JSON array of 32-hex ids otherwise. Stored as JSON (not a
+	// join table) so the upsert stays one statement; the sshkeys delete
+	// handler gates on RefCountBySSHKey instead of an FK.
+	`ALTER TABLE bindings ADD COLUMN ssh_key_ids_json TEXT`,
 }
