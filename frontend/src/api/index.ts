@@ -19,6 +19,7 @@ import type {
   ProfileComponents,
   Report,
   ReportMeta,
+  SSHKey,
   StorageSettings,
   StorageSettingsResponse,
   Subnet,
@@ -91,6 +92,17 @@ export const subnetsApi = {
   update: (id: string, input: Record<string, unknown>) =>
     apiSend<Subnet>('PUT', `/subnets/${id}`, input),
   remove: (id: string) => apiSend<null>('DELETE', `/subnets/${id}`),
+}
+
+// ---------- sshkeys ----------
+
+export const sshKeysApi = {
+  list: () => apiGet<SSHKey[]>('/sshkeys'),
+  get: (id: string) => apiGet<SSHKey>(`/sshkeys/${id}`),
+  create: (input: Record<string, unknown>) => apiSend<SSHKey>('POST', '/sshkeys', input),
+  update: (id: string, input: Record<string, unknown>) =>
+    apiSend<SSHKey>('PUT', `/sshkeys/${id}`, input),
+  remove: (id: string) => apiSend<null>('DELETE', `/sshkeys/${id}`),
 }
 
 // ---------- bindings ----------

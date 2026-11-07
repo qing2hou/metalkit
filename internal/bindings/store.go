@@ -26,6 +26,7 @@ import (
 
 	"metalkit/internal/crypto"
 	"metalkit/internal/profiles"
+	"metalkit/internal/sshkeys"
 )
 
 // Errors callers may need to discriminate on.
@@ -35,6 +36,7 @@ var (
 	ErrImageUnknown   = errors.New("bindings: image_id not in catalog")
 	ErrProfileUnknown = errors.New("bindings: profile_id not in catalog")
 	ErrSubnetUnknown  = errors.New("bindings: subnet_id not in catalog")
+	ErrSSHKeyUnknown  = errors.New("bindings: ssh_key_id not in catalog")
 	ErrFamilyMismatch = errors.New("bindings: image family incompatible with profile os_family")
 	// ErrArchMismatch is returned when the image's target CPU architecture
 	// conflicts with the machine's reported CPU architecture. Machines that
@@ -110,6 +112,18 @@ func (s *Store) WithProber(p IPProber) *Store {
 	return s
 }
 
+// AcquireWriteLock grabs the same allocMu that serializes Upsert and returns
+// its release func. Cross-catalog writes that race a binding's referenced-id
+// checks — today the sshkeys DELETE handler, which counts bindings before
+// dropping a key — must hold this lock across their count + delete so the
+// "check key exists → INSERT reference" window inside Upsert cannot
+// interleave with "count references → DELETE key" (a dangling key id makes
+// every later spec fetch for that machine 500 forever).
+func (s *Store) AcquireWriteLock() func() {
+	s.allocMu.Lock()
+	return s.allocMu.Unlock
+}
+
 // Binding is the JSON-friendly record.
 //
 // TargetDisk is the per-binding override for the profile's target_disk.
@@ -149,9 +163,15 @@ type Binding struct {
 	// profile.agent_installed. nil = inherit profile (JSON omitted);
 	// set = the jobs spec endpoint substitutes it into the profile copy
 	// before sending the spec (implant / don't-implant the monitor).
-	AgentInstalledOverride *bool     `json:"agent_installed_override,omitempty"`
-	UpdatedAt              time.Time `json:"updated_at"`
-	UpdatedBy              string    `json:"updated_by"`
+	AgentInstalledOverride *bool `json:"agent_installed_override,omitempty"`
+	// SSHKeyIDs lists sshkeys catalog rows to inject into the target's
+	// /root/.ssh/authorized_keys at install time. Empty/nil = none — the
+	// installer leaves the key file untouched. Held on the binding (not the
+	// profile) because key selection is a per-install decision; reuse comes
+	// from the shared catalog.
+	SSHKeyIDs  []string  `json:"ssh_key_ids,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	UpdatedBy  string    `json:"updated_by"`
 }
 
 // UpsertInput is what the PUT handler accepts.
@@ -211,8 +231,15 @@ type UpsertInput struct {
 	//   nil  → keep existing
 	//   set  → true = implant the monitor into this machine, false = never;
 	//          stored as 1/0, NULL (both nil-cases) = inherit profile
-	AgentInstalledOverride *bool  `json:"agent_installed_override,omitempty"`
-	UpdatedBy              string `json:"-"` // injected by handler
+	AgentInstalledOverride *bool `json:"agent_installed_override,omitempty"`
+	// SSHKeyIDs is three-state via *[]string:
+	//   nil      → keep existing selection (a PUT that doesn't mention the
+	//              field must not silently un-assign keys, same rationale
+	//              as the other overrides)
+	//   non-nil  → replace: empty slice = clear, non-empty = validate each
+	//              id (32 hex + catalog exists) and store
+	SSHKeyIDs *[]string `json:"ssh_key_ids,omitempty"`
+	UpdatedBy string    `json:"-"` // injected by handler
 }
 
 // Upsert validates the input (including cross-table referential checks and
@@ -287,6 +314,19 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 			return nil, err
 		}
 	}
+	// ssh_key_ids: validate shape outside the lock (no shared state); the
+	// catalog existence re-check runs inside allocMu right before the INSERT
+	// so it is serialized against sshkeys DELETE, which takes the same lock
+	// (see AcquireWriteLock) — otherwise a key could vanish between the
+	// check and the INSERT, leaving a dangling reference that 500s every
+	// later spec fetch for this machine.
+	var sshKeyIDs []string
+	if in.SSHKeyIDs != nil {
+		sshKeyIDs, err = sshkeys.ValidateIDs(*in.SSHKeyIDs)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// From here on we read "existing row" state and (possibly) auto-allocate
 	// an address — everything until the INSERT below must be serialized
@@ -303,19 +343,43 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 	keepExistingNICSel := in.NICSelectorOverride == nil
 	keepExistingHostname := in.Hostname == nil
 	keepExistingAgentInstalled := in.AgentInstalledOverride == nil
+	keepExistingSSHKeys := in.SSHKeyIDs == nil
 
 	var existingSubnet, existingHostname sql.NullString
 	var existingVLAN sql.NullInt64
 	var existingNICSel sql.NullString
 	var existingAgentInstalled sql.NullInt64
-	if keepExistingSubnet || keepExistingVLAN || keepExistingNICSel || keepExistingHostname || keepExistingAgentInstalled {
+	var existingSSHKeys sql.NullString
+	if keepExistingSubnet || keepExistingVLAN || keepExistingNICSel || keepExistingHostname || keepExistingAgentInstalled || keepExistingSSHKeys {
 		err = s.db.QueryRowContext(ctx,
-			`SELECT subnet_id, vlan_override, nic_selector_override, hostname, agent_installed_override FROM bindings WHERE machine_uuid = ?`, muuid).
-			Scan(&existingSubnet, &existingVLAN, &existingNICSel, &existingHostname, &existingAgentInstalled)
+			`SELECT subnet_id, vlan_override, nic_selector_override, hostname, agent_installed_override, ssh_key_ids_json FROM bindings WHERE machine_uuid = ?`, muuid).
+			Scan(&existingSubnet, &existingVLAN, &existingNICSel, &existingHostname, &existingAgentInstalled, &existingSSHKeys)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			// Degrading to "nothing to keep" here would silently clear the
 			// overrides the caller asked to preserve.
-			return nil, fmt.Errorf("load existing subnet/vlan/nic/hostname/agent overrides: %w", err)
+			return nil, fmt.Errorf("load existing subnet/vlan/nic/hostname/agent/ssh-key overrides: %w", err)
+		}
+	}
+
+	// ssh_key_ids: keep existing (parse the stored blob) or replace with the
+	// validated list (marshal; empty → NULL so the column is nullable).
+	// The existence re-check of every id runs here — under allocMu, i.e.
+	// serialized against sshkeys DELETE (which holds the same lock while
+	// counting references and dropping the row), so the list we are about
+	// to store cannot reference a key deleted past our earlier check.
+	var sshKeyIDsSQL any
+	if keepExistingSSHKeys {
+		if existingSSHKeys.Valid && existingSSHKeys.String != "" {
+			sshKeyIDsSQL = existingSSHKeys.String
+		}
+	} else {
+		for _, kid := range sshKeyIDs {
+			if err := s.checkSSHKeyExists(ctx, kid); err != nil {
+				return nil, err
+			}
+		}
+		if len(sshKeyIDs) > 0 {
+			sshKeyIDsSQL = string(sshkeys.MarshalIDs(sshKeyIDs))
 		}
 	}
 
@@ -534,8 +598,8 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
             (machine_uuid, image_id, profile_id, desired_state,
              static_address, hostname, root_password_enc, target_disk_override,
              bond_override, subnet_id, vlan_override, nic_selector_override,
-             agent_installed_override, updated_at, updated_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             agent_installed_override, ssh_key_ids_json, updated_at, updated_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(machine_uuid) DO UPDATE SET
             image_id                   = excluded.image_id,
             profile_id                 = excluded.profile_id,
@@ -549,9 +613,10 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
             vlan_override              = excluded.vlan_override,
             nic_selector_override      = excluded.nic_selector_override,
             agent_installed_override   = excluded.agent_installed_override,
+            ssh_key_ids_json           = excluded.ssh_key_ids_json,
             updated_at                 = excluded.updated_at,
             updated_by                 = excluded.updated_by`,
-		muuid, imageID, profileID, desired, addrSQL, hostnameSQL, ctSQL, tdSQL, bondSQL, subnetIDSQL, vlanSQL, nicSelectorSQL, agentInstalledSQL, now, in.UpdatedBy,
+		muuid, imageID, profileID, desired, addrSQL, hostnameSQL, ctSQL, tdSQL, bondSQL, subnetIDSQL, vlanSQL, nicSelectorSQL, agentInstalledSQL, sshKeyIDsSQL, now, in.UpdatedBy,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("upsert binding: %w", err)
@@ -567,7 +632,7 @@ func (s *Store) Get(ctx context.Context, machineUUID string) (*Binding, error) {
 		return nil, err
 	}
 	var b Binding
-	var addr, hostname, tdJSON, bondJSON, subnetID, nicSelOverride sql.NullString
+	var addr, hostname, tdJSON, bondJSON, subnetID, nicSelOverride, sshKeysJSON sql.NullString
 	var vlanOverride, agentInstalledOverride sql.NullInt64
 	var updatedAt int64
 	var passwordCT []byte
@@ -575,10 +640,10 @@ func (s *Store) Get(ctx context.Context, machineUUID string) (*Binding, error) {
         SELECT machine_uuid, image_id, profile_id, desired_state,
                static_address, hostname, root_password_enc, target_disk_override,
                bond_override, subnet_id, vlan_override, nic_selector_override,
-               agent_installed_override, updated_at, updated_by
+               agent_installed_override, ssh_key_ids_json, updated_at, updated_by
         FROM bindings WHERE machine_uuid = ?`, muuid).Scan(
 		&b.MachineUUID, &b.ImageID, &b.ProfileID, &b.DesiredState,
-		&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &agentInstalledOverride, &updatedAt, &b.UpdatedBy,
+		&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &agentInstalledOverride, &sshKeysJSON, &updatedAt, &b.UpdatedBy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -589,6 +654,7 @@ func (s *Store) Get(ctx context.Context, machineUUID string) (*Binding, error) {
 	b.StaticAddress = addr.String
 	b.Hostname = hostname.String
 	b.HasPassword = len(passwordCT) > 0
+	b.SSHKeyIDs = parseSSHKeyIDs(sshKeysJSON)
 	if tdJSON.Valid && tdJSON.String != "" {
 		var td profiles.TargetDisk
 		if err := json.Unmarshal([]byte(tdJSON.String), &td); err == nil {
@@ -625,7 +691,7 @@ func (s *Store) List(ctx context.Context) ([]Binding, error) {
         SELECT machine_uuid, image_id, profile_id, desired_state,
                static_address, hostname, root_password_enc, target_disk_override,
                bond_override, subnet_id, vlan_override, nic_selector_override,
-               agent_installed_override, updated_at, updated_by
+               agent_installed_override, ssh_key_ids_json, updated_at, updated_by
         FROM bindings ORDER BY machine_uuid`)
 	if err != nil {
 		return nil, fmt.Errorf("list bindings: %w", err)
@@ -634,17 +700,18 @@ func (s *Store) List(ctx context.Context) ([]Binding, error) {
 	out := make([]Binding, 0)
 	for rows.Next() {
 		var b Binding
-		var addr, hostname, tdJSON, bondJSON, subnetID, nicSelOverride sql.NullString
+		var addr, hostname, tdJSON, bondJSON, subnetID, nicSelOverride, sshKeysJSON sql.NullString
 		var vlanOverride, agentInstalledOverride sql.NullInt64
 		var updatedAt int64
 		var passwordCT []byte
 		if err := rows.Scan(&b.MachineUUID, &b.ImageID, &b.ProfileID, &b.DesiredState,
-			&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &agentInstalledOverride, &updatedAt, &b.UpdatedBy); err != nil {
+			&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &agentInstalledOverride, &sshKeysJSON, &updatedAt, &b.UpdatedBy); err != nil {
 			return nil, fmt.Errorf("scan binding: %w", err)
 		}
 		b.StaticAddress = addr.String
 		b.Hostname = hostname.String
 		b.HasPassword = len(passwordCT) > 0
+		b.SSHKeyIDs = parseSSHKeyIDs(sshKeysJSON)
 		if tdJSON.Valid && tdJSON.String != "" {
 			var td profiles.TargetDisk
 			if err := json.Unmarshal([]byte(tdJSON.String), &td); err == nil {
@@ -783,6 +850,42 @@ func (s *Store) RefCountBySubnet(ctx context.Context, subnetID string) (int, err
 	return n, nil
 }
 
+// RefCountBySSHKey returns how many bindings reference the given ssh key id
+// in their ssh_key_ids_json array. Callers (sshkeys delete handler) should
+// refuse the delete if > 0. Uses SQLite's json_each to walk the stored
+// arrays — a LIKE '%"id"%' substring match would false-positive on ids that
+// prefix/contain one another, and the 32-hex format makes that a real
+// (if unlikely) hazard. Rows whose blob is missing/invalid JSON are skipped
+// (json_valid guard) — one hand-corrupted row must not 500 every key
+// deletion until the data is fixed; the write path (MarshalIDs) cannot
+// produce such a blob.
+func (s *Store) RefCountBySSHKey(ctx context.Context, keyID string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+        SELECT COUNT(*) FROM bindings
+        WHERE json_valid(ssh_key_ids_json)
+          AND EXISTS (SELECT 1 FROM json_each(bindings.ssh_key_ids_json) je
+                      WHERE je.value = ?)`, keyID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count bindings for ssh key: %w", err)
+	}
+	return n, nil
+}
+
+// parseSSHKeyIDs decodes the ssh_key_ids_json column. A malformed blob
+// surfaces as nil (same tolerance as the other JSON columns — an unreadable
+// row must not 500 the whole binding list; the next edit rewrites it).
+func parseSSHKeyIDs(v sql.NullString) []string {
+	if !v.Valid || v.String == "" || v.String == "null" {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(v.String), &ids); err != nil {
+		return nil
+	}
+	return ids
+}
+
 // ClearDesiredState flips desired_state to 'none' for a machine. Called by the
 // jobs orchestrator after a successful install + bootdev=disk handshake so
 // the next reconciliation tick won't re-create another install job. Idempotent:
@@ -833,6 +936,20 @@ func (s *Store) checkSubnetExists(ctx context.Context, id string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("check subnet: %w", err)
+	}
+	return nil
+}
+
+// checkSSHKeyExists confirms the referenced ssh key is in the catalog.
+// Returns ErrSSHKeyUnknown otherwise. Mirrors checkSubnetExists.
+func (s *Store) checkSSHKeyExists(ctx context.Context, id string) error {
+	var seen int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM ssh_keys WHERE id = ?`, id).Scan(&seen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %s", ErrSSHKeyUnknown, id)
+	}
+	if err != nil {
+		return fmt.Errorf("check ssh key: %w", err)
 	}
 	return nil
 }

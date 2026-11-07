@@ -34,6 +34,7 @@ import (
 	"metalkit/internal/profiles"
 	"metalkit/internal/sessions"
 	"metalkit/internal/settings"
+	"metalkit/internal/sshkeys"
 	"metalkit/internal/sqlitedb"
 	"metalkit/internal/subnets"
 	"metalkit/internal/tftp"
@@ -504,6 +505,16 @@ func run() int {
 	}
 	subnetAPI := subnets.NewAPI(subnetStore, logger.With("component", "subnets-api"))
 
+	// SSH public key catalog. Operators register their keys once and pick
+	// them per machine at install time; the installer writes them into the
+	// target's /root/.ssh/authorized_keys.
+	sshKeyStore, err := sshkeys.NewStore(ctx, db, logger.With("component", "sshkeys"))
+	if err != nil {
+		logger.Error("sshkeys open", "err", err)
+		return 1
+	}
+	sshKeyAPI := sshkeys.NewAPI(sshKeyStore, logger.With("component", "sshkeys-api"))
+
 	// Per-machine install bindings (machine ↔ image ↔ profile). Schema must
 	// apply after machines/images/profiles so its FK declarations resolve.
 	// Needs the cipher for the optional per-binding root password column —
@@ -537,6 +548,13 @@ func run() int {
 	// Refuse subnet DELETE when any binding still points at it (until we
 	// promote the FK to ON DELETE RESTRICT proper).
 	subnetAPI = subnetAPI.WithBindingRefCount(bindStore.RefCountBySubnet)
+
+	// Same gate for SSH keys: a key still referenced by a binding can't be
+	// dropped (the next install of that machine would silently lose it).
+	// The write lock makes count+delete atomic against Upsert's in-lock
+	// existence re-check — closes the dangling-reference TOCTOU.
+	sshKeyAPI = sshKeyAPI.WithBindingRefCount(bindStore.RefCountBySSHKey).
+		WithBindingWriteLock(bindStore.AcquireWriteLock)
 
 	// Full-mode pool set: local pool (from config/settings) + one relay pool
 	// per subnet that declares DHCP bounds. Built once here so relayed VLANs
@@ -624,7 +642,8 @@ func run() int {
 	}
 	jobsAPI := jobs.NewAPI(jobsStore, logger.With("component", "jobs-api"))
 	agentJobsAPI := jobs.NewAgentAPIWithFetchers(jobsStore, bindStore, profileStore, imgStore, logger.With("component", "agent-jobs-api")).
-		WithSubnets(subnetStore)
+		WithSubnets(subnetStore).
+		WithSSHKeys(sshKeyStore)
 
 	utilAPI := util.NewAPI(logger.With("component", "util-api"))
 
@@ -725,6 +744,7 @@ func run() int {
 		Images:           imgAPI,
 		Profiles:         profileAPI,
 		Subnets:          subnetAPI,
+		SSHKeys:          sshKeyAPI,
 		Bindings:         bindAPI,
 		BMC:              bmcAPI,
 		Jobs:             jobsAPI,

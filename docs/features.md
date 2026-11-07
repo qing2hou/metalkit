@@ -90,7 +90,22 @@
 
 ---
 
-## 5. Profile 装机套餐(M2.3)
+---
+
+## 5. SSH 公钥库与装机注入
+
+> 操作员的 SSH 公钥存一次,装机时按机器勾选注入,跨机器复用。
+
+| 功能 | 说明 | 模块 |
+|---|---|---|
+| **CRUD** | `GET/POST/PUT/DELETE /api/v1/sshkeys`,公钥存 authorized_keys 单行规范化格式 | `internal/sshkeys/` |
+| **公钥校验** | 类型白名单 + base64 可解 + wire-format 内嵌 type 一致;指纹与 `ssh-keygen -lf` 一致 | validate.go |
+| **装机选择** | binding.`ssh_key_ids` 三态(不传=保持/[]=清空/数组=替换),引用必须命中公钥库 | internal/bindings |
+| **spec 解析** | getSpec 把 id 解析成 `ssh_public_keys` 公钥行,agent/installer 与公钥库解耦 | jobs/agent_api.go |
+| **装机注入** | installer 直写目标机 `/root/.ssh/authorized_keys`(.ssh 0700/文件 0600),不走 cloud-init user-data,7 个 OS 家族行为一致;SELinux relabel 覆盖 /root/.ssh | installer/seed.go |
+| **引用保护** | 被 binding 引用的公钥禁止删除(422,`json_each` 精确计数) | bindings/store.go |
+
+## 6. Profile 装机套餐(M2.3)
 
 > 一个 profile = 镜像 + root 密码 hash + cloud-init 模板,可复用给多台机器。
 
@@ -105,7 +120,7 @@
 
 ---
 
-## 6. BMC 凭据管理(M2.3-3 / 9)
+## 7. BMC 凭据管理(M2.3-3 / 9)
 
 > BMC 密码服务端加密存储,UI 永远拿不回明文。
 
@@ -121,7 +136,7 @@
 
 ---
 
-## 7. Binding 三方绑定(M2.3-4 / 12 phase ②)
+## 8. Binding 三方绑定(M2.3-4 / 12 phase ②)
 
 > 把 machine + profile + subnet 关联起来,声明"这台机器要装成什么样"。
 
@@ -129,15 +144,15 @@
 |---|---|---|
 | **CRUD** | `GET/POST/PATCH/DELETE /api/v1/bindings` | `internal/bindings/` |
 | **三方关联** | `machine_uuid` + `profile_id` + `subnet_id` 都要存在(referential 检查) | validate.go |
-| **每机覆盖项** | `ip_override` / `vlan_override` / `bond_override` / `nic_selector` / `target_disk` 单机微调,不污染 profile | schema.go |
+| **每机覆盖项** | `ip_override` / `vlan_override` / `bond_override` / `nic_selector` / `target_disk` / `hostname` / `ssh_key_ids` 单机微调,不污染 profile | schema.go |
 | **desired_state 状态机** | `none` / `install` / `reinstall` —— orchestrator 据此决定是否触发装机 | schema.go |
 | **password_override** | 单机临时密码,覆盖 profile 默认 | schema.go |
-| **referential 完整** | 删 profile / subnet 时先看 binding 是否还引用 | store.go |
+| **referential 完整** | 删 profile / subnet / ssh key 时先看 binding 是否还引用 | store.go |
 | **ref-count 辅助** | 内部 helper `CountByProfileID` / `CountBySubnetID` 给上游做删除前置检查 | store.go |
 
 ---
 
-## 8. Job 编排(M2.3-5)
+## 9. Job 编排(M2.3-5)
 
 > 一个 binding 进入 `install` 状态后,orchestrator 自动创建 job 并执行。
 
@@ -156,7 +171,7 @@
 
 ---
 
-## 9. Agent ↔ Controller Job 协议(M2.3-6 / 7)
+## 10. Agent ↔ Controller Job 协议(M2.3-6 / 7)
 
 > 装机 live 镜像里的 agent 用一组无认证端点跟 controller 协商任务。
 
@@ -173,7 +188,7 @@
 
 ---
 
-## 10. 装机执行管道(M2.3-7)
+## 11. 装机执行管道(M2.3-7)
 
 > agent 跑的实际装机流程,9 个阶段串成一条 pipeline。
 
@@ -203,7 +218,7 @@
 
 ---
 
-## 11. Web UI
+## 12. Web UI
 
 > Vue 3 单页应用(源码 `frontend/`,Vite 构建到 `internal/webui/assets/` 后 `//go:embed` 进 binary)。
 > 技术栈:Vue 3 + TypeScript + Element Plus + Pinia + Vue Router(history 模式,base `/ui/`)。
@@ -235,7 +250,7 @@
 
 ---
 
-## 12. 认证(M2.3-11)
+## 13. 认证(M2.3-11)
 
 | 功能 | 说明 | 模块 |
 |---|---|---|
@@ -249,7 +264,7 @@
 
 ---
 
-## 13. Utility 端点
+## 14. Utility 端点
 
 | 功能 | 端点 | 模块 |
 |---|---|---|
@@ -258,7 +273,7 @@
 
 ---
 
-## 14. CLI 子命令
+## 15. CLI 子命令
 
 | 子命令 | 用途 | 实现 |
 |---|---|---|
@@ -269,7 +284,7 @@
 
 ---
 
-## 15. 加密 / 密钥
+## 16. 加密 / 密钥
 
 | 功能 | 说明 | 模块 |
 |---|---|---|
@@ -279,7 +294,7 @@
 
 ---
 
-## 16. 可观测 / 运维
+## 17. 可观测 / 运维
 
 | 功能 | 说明 | 来源 |
 |---|---|---|
@@ -291,7 +306,7 @@
 
 ---
 
-## 17. 持久化(SQLite 共享)
+## 18. 持久化(SQLite 共享)
 
 > 所有 store 共用一份 `inventory.db`,WAL 模式,跨进程读 / 单进程写。
 
@@ -312,7 +327,7 @@
 
 ---
 
-## 18. 未实现(已规划)
+## 19. 未实现(已规划)
 
 | 功能 | 状态 | 备注 |
 |---|---|---|
@@ -325,7 +340,7 @@
 
 ---
 
-## 19. 快速查阅
+## 20. 快速查阅
 
 - **API 详细参数 / 字段**:[`docs/api.md`](api.md)
 - **从源码到上线**:[`docs/deploy.md`](deploy.md)

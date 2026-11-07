@@ -296,7 +296,27 @@ export interface Binding {
   nic_selector_override?: string
   /** 每机器覆盖 profile.agent_installed；缺省 = 沿用 profile */
   agent_installed_override?: boolean | null
+  /** 装机时注入 /root/.ssh/authorized_keys 的公钥（sshkeys 表 id），
+   *  缺省 = 未选择（PUT 不传该键 = 保持原选择） */
+  ssh_key_ids?: string[]
   updated_at?: string
+}
+
+// ---------- sshkeys ----------
+
+export interface SSHKey {
+  id: string
+  name: string
+  /** 规范化 authorized_keys 单行："类型 base64 注释" */
+  public_key: string
+  key_type: string
+  /** 与 ssh-keygen -lf 输出一致 */
+  fingerprint: string
+  comment?: string
+  created_at: string
+  updated_at: string
+  created_by?: string
+  updated_by?: string
 }
 
 // ---------- bmc ----------

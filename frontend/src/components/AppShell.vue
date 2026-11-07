@@ -27,6 +27,7 @@ const navItems: NavItem[] = [
   { to: '/images', label: '镜像' },
   { to: '/profiles', label: '安装配置' },
   { to: '/subnets', label: '子网' },
+  { to: '/sshkeys', label: 'SSH 公钥' },
   { to: '/bmc', label: 'BMC' },
   { to: '/jobs', label: '作业' },
   { to: '/audit', label: '审计' },

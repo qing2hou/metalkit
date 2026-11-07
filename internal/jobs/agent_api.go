@@ -12,6 +12,7 @@ import (
 	"metalkit/internal/bindings"
 	"metalkit/internal/images"
 	"metalkit/internal/profiles"
+	"metalkit/internal/sshkeys"
 	"metalkit/internal/subnets"
 	"metalkit/internal/util"
 )
@@ -43,6 +44,13 @@ type SubnetFetcher interface {
 	Get(ctx context.Context, id string) (*subnets.Subnet, error)
 }
 
+// SSHKeyFetcher is the slice of sshkeys.Store the agent spec endpoint needs.
+// Optional: when nil (or when the binding selects no keys), spec.SSHPublicKeys
+// stays empty and the installer skips the authorized_keys write.
+type SSHKeyFetcher interface {
+	Get(ctx context.Context, id string) (*sshkeys.SSHKey, error)
+}
+
 // AgentAPI exposes the agent-facing slice of the jobs state machine:
 //
 //	GET  /api/v1/agent/jobs/current?machine_uuid=<uuid>   poll for assigned job
@@ -65,6 +73,7 @@ type AgentAPI struct {
 	profiles ProfileFetcher
 	images   ImageFetcher
 	subnets  SubnetFetcher
+	sshkeys  SSHKeyFetcher
 	logger   *slog.Logger
 }
 
@@ -95,6 +104,14 @@ func NewAgentAPIWithFetchers(store *Store, bindings BindingFetcher, profiles Pro
 // agent. Returns the receiver for chaining at construction time.
 func (a *AgentAPI) WithSubnets(s SubnetFetcher) *AgentAPI {
 	a.subnets = s
+	return a
+}
+
+// WithSSHKeys attaches the ssh key fetcher. When set and the binding carries
+// ssh_key_ids, the spec handler resolves them to authorized_keys lines on
+// spec.SSHPublicKeys. Returns the receiver for chaining.
+func (a *AgentAPI) WithSSHKeys(s SSHKeyFetcher) *AgentAPI {
+	a.sshkeys = s
 	return a
 }
 
@@ -253,6 +270,30 @@ func (a *AgentAPI) getSpec(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Per-binding SSH key selection: resolve ssh_key_ids into ready-to-write
+	// authorized_keys lines on the spec. The delete handler refuses to drop a
+	// key that is still referenced, so a missing key here is corrupt state —
+	// fail the spec rather than silently installing without a key the
+	// operator believes is there (same posture as the subnet load above).
+	var sshKeys []string
+	if len(binding.SSHKeyIDs) > 0 {
+		if a.sshkeys == nil {
+			writeError(w, http.StatusServiceUnavailable, "ssh key fetcher not configured")
+			return
+		}
+		sshKeys = make([]string, 0, len(binding.SSHKeyIDs))
+		for _, kid := range binding.SSHKeyIDs {
+			k, err := a.sshkeys.Get(r.Context(), kid)
+			if err != nil {
+				a.logger.Error("agent spec: load ssh key", "err", err,
+					"job_id", id, "ssh_key_id", kid)
+				writeError(w, http.StatusInternalServerError, "load ssh key failed")
+				return
+			}
+			sshKeys = append(sshKeys, k.PublicKey)
+		}
+	}
+
 	// Per-binding password override: if the operator set a plaintext password
 	// on the binding, encrypt-hash it now and overwrite the profile's default
 	// hash before sending the spec downstream. Keeps the agent / installer
@@ -287,6 +328,7 @@ func (a *AgentAPI) getSpec(w http.ResponseWriter, r *http.Request) {
 		Binding:         *binding,
 		NetworkRenderer: profile.NetworkRenderer,
 		Bootloader:      profile.Bootloader,
+		SSHPublicKeys:   sshKeys,
 	}
 	writeJSON(w, http.StatusOK, spec)
 }

@@ -105,19 +105,23 @@ func (m *mockExec) Calls() []mockExecCall {
 	return out
 }
 
-// mockFS is an in-memory FS.
+// mockFS is an in-memory FS. failWrites injects per-path write failures so
+// tests can pin error-propagation paths (e.g. authorized_keys on a
+// read-only mount).
 type mockFS struct {
-	mu      sync.Mutex
-	files   map[string][]byte
-	dirs    map[string]bool
-	notADir map[string]bool // paths Exists==true but IsDir()==false
+	mu         sync.Mutex
+	files      map[string][]byte
+	dirs       map[string]bool
+	notADir    map[string]bool // paths Exists==true but IsDir()==false
+	failWrites map[string]error
 }
 
 func newMockFS() *mockFS {
 	return &mockFS{
-		files:   map[string][]byte{},
-		dirs:    map[string]bool{},
-		notADir: map[string]bool{},
+		files:      map[string][]byte{},
+		dirs:       map[string]bool{},
+		notADir:    map[string]bool{},
+		failWrites: map[string]error{},
 	}
 }
 
@@ -133,6 +137,9 @@ func (m *mockFS) ReadFile(path string) ([]byte, error) {
 func (m *mockFS) WriteFile(path string, data []byte, _ os.FileMode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err, ok := m.failWrites[path]; ok {
+		return err
+	}
 	m.files[path] = append([]byte{}, data...)
 	m.dirs[filepath.Dir(path)] = true
 	return nil
