@@ -44,4 +44,9 @@ type InstallSpec struct {
 	// Bootloader selects which bootloader installation strategy to use.
 	// Empty string = "auto" (determined by OS detection at install time).
 	Bootloader string `json:"bootloader,omitempty"`
+	// SSHPublicKeys carries the resolved authorized_keys lines for the
+	// binding's ssh_key_ids (canonical "type base64 comment" form, one line
+	// per entry). The spec endpoint resolves ids → key lines so the agent /
+	// installer never needs to know the catalog exists. Empty = no injection.
+	SSHPublicKeys []string `json:"ssh_public_keys,omitempty"`
 }
