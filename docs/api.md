@@ -330,6 +330,7 @@ URL 已经指明了哪台机器，PUT 既是新增也是覆盖。
   "desired_state": "none" | "install" | "reinstall",
   "static_address": "10.0.0.7",     // 仅 profile.network.method=static 时给值，dhcp 时必须省略
   "hostname":       "node7",        // 可选；覆盖 profile.hostname_template；"" = 清除，不传 = 保持
+  "ssh_key_ids":    ["<32 hex>"],   // 可选；要注入的公钥；不传 = 保持，[] = 清空（见 §19.4）
   "updated_at":     "2026-05-24T07:51:05Z",
   "updated_by":     "admin"
 }
@@ -770,9 +771,13 @@ machine_uuid 一致性校验做 foot-gun guard——不是认证。
   "profile": { "id": "...", "name": "ubuntu-default", "hostname_template": "node-{n}",
                "root_password_hash": "$6$...", "target_disk": {...}, "network": {...} },
   "binding":  { "machine_uuid": "...", "image_id": "...", "profile_id": "...",
-                "desired_state": "install", "hostname": "node-007" }
+                "desired_state": "install", "hostname": "node-007" },
+  "ssh_public_keys": ["ssh-ed25519 AAAA... ops@metalkit"]
 }
 ```
+
+`ssh_public_keys`（可选）：binding 选了公钥时携带解析好的 authorized_keys 行
+（见 §19），installer 直写目标机 `/root/.ssh/authorized_keys`。
 
 `image_blob_url` 是相对路径——agent 用自己的 controller baseURL 拼成完整
 URL 后流式下载，边下边校验 sha256，写入目标盘。
@@ -1050,3 +1055,54 @@ AND subnet_id IS NULL` 的 binding，按 profile.network 的 prefix_len/gateway/
 CIDR，find-or-create 一个 `auto-<cidr_slug>` 命名的 subnet 行，把 binding 指过去。
 幂等，每次启动安全重跑。日志关键字 `subnet migration complete`。
 
+
+## 19. SSH 公钥 API（新增）
+
+SSH 公钥库：操作员把公钥（`ssh-keygen` 生成的 `.pub` 单行内容）保存一次，
+装机时在 binding 上按机器勾选，installer 写入目标机 `/root/.ssh/authorized_keys`。
+
+### 19.1 schema
+
+```json
+{
+  "id":          "<32 hex>",
+  "name":        "ops-main",
+  "public_key":  "ssh-ed25519 AAAAC3NzaC1... ops@metalkit",
+  "key_type":    "ssh-ed25519",
+  "fingerprint": "SHA256:63qVz...",        // 与 ssh-keygen -lf 输出一致
+  "comment":     "ops@metalkit",
+  "created_at":  "2026-11-07T08:00:00Z",
+  "updated_at":  "2026-11-07T08:00:00Z"
+}
+```
+
+### 19.2 端点
+
+```
+GET    /api/v1/sshkeys             → [SSHKey, ...]，按 created_at 降序
+POST   /api/v1/sshkeys             → 201 SSHKey / 400（校验失败）/ 409（重名）
+GET    /api/v1/sshkeys/{id}        → SSHKey / 404
+PUT    /api/v1/sshkeys/{id}        → 200 SSHKey（三态：不传 = 保持）
+DELETE /api/v1/sshkeys/{id}        → 204 / 404 / 422（仍被 binding 引用）
+```
+
+### 19.3 校验规则（`internal/sshkeys/validate.go`）
+
+- `name`：1-64 字符，字母/数字/文字开头，可含 `. _ -`（与 subnets 同规则），UNIQUE
+- `public_key`：必须是 authorized_keys 单行——「类型 base64 [注释]」；
+  类型白名单（ssh-ed25519 / ssh-rsa / ssh-dss / ecdsa-sha2-nistp{256,384,521} /
+  sk-* OpenSSH FIDO2 变体）；base64 必须**可解码且内嵌 wire-format type 与首字段一致**
+  （捕捉换错类型前缀的手滑）；拒绝多行 / 私钥内容
+- 存储为规范化单行（空白折叠）；`fingerprint` = `SHA256:` + base64-no-pad(sha256(blob))
+
+### 19.4 与 binding / 装机的关系
+
+- `PUT /api/v1/bindings/{uuid}` 接受 `ssh_key_ids: [<32 hex>, ...]`，三态：
+  **不传 = 保持原选择** / `[]` = 清空 / 数组 = 替换（每个 id 必须 32 hex 且命中公钥库，
+  否则 400/422）
+- spec 端点把 `binding.ssh_key_ids` 解析成 `spec.ssh_public_keys`（规范公钥行数组，
+  见 §14.2）；installer 直写 `/root/.ssh/authorized_keys`（`.ssh` 0700、文件 0600），
+  不走 cloud-init user-data——`ssh_authorized_keys` 作用于默认用户而非 root，
+  直写对所有 OS 家族行为一致
+- 引用计数：`DELETE /api/v1/sshkeys/{id}` 在仍有 binding 引用时返回 422
+  （`RefCountBySSHKey`，`json_each` 精确匹配而非 LIKE 子串）

@@ -367,10 +367,21 @@ Profile 可以自带三个 Go template（留空走内置默认）：
 | NIC Selector | 单机指定网卡（覆盖 profile 的 bond_slaves 选择逻辑） |
 | Target Disk Override | 单机指定目标盘（覆盖 profile 的 target_disk） |
 | Hostname | 单机自定义主机名（留空 = 按 profile 的 hostname_template 展开） |
+| SSH 公钥 | 从「SSH 公钥」页面保存的公钥库多选，装机时写入目标机 `/root/.ssh/authorized_keys`；同一把公钥可跨机器复用 |
 | Password Override | 单机临时 root 密码 hash（覆盖 profile） |
 | Desired State | `none` / `install` / `reinstall` —— 选 `install` 表示创建 binding 后立即触发装机 |
 
-### 9.1 触发装机的两种姿势
+### 9.1 SSH 公钥：先存后选
+
+「SSH 公钥」页面（顶部导航）维护公钥库：点「新建公钥」，名称任意（如 `ops-main`），
+公钥粘贴本地 `ssh-keygen` 生成的 `~/.ssh/id_ed25519.pub` **整行内容**（格式：`类型 base64 注释`）。
+保存后系统自动显示指纹（与 `ssh-keygen -lf` 一致，可核对）。
+
+装机弹窗里的「SSH 公钥」多选框从这里取数，可一次勾选多把——装完后用任意对应私钥
+即可直接以 root 登录目标机。公钥只保存公开部分，私钥始终在你自己手里；
+被装机配置引用的公钥无法删除（需先清除机器上的引用）。
+
+### 9.2 触发装机的两种姿势
 
 **A. 创建 binding 时直接选 `install`**：
 
@@ -380,7 +391,7 @@ binding 一建立，5 秒内 orchestrator 会自动创建 Job，触发 BMC 上�
 
 进单机详情页 → 点 "Install" 或 "Reinstall" 按钮。后端把 desired_state 改成 `install` / `reinstall`，orchestrator 接管。
 
-### 9.2 reinstall 的语义
+### 9.3 reinstall 的语义
 
 `reinstall` 跟 `install` 的区别只在于：`install` 要求机器当前没装过（binding 处于初始状态），`reinstall` 允许覆盖已有系统。两者都会触发完整的 PXE + 写盘流程。
 
