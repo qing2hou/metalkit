@@ -551,7 +551,10 @@ func run() int {
 
 	// Same gate for SSH keys: a key still referenced by a binding can't be
 	// dropped (the next install of that machine would silently lose it).
-	sshKeyAPI = sshKeyAPI.WithBindingRefCount(bindStore.RefCountBySSHKey)
+	// The write lock makes count+delete atomic against Upsert's in-lock
+	// existence re-check — closes the dangling-reference TOCTOU.
+	sshKeyAPI = sshKeyAPI.WithBindingRefCount(bindStore.RefCountBySSHKey).
+		WithBindingWriteLock(bindStore.AcquireWriteLock)
 
 	// Full-mode pool set: local pool (from config/settings) + one relay pool
 	// per subnet that declares DHCP bounds. Built once here so relayed VLANs

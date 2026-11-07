@@ -57,7 +57,7 @@ const knownTypes = new Set([
 function validatePublicKeyLine(raw: string): Error | undefined {
   const s = raw.trim()
   if (!s) return undefined // required 规则已兜底
-  if (s.includes('\n')) return new Error('只支持单行公钥（.pub 文件内容），请勿粘贴私钥或多行文本')
+  if (/[\n\r]/.test(s)) return new Error('只支持单行公钥（.pub 文件内容），请勿粘贴私钥或多行文本')
   const fields = s.split(/\s+/)
   if (fields.length < 2) return new Error('缺少 base64 密钥体')
   if (fields.length > 3) return new Error('最多 3 个字段（类型 / base64 / 注释）')
@@ -114,7 +114,7 @@ async function save(): Promise<void> {
 async function remove(row: SSHKey): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `确定删除 SSH 公钥「${row.name}」？正在装机配置中引用它的机器将无法再注入该公钥。`,
+      `确定删除 SSH 公钥「${row.name}」？仍被机器的装机配置引用时删除会被拒绝。`,
       '删除 SSH 公钥',
       { type: 'warning' },
     )

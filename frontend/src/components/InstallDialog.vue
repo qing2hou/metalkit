@@ -155,14 +155,14 @@ watch(
     form.rootPassword = ''
     // 主机名：binding 上存的是本机覆盖值；空 = 按 profile 模板展开
     form.hostname = b?.hostname ?? ''
-    // SSH 公钥：binding 上存的是上次的选择，原样带回（多选数组）
+    // SSH 公钥：binding 上存的是上次的选择，原样带回（多选数组）。
+    // 密钥库每次打开都重取——弹窗组件常驻（destroy-on-close 只销毁 slot），
+    // 缓存会让「先去公钥页新建、回来装机」看不到新 key。
     form.sshKeyIds = [...(b?.ssh_key_ids ?? [])]
-    if (sshKeys.value.length === 0) {
-      sshKeysApi
-        .list()
-        .then((keys) => (sshKeys.value = keys))
-        .catch((err) => ElMessage.error(`加载 SSH 公钥库失败: ${(err as Error).message}`))
-    }
+    sshKeysApi
+      .list()
+      .then((keys) => (sshKeys.value = keys))
+      .catch((err) => ElMessage.error(`加载 SSH 公钥库失败: ${(err as Error).message}`))
     // 目标盘：上次的覆盖值优先；无覆盖（smallest）回退 profile 默认
     if (b?.target_disk) {
       form.diskMode = (['smallest', 'by-wwn', 'by-path', 'by-model'] as const).includes(

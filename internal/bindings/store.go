@@ -112,6 +112,18 @@ func (s *Store) WithProber(p IPProber) *Store {
 	return s
 }
 
+// AcquireWriteLock grabs the same allocMu that serializes Upsert and returns
+// its release func. Cross-catalog writes that race a binding's referenced-id
+// checks — today the sshkeys DELETE handler, which counts bindings before
+// dropping a key — must hold this lock across their count + delete so the
+// "check key exists → INSERT reference" window inside Upsert cannot
+// interleave with "count references → DELETE key" (a dangling key id makes
+// every later spec fetch for that machine 500 forever).
+func (s *Store) AcquireWriteLock() func() {
+	s.allocMu.Lock()
+	return s.allocMu.Unlock
+}
+
 // Binding is the JSON-friendly record.
 //
 // TargetDisk is the per-binding override for the profile's target_disk.
@@ -302,18 +314,17 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 			return nil, err
 		}
 	}
-	// ssh_key_ids: validate shape + catalog existence outside the lock
-	// (same read-only cross-table check as the subnet lookup below).
+	// ssh_key_ids: validate shape outside the lock (no shared state); the
+	// catalog existence re-check runs inside allocMu right before the INSERT
+	// so it is serialized against sshkeys DELETE, which takes the same lock
+	// (see AcquireWriteLock) — otherwise a key could vanish between the
+	// check and the INSERT, leaving a dangling reference that 500s every
+	// later spec fetch for this machine.
 	var sshKeyIDs []string
 	if in.SSHKeyIDs != nil {
 		sshKeyIDs, err = sshkeys.ValidateIDs(*in.SSHKeyIDs)
 		if err != nil {
 			return nil, err
-		}
-		for _, kid := range sshKeyIDs {
-			if err := s.checkSSHKeyExists(ctx, kid); err != nil {
-				return nil, err
-			}
 		}
 	}
 
@@ -352,13 +363,24 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 
 	// ssh_key_ids: keep existing (parse the stored blob) or replace with the
 	// validated list (marshal; empty → NULL so the column is nullable).
+	// The existence re-check of every id runs here — under allocMu, i.e.
+	// serialized against sshkeys DELETE (which holds the same lock while
+	// counting references and dropping the row), so the list we are about
+	// to store cannot reference a key deleted past our earlier check.
 	var sshKeyIDsSQL any
 	if keepExistingSSHKeys {
 		if existingSSHKeys.Valid && existingSSHKeys.String != "" {
 			sshKeyIDsSQL = existingSSHKeys.String
 		}
-	} else if len(sshKeyIDs) > 0 {
-		sshKeyIDsSQL = string(sshkeys.MarshalIDs(sshKeyIDs))
+	} else {
+		for _, kid := range sshKeyIDs {
+			if err := s.checkSSHKeyExists(ctx, kid); err != nil {
+				return nil, err
+			}
+		}
+		if len(sshKeyIDs) > 0 {
+			sshKeyIDsSQL = string(sshkeys.MarshalIDs(sshKeyIDs))
+		}
 	}
 
 	var subnetIDSQL any
@@ -833,12 +855,16 @@ func (s *Store) RefCountBySubnet(ctx context.Context, subnetID string) (int, err
 // refuse the delete if > 0. Uses SQLite's json_each to walk the stored
 // arrays — a LIKE '%"id"%' substring match would false-positive on ids that
 // prefix/contain one another, and the 32-hex format makes that a real
-// (if unlikely) hazard.
+// (if unlikely) hazard. Rows whose blob is missing/invalid JSON are skipped
+// (json_valid guard) — one hand-corrupted row must not 500 every key
+// deletion until the data is fixed; the write path (MarshalIDs) cannot
+// produce such a blob.
 func (s *Store) RefCountBySSHKey(ctx context.Context, keyID string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `
         SELECT COUNT(*) FROM bindings
-        WHERE EXISTS (SELECT 1 FROM json_each(bindings.ssh_key_ids_json) je
+        WHERE json_valid(ssh_key_ids_json)
+          AND EXISTS (SELECT 1 FROM json_each(bindings.ssh_key_ids_json) je
                       WHERE je.value = ?)`, keyID).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("count bindings for ssh key: %w", err)

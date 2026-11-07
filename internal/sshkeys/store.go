@@ -188,6 +188,12 @@ func (s *Store) Update(ctx context.Context, id string, in UpdateInput) (*SSHKey,
 		now, updatedBy, id,
 	)
 	if err != nil {
+		// The pre-check above races a concurrent rename to the same name;
+		// the UNIQUE constraint is the authority — surface it in the same
+		// shape so the API maps both paths to 409.
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("%w: %s", ErrDuplicateName, cur.Name)
+		}
 		return nil, fmt.Errorf("update ssh key: %w", err)
 	}
 	return s.Get(ctx, id)

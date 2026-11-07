@@ -2,6 +2,7 @@ package bindings
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -147,6 +148,24 @@ func TestRefCountBySSHKey(t *testing.T) {
 	klookalike := "b" + k1[1:]
 	if n, err := f.bindings.RefCountBySSHKey(ctx, klookalike); err != nil || n != 0 {
 		t.Errorf("RefCountBySSHKey(lookalike) = %d, %v; want 0, nil", n, err)
+	}
+}
+
+// TestAPIUpsertUnknownSSHKey: 合法格式但不存在的 id（不在 ssh_keys 表）→ 422，
+// 与未知 image/profile/subnet 同一档（外键缺失，不是格式错误）。
+func TestAPIUpsertUnknownSSHKey(t *testing.T) {
+	f, ts := newTestAPI(t)
+	mu := f.seedMachine(t, '4')
+	im := f.seedImage(t, "a")
+	pr := f.seedProfile(t, "p-api", "dhcp")
+	resp, _ := doRequest(t, http.MethodPut, ts.URL+"/api/v1/bindings/"+mu, map[string]any{
+		"image_id":    im,
+		"profile_id":  pr,
+		"desired_state": "install",
+		"ssh_key_ids": []string{"00000000000000000000000000000000"},
+	})
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", resp.StatusCode)
 	}
 }
 

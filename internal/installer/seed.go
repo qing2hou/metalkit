@@ -182,6 +182,26 @@ func buildSeedCommon(
 	// here would trigger a full-disk relabel on first boot — which on
 	// large XFS partitions takes 30+ minutes with no Plymouth progress
 	// display, looking like a hang (qa.md #4).
+
+	// Per-binding SSH keys (spec.SSHPublicKeys, resolved from the binding's
+	// ssh_key_ids by the spec endpoint): write root's authorized_keys
+	// directly into the rootfs. Deliberately NOT routed through cloud-init
+	// user-data (ssh_authorized_keys applies to the *default* user, and a
+	// `users:` block would change default-user behaviour per distro) — a
+	// direct file is byte-identical across all supported OS families and
+	// cloud-init never overwrite root's file because our user-data never
+	// claims to manage it.
+	//
+	// MUST run before the SELinux restorecon block below: /root/.ssh is on
+	// the relabel list precisely because the file is created here. It also
+	// fails the job on write errors (read-only mount, ENOSPC) — the spec
+	// endpoint already refuses to hand out a spec with a dangling key, and
+	// silently skipping the write here would break that fail-closed posture
+	// with a green-but-keyless install.
+	if err := writeAuthorizedKeys(deps, mntRoot, spec.SSHPublicKeys); err != nil {
+		return fmt.Errorf("install: write authorized_keys: %w", err)
+	}
+
 	if isRHELFamily && !selinuxWillBeDisabled(deps, mntRoot) {
 		// Paths we wrote into the rootfs that need SELinux relabeling.
 		// /root/.ssh only exists when SSH keys were injected (see
@@ -236,16 +256,6 @@ func buildSeedCommon(
 	// hand. The installed system needs the same shield — operators manage
 	// freshly installed machines through vKVM before SSH is reachable.
 	writeVTInitService(deps, mntRoot)
-
-	// Per-binding SSH keys (spec.SSHPublicKeys, resolved from the binding's
-	// ssh_key_ids by the spec endpoint): write root's authorized_keys
-	// directly into the rootfs. Deliberately NOT routed through cloud-init
-	// user-data (ssh_authorized_keys applies to the *default* user, and a
-	// `users:` block would change default-user behaviour per distro) — a
-	// direct file is byte-identical across all supported OS families and
-	// cloud-init never overwrite root's file because our user-data never
-	// claims to manage it.
-	writeAuthorizedKeys(deps, mntRoot, spec.SSHPublicKeys)
 
 	return nil
 }
@@ -1557,31 +1567,29 @@ func writeDirectSSHDConfig(deps Deps, mntRoot string) {
 // writeAuthorizedKeys writes the binding's selected SSH public keys into
 // root's authorized_keys on the target rootfs: .ssh dir 0700, file 0600,
 // one line per key, trailing newline. No-op when no keys were selected —
-// a pre-existing authorized_keys inside the image is left untouched, and
-// we never write an empty file (a 0600 empty file is harmless but noise).
+// a pre-existing authorized_keys inside the image is *replaced* when keys
+// ARE selected (binding is the source of truth), and never written empty.
 // Runs for images with AND without cloud-init: since user-data never
 // carries ssh_authorized_keys for root, cloud-init has no reason to touch
 // this file on first boot (see the call site in buildSeedCommon).
-func writeAuthorizedKeys(deps Deps, mntRoot string, keys []string) {
+// Write failures propagate — see the call site comment.
+func writeAuthorizedKeys(deps Deps, mntRoot string, keys []string) error {
 	if len(keys) == 0 {
-		return
+		return nil
 	}
 	sshDir := filepath.Join(mntRoot, "root", ".ssh")
 	if err := deps.FS.MkdirAll(sshDir, 0o700); err != nil {
-		if deps.Logger != nil {
-			deps.Logger.Warn("authorized_keys: mkdir /root/.ssh failed", "err", err)
-		}
-		return
+		return fmt.Errorf("mkdir %s: %w", sshDir, err)
 	}
 	content := strings.Join(keys, "\n") + "\n"
 	path := filepath.Join(sshDir, "authorized_keys")
 	if err := deps.FS.WriteFile(path, []byte(content), 0o600); err != nil {
-		if deps.Logger != nil {
-			deps.Logger.Warn("authorized_keys: write failed", "err", err, "count", len(keys))
-		}
-	} else if deps.Logger != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if deps.Logger != nil {
 		deps.Logger.Info("authorized_keys: injected root SSH keys", "count", len(keys))
 	}
+	return nil
 }
 
 // writeDirectNetworkConfig writes network configuration files directly

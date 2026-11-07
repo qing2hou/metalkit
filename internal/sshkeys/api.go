@@ -26,10 +26,18 @@ import (
 // is still pointed at by a binding — same gate as subnets/profiles/images.
 type BindingRefCounter func(ctx context.Context, keyID string) (int, error)
 
+// BindingWriteLock is the bindings store's write lock (see
+// bindings.Store.AcquireWriteLock). The delete handler holds it across
+// ref-count + delete so a concurrent binding Upsert cannot squeeze its
+// "key exists" check between the count and the DELETE — that race leaves a
+// dangling ssh_key_id that 500s every later spec fetch for the machine.
+type BindingWriteLock func() (release func())
+
 type API struct {
 	store        *Store
 	logger       *slog.Logger
 	refCountFunc BindingRefCounter
+	writeLock    BindingWriteLock
 }
 
 func NewAPI(store *Store, logger *slog.Logger) *API {
@@ -41,6 +49,14 @@ func NewAPI(store *Store, logger *slog.Logger) *API {
 // simple).
 func (a *API) WithBindingRefCount(fn BindingRefCounter) *API {
 	a.refCountFunc = fn
+	return a
+}
+
+// WithBindingWriteLock registers the bindings write lock the delete handler
+// holds across ref-count + delete. Only meaningful together with
+// WithBindingRefCount; nil (default) keeps tests simple.
+func (a *API) WithBindingWriteLock(fn BindingWriteLock) *API {
+	a.writeLock = fn
 	return a
 }
 
@@ -121,6 +137,10 @@ func (a *API) update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "ssh key not found")
 		return
 	}
+	if errors.Is(err, ErrDuplicateName) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -132,6 +152,12 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 	id, ok := validKeyID(w, r.PathValue("id"))
 	if !ok {
 		return
+	}
+	// Ref-count + delete under the bindings write lock (when wired): see
+	// BindingWriteLock. The lock is only needed when the ref gate is on.
+	if a.writeLock != nil && a.refCountFunc != nil {
+		release := a.writeLock()
+		defer release()
 	}
 	if a.refCountFunc != nil {
 		n, err := a.refCountFunc(r.Context(), id)
