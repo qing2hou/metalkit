@@ -2,8 +2,8 @@
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 
-import { bindingsApi } from '@/api'
-import type { Binding, Image, Profile, Report, Subnet } from '@/api/types'
+import { bindingsApi, sshKeysApi } from '@/api'
+import type { Binding, Image, Profile, Report, SSHKey, Subnet } from '@/api/types'
 import { generatePassword } from '@/lib/filename'
 import { validateHostname } from '@/lib/hostname'
 import { hostInSubnet, isValidIPv4 } from '@/lib/net'
@@ -71,7 +71,14 @@ const form = reactive({
   agentMode: 'inherit' as 'inherit' | 'on' | 'off',
   // 主机名（空 = 不覆盖，由 profile.hostname_template 展开）
   hostname: '',
+  // SSH 公钥（多选自密钥库；空 = 本次装机不注入）
+  sshKeyIds: [] as string[],
 })
+
+// 密钥库在弹窗打开时自取（而非走 props）：images/profiles/subnets 由父页面
+// 维护是因为页面本身就要展示它们；密钥库只在这一个弹窗消费，且体量小、
+// 打开频率低——给两个父组件各加一条拉取链反而是负担。
+const sshKeys = ref<SSHKey[]>([])
 
 const saving = ref(false)
 const disks = computed(() => props.report?.disks ?? [])
@@ -148,6 +155,14 @@ watch(
     form.rootPassword = ''
     // 主机名：binding 上存的是本机覆盖值；空 = 按 profile 模板展开
     form.hostname = b?.hostname ?? ''
+    // SSH 公钥：binding 上存的是上次的选择，原样带回（多选数组）
+    form.sshKeyIds = [...(b?.ssh_key_ids ?? [])]
+    if (sshKeys.value.length === 0) {
+      sshKeysApi
+        .list()
+        .then((keys) => (sshKeys.value = keys))
+        .catch((err) => ElMessage.error(`加载 SSH 公钥库失败: ${(err as Error).message}`))
+    }
     // 目标盘：上次的覆盖值优先；无覆盖（smallest）回退 profile 默认
     if (b?.target_disk) {
       form.diskMode = (['smallest', 'by-wwn', 'by-path', 'by-model'] as const).includes(
@@ -360,6 +375,8 @@ async function submit(dispatch: boolean): Promise<void> {
       // 键必须发：hostname 是三态字段，键不传等于保持原值，用户就
       // 没法通过清空输入框来撤销自定义主机名。
       hostname: form.hostname.trim(),
+      // SSH 公钥：同样必须发键（三态）——多选清空 = 清除之前的注入选择。
+      ssh_key_ids: form.sshKeyIds,
       // 监控 agent 植入：覆盖值（true/false）改写本机行为；inherit 清除覆盖（回 profile）
       ...(form.agentMode !== 'inherit'
         ? { agent_installed_override: form.agentMode === 'on' }
@@ -668,6 +685,38 @@ async function submit(dispatch: boolean): Promise<void> {
               ? `留空则用 Profile 模板「${selectedProfile.hostname_template}」展开`
               : '当前 Profile 未设置主机名模板'
           }}
+        </div>
+      </el-form-item>
+
+      <el-divider content-position="left">SSH 公钥</el-divider>
+
+      <el-form-item label="注入公钥">
+        <el-select
+          v-model="form.sshKeyIds"
+          multiple
+          clearable
+          filterable
+          placeholder="选择本次装机要注入的公钥（可多选）"
+          style="width: 100%"
+        >
+          <el-option
+            v-for="k in sshKeys"
+            :key="k.id"
+            :label="`${k.name} (${k.key_type})`"
+            :value="k.id"
+          >
+            <span>{{ k.name }}</span>
+            <span class="mk-subtle" style="margin-left: 8px">{{ k.fingerprint }}</span>
+          </el-option>
+        </el-select>
+        <div class="mk-subtle" style="width: 100%">
+          装机时写入目标机 /root/.ssh/authorized_keys，装完即可用对应私钥 SSH 登录 root；
+          公钥在「SSH 公钥」页面统一维护，可跨机器复用
+          <template v-if="sshKeys.length === 0">
+            ；当前密钥库为空，先到
+            <router-link to="/sshkeys">SSH 公钥</router-link>
+            页面保存公钥
+          </template>
         </div>
       </el-form-item>
 

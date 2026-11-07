@@ -18,6 +18,7 @@ const router = createRouter({
     { path: '/images', name: 'images', component: () => import('@/views/ImagesView.vue') },
     { path: '/profiles', name: 'profiles', component: () => import('@/views/ProfilesView.vue') },
     { path: '/subnets', name: 'subnets', component: () => import('@/views/SubnetsView.vue') },
+    { path: '/sshkeys', name: 'sshkeys', component: () => import('@/views/SshKeysView.vue') },
     { path: '/bmc', name: 'bmc', component: () => import('@/views/BmcView.vue') },
     { path: '/jobs', name: 'jobs', component: () => import('@/views/JobsView.vue') },
     { path: '/jobs/:id', name: 'job-detail', component: () => import('@/views/JobDetailView.vue') },
