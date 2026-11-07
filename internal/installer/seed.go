@@ -184,6 +184,8 @@ func buildSeedCommon(
 	// display, looking like a hang (qa.md #4).
 	if isRHELFamily && !selinuxWillBeDisabled(deps, mntRoot) {
 		// Paths we wrote into the rootfs that need SELinux relabeling.
+		// /root/.ssh only exists when SSH keys were injected (see
+		// writeAuthorizedKeys) — restorecon tolerates the missing path.
 		relabelPaths := []string{
 			"/etc/cloud",
 			"/etc/NetworkManager",
@@ -194,6 +196,7 @@ func buildSeedCommon(
 			"/etc/shadow",
 			"/etc/fstab",
 			"/etc/sysconfig/network",
+			"/root/.ssh",
 			"/var/lib/cloud",
 		}
 		args := append([]string{mntRoot, "restorecon", "-RF"}, relabelPaths...)
@@ -233,6 +236,16 @@ func buildSeedCommon(
 	// hand. The installed system needs the same shield — operators manage
 	// freshly installed machines through vKVM before SSH is reachable.
 	writeVTInitService(deps, mntRoot)
+
+	// Per-binding SSH keys (spec.SSHPublicKeys, resolved from the binding's
+	// ssh_key_ids by the spec endpoint): write root's authorized_keys
+	// directly into the rootfs. Deliberately NOT routed through cloud-init
+	// user-data (ssh_authorized_keys applies to the *default* user, and a
+	// `users:` block would change default-user behaviour per distro) — a
+	// direct file is byte-identical across all supported OS families and
+	// cloud-init never overwrite root's file because our user-data never
+	// claims to manage it.
+	writeAuthorizedKeys(deps, mntRoot, spec.SSHPublicKeys)
 
 	return nil
 }
@@ -1538,6 +1551,36 @@ func writeDirectSSHDConfig(deps Deps, mntRoot string) {
 		}
 	} else if deps.Logger != nil {
 		deps.Logger.Info("direct-write: wrote sshd drop-in config")
+	}
+}
+
+// writeAuthorizedKeys writes the binding's selected SSH public keys into
+// root's authorized_keys on the target rootfs: .ssh dir 0700, file 0600,
+// one line per key, trailing newline. No-op when no keys were selected —
+// a pre-existing authorized_keys inside the image is left untouched, and
+// we never write an empty file (a 0600 empty file is harmless but noise).
+// Runs for images with AND without cloud-init: since user-data never
+// carries ssh_authorized_keys for root, cloud-init has no reason to touch
+// this file on first boot (see the call site in buildSeedCommon).
+func writeAuthorizedKeys(deps Deps, mntRoot string, keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	sshDir := filepath.Join(mntRoot, "root", ".ssh")
+	if err := deps.FS.MkdirAll(sshDir, 0o700); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("authorized_keys: mkdir /root/.ssh failed", "err", err)
+		}
+		return
+	}
+	content := strings.Join(keys, "\n") + "\n"
+	path := filepath.Join(sshDir, "authorized_keys")
+	if err := deps.FS.WriteFile(path, []byte(content), 0o600); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("authorized_keys: write failed", "err", err, "count", len(keys))
+		}
+	} else if deps.Logger != nil {
+		deps.Logger.Info("authorized_keys: injected root SSH keys", "count", len(keys))
 	}
 }
 
