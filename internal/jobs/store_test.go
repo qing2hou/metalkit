@@ -38,7 +38,7 @@ func newFixture(t *testing.T) *fixture {
 	for _, ddl := range []string{
 		`CREATE TABLE machines (uuid TEXT PRIMARY KEY, last_seen INTEGER NOT NULL DEFAULT 0, latest_report INTEGER)`,
 		`CREATE TABLE images   (id TEXT PRIMARY KEY)`,
-		`CREATE TABLE profiles (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE profiles (id TEXT PRIMARY KEY, boot_mode TEXT)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), ddl); err != nil {
 			t.Fatalf("ddl %q: %v", ddl, err)

@@ -32,6 +32,7 @@ func (f *fakeBMC) GetWithPassword(_ context.Context, m string) (BMCCredential, e
 type fakeIPMI struct {
 	mu            sync.Mutex
 	bootForPXE    []string // machine_uuid+ip per call
+	bootModes     []string // effective boot_mode per call
 	finalize      []string
 	bootForPXEErr error
 	finalizeErr   error
@@ -41,6 +42,15 @@ func (f *fakeIPMI) BootForPXE(_ context.Context, cred BMCCredential) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.bootForPXE = append(f.bootForPXE, cred.IP)
+	f.bootModes = append(f.bootModes, "auto")
+	return f.bootForPXEErr
+}
+
+func (f *fakeIPMI) BootForPXEMode(_ context.Context, cred BMCCredential, mode string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bootForPXE = append(f.bootForPXE, cred.IP)
+	f.bootModes = append(f.bootModes, mode)
 	return f.bootForPXEErr
 }
 
@@ -85,6 +95,7 @@ func newOrchFixture(t *testing.T) *orchFixture {
             desired_state   TEXT NOT NULL,
             static_address  TEXT,
             hostname        TEXT,
+            boot_mode_override TEXT,
             updated_at      INTEGER NOT NULL,
             updated_by      TEXT NOT NULL
         )`); err != nil {
@@ -114,6 +125,64 @@ func (f *orchFixture) seedBinding(t *testing.T, muuid, imageID, profileID, desir
          VALUES (?, ?, ?, ?, ?, 'admin')`,
 		muuid, imageID, profileID, desired, time.Now().Unix()); err != nil {
 		t.Fatalf("seed binding: %v", err)
+	}
+}
+
+func (f *orchFixture) setProfileBootMode(t *testing.T, profileID, mode string) {
+	t.Helper()
+	if _, err := f.db.ExecContext(context.Background(),
+		`UPDATE profiles SET boot_mode = ? WHERE id = ?`, mode, profileID); err != nil {
+		t.Fatalf("set profile boot_mode: %v", err)
+	}
+}
+
+func (f *orchFixture) setBindingBootModeOverride(t *testing.T, muuid, mode string) {
+	t.Helper()
+	if _, err := f.db.ExecContext(context.Background(),
+		`UPDATE bindings SET boot_mode_override = ? WHERE machine_uuid = ?`, mode, muuid); err != nil {
+		t.Fatalf("set binding boot_mode_override: %v", err)
+	}
+}
+
+// TestOrchestratorPXEBootMode pins the mode sent to the BMC when a job is
+// started: binding override (including explicit "auto") > profile default >
+// auto. Without this wiring a UEFI selection never reaches ipmitool and the
+// machine PXE-boots in its firmware's current (legacy) mode.
+func TestOrchestratorPXEBootMode(t *testing.T) {
+	cases := []struct {
+		name        string
+		profileMode string
+		override    string
+		want        string
+	}{
+		{"profile bios", "bios", "", "bios"},
+		{"profile uefi", "uefi", "", "uefi"},
+		{"override wins", "uefi", "bios", "bios"},
+		{"explicit auto override", "uefi", "auto", "auto"},
+		{"default auto", "", "", "auto"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOrchFixture(t)
+			muuid := f.seedMachine(t, 1)
+			imageID := f.seedImage(t)
+			profileID := f.seedProfile(t)
+			f.seedBinding(t, muuid, imageID, profileID, "install")
+			f.setProfileBootMode(t, profileID, tc.profileMode)
+			if tc.override != "" {
+				f.setBindingBootModeOverride(t, muuid, tc.override)
+			}
+			f.bmc.creds[muuid] = BMCCredential{IP: "10.0.0.9", Username: "ADMIN", Password: "p", IPMIInterface: "lanplus", Port: 623}
+
+			f.orch.tick(context.Background())
+
+			if len(f.ipmi.bootModes) != 1 {
+				t.Fatalf("BootForPXEMode calls=%d want 1", len(f.ipmi.bootModes))
+			}
+			if f.ipmi.bootModes[0] != tc.want {
+				t.Errorf("boot mode=%q want %q", f.ipmi.bootModes[0], tc.want)
+			}
+		})
 	}
 }
 

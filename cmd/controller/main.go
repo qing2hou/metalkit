@@ -34,8 +34,8 @@ import (
 	"metalkit/internal/profiles"
 	"metalkit/internal/sessions"
 	"metalkit/internal/settings"
-	"metalkit/internal/sshkeys"
 	"metalkit/internal/sqlitedb"
+	"metalkit/internal/sshkeys"
 	"metalkit/internal/subnets"
 	"metalkit/internal/tftp"
 	"metalkit/internal/util"
@@ -66,6 +66,10 @@ type ipmiClientAdapter struct{ c *ipmi.Client }
 
 func (a *ipmiClientAdapter) BootForPXE(ctx context.Context, cred jobs.BMCCredential) error {
 	return a.c.BootForPXE(ctx, toBMCCred(cred))
+}
+
+func (a *ipmiClientAdapter) BootForPXEMode(ctx context.Context, cred jobs.BMCCredential, mode string) error {
+	return a.c.BootForPXEMode(ctx, toBMCCred(cred), mode)
 }
 
 func (a *ipmiClientAdapter) FinalizeBootDisk(ctx context.Context, cred jobs.BMCCredential) error {
