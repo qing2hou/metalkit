@@ -99,20 +99,25 @@ func NewClient(logger *slog.Logger, opts ClientOptions) (*Client, error) {
 	return &Client{bin: bin, runner: runner, timeout: timeout, logger: logger}, nil
 }
 
-// SetBootDevice issues `chassis bootdev <dev> options=efiboot`. One-shot
-// (resets after next boot). The efiboot flag is what makes the override
-// actually stick on UEFI systems — without it Dell BIOS encodes "PC
-// Compatible (legacy) boot" in the next-boot params and a UEFI-only system
-// silently ignores the override, falling back to its existing BootOrder
-// (which on a freshly-installed RHEL family box now points at the OS shim
-// at NVRAM position #0). Legacy-only hardware ignores the bit.
+// SetBootDevice issues `chassis bootdev <dev>` with NO boot flags. It is the
+// default (auto) path: the firmware's current boot mode decides whether the
+// PXE attempt is legacy or UEFI. Use BootForPXEMode to request UEFI
+// explicitly (options=efiboot).
 func (c *Client) SetBootDevice(ctx context.Context, cred bmc.PasswordedCredential, dev BootDevice) error {
+	return c.setBootDevice(ctx, cred, dev, "")
+}
+
+func (c *Client) setBootDevice(ctx context.Context, cred bmc.PasswordedCredential, dev BootDevice, options string) error {
 	switch dev {
 	case BootDevicePXE, BootDeviceDisk:
 	default:
 		return fmt.Errorf("ipmi: unsupported boot device %q", dev)
 	}
-	_, err := c.run(ctx, cred, "chassis", "bootdev", string(dev))
+	args := []string{"chassis", "bootdev", string(dev)}
+	if options != "" {
+		args = append(args, "options="+options)
+	}
+	_, err := c.run(ctx, cred, args...)
 	return err
 }
 
@@ -172,21 +177,42 @@ func (c *Client) PowerStatus(ctx context.Context, cred bmc.PasswordedCredential)
 }
 
 // BootForPXE is the composite operation used to start a (re)install:
-// set next-boot=pxe, then power cycle. Returns the underlying error if either
-// step fails.
+// set next-boot=pxe (no EFI flag), then power cycle. Returns the underlying
+// error if either step fails.
 func (c *Client) BootForPXE(ctx context.Context, cred bmc.PasswordedCredential) error {
-	if err := c.SetBootDevice(ctx, cred, BootDevicePXE); err != nil {
+	return c.BootForPXEMode(ctx, cred, "auto")
+}
+
+// BootForPXEMode is BootForPXE with an explicit firmware mode request:
+//
+//   - "" / "auto": no boot flags — the firmware's current mode decides.
+//   - "bios": no EFI flag (legacy). Does not force legacy on firmware that
+//     is already in UEFI mode; the caller must ensure the firmware matches.
+//   - "uefi": adds options=efiboot so UEFI firmware performs an EFI PXE boot.
+//
+// The UEFI flag is opt-in because iDRAC 8 resolves it to a UEFI boot-table
+// entry that can be the hard disk (2026-09-18 double no-PXE incident), so the
+// install/orchestrator path deliberately keeps using plain bootdev=pxe.
+func (c *Client) BootForPXEMode(ctx context.Context, cred bmc.PasswordedCredential, mode string) error {
+	options := ""
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "auto", "bios":
+	case "uefi":
+		options = "efiboot"
+	default:
+		return fmt.Errorf("ipmi: unsupported PXE boot mode %q", mode)
+	}
+	if err := c.setBootDevice(ctx, cred, BootDevicePXE, options); err != nil {
 		return fmt.Errorf("set bootdev=pxe: %w", err)
 	}
-	// Let the iDRAC commit the one-shot boot flag before the reset —
+	// Let the BMC commit the one-shot boot flag before the reset —
 	// cycling immediately after bootdev races the BMC's own write.
 	time.Sleep(2 * time.Second)
 	// "cycle", NOT an off→on pair: on iDRAC 8 (R630) a `power on` sent
 	// seconds after `power off` is acknowledged but silently dropped while
 	// the PSU/BMC is still settling, leaving the host dark (verified twice
 	// on 2026-09-18 — both attempts ended with chassis power off and zero
-	// PXE traffic). A plain cycle has never lost the flag once efiboot was
-	// removed (see SetBootDevice).
+	// PXE traffic).
 	if err := c.PowerCycle(ctx, cred); err != nil {
 		return fmt.Errorf("power cycle: %w", err)
 	}

@@ -347,6 +347,8 @@ export interface BmcTestResult {
 export interface BmcActionResult {
   ok: boolean
   action?: string
+  /** onboard 实际下发的 PXE 固件模式：auto | uefi | bios */
+  boot_mode?: string
   error?: string
 }
 

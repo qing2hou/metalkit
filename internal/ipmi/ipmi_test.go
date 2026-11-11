@@ -203,6 +203,46 @@ func TestBootForPXEComposite(t *testing.T) {
 	}
 }
 
+func TestBootForPXEMode(t *testing.T) {
+	cases := []struct {
+		mode      string
+		wantEFI   bool
+		wantErr   bool
+		wantCalls int
+	}{
+		{"auto", false, false, 2},
+		{"", false, false, 2},
+		{"bios", false, false, 2},
+		{"uefi", true, false, 2},
+		{"legacy", false, true, 0},
+	}
+	for _, tc := range cases {
+		fr := &fakeRunner{stdout: []byte("ok\n")}
+		c := newClient(t, fr)
+		err := c.BootForPXEMode(context.Background(), sampleCred(), tc.mode)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("mode %q: expected error", tc.mode)
+			}
+			if len(fr.calls) != 0 {
+				t.Errorf("mode %q: ipmitool must not run, calls=%v", tc.mode, fr.calls)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("mode %q: unexpected error %v", tc.mode, err)
+			continue
+		}
+		if len(fr.calls) != tc.wantCalls {
+			t.Fatalf("mode %q: calls=%d want %d", tc.mode, len(fr.calls), tc.wantCalls)
+		}
+		hasEFI := containsString(fr.calls[0].args, "options=efiboot")
+		if hasEFI != tc.wantEFI {
+			t.Errorf("mode %q: options=efiboot=%v want %v (args=%v)", tc.mode, hasEFI, tc.wantEFI, fr.calls[0].args)
+		}
+	}
+}
+
 func TestBootForPXEStopsOnFirstError(t *testing.T) {
 	fr := &fakeRunner{err: errors.New("auth failure"), stderr: []byte("invalid user")}
 	c := newClient(t, fr)

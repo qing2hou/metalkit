@@ -27,6 +27,12 @@ const form = reactive({
   username: '',
   password: '',
 })
+
+// PXE 纳管弹窗：可选固件引导模式
+const onboardVisible = ref(false)
+const onboarding = ref(false)
+const onboardRow = ref<BmcCredential | null>(null)
+const onboardMode = ref<'auto' | 'uefi' | 'bios'>('auto')
 const rules: FormRules = {
   ip: [
     { required: true, message: '请输入 BMC IP', trigger: 'blur' },
@@ -151,21 +157,29 @@ async function test(row: BmcCredential): Promise<void> {
   }
 }
 
-async function onboard(row: BmcCredential): Promise<void> {
+function openOnboard(row: BmcCredential): void {
+  onboardRow.value = row
+  onboardMode.value = 'auto'
+  onboardVisible.value = true
+}
+
+async function confirmOnboard(): Promise<void> {
+  const row = onboardRow.value
+  if (!row) return
+  onboarding.value = true
   try {
-    await ElMessageBox.confirm(
-      `让 ${row.ip} PXE 重启进入 live 系统（只上报库存，不装机）？`,
-      'PXE 纳管',
-      { type: 'warning' },
-    )
-  } catch {
-    return
-  }
-  try {
-    await bmcApi.onboard(row.machine_uuid)
-    ElMessage.success(`已下发 PXE 引导指令，等待机器上报`)
+    const res = await bmcApi.onboard(row.machine_uuid, onboardMode.value)
+    if (!res.ok) {
+      ElMessage.error(`${row.ip}: ${res.error ?? 'PXE 引导下发失败'}`)
+      return
+    }
+    onboardVisible.value = false
+    const label = onboardMode.value === 'uefi' ? 'UEFI' : onboardMode.value === 'bios' ? 'BIOS' : '自动'
+    ElMessage.success(`已下发 ${label} PXE 引导指令，等待机器上报`)
   } catch (err) {
     ElMessage.error(`操作失败: ${(err as Error).message}`)
+  } finally {
+    onboarding.value = false
   }
 }
 
@@ -271,7 +285,7 @@ const pagedTable = usePagedTable(list)
           <el-table-column label="操作" min-width="240">
             <template #default="{ row }">
               <el-button text size="small" @click="test(asRow<BmcCredential>(row))">测试</el-button>
-              <el-button text size="small" @click="onboard(asRow<BmcCredential>(row))">PXE 纳管</el-button>
+              <el-button text size="small" @click="openOnboard(asRow<BmcCredential>(row))">PXE 纳管</el-button>
               <el-dropdown trigger="click" @command="(cmd: string) => power(asRow<BmcCredential>(row), cmd, cmd !== 'on')">
                 <el-button text size="small" type="primary">
                   电源<el-icon class="el-icon--right"><ArrowDown /></el-icon>
@@ -335,6 +349,36 @@ const pagedTable = usePagedTable(list)
         <template #footer>
           <el-button @click="dialogVisible = false">取消</el-button>
           <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+        </template>
+      </el-dialog>
+
+      <el-dialog v-model="onboardVisible" title="PXE 纳管" width="540px">
+        <p class="mk-subtle" style="margin-top: 0">
+          让 <span class="mono">{{ onboardRow?.ip }}</span> 以 PXE 重启进入 live 系统：只上报硬件库存，不装系统。
+        </p>
+        <el-form label-width="90px">
+          <el-form-item label="固件引导">
+            <el-radio-group v-model="onboardMode">
+              <el-radio-button value="auto">自动</el-radio-button>
+              <el-radio-button value="uefi">UEFI</el-radio-button>
+              <el-radio-button value="bios">BIOS</el-radio-button>
+            </el-radio-group>
+            <div class="mk-subtle" style="width: 100%; margin-top: 6px">
+              自动：不带 EFI 标志，由固件当前模式决定；UEFI：下发 IPMI <span class="mono">options=efiboot</span>；BIOS：不带 EFI 标志（固件需处于 Legacy 模式）。
+            </div>
+            <el-alert
+              v-if="onboardMode === 'uefi'"
+              type="warning"
+              :closable="false"
+              show-icon
+              style="width: 100%; margin-top: 8px"
+              title="部分老 BMC（如 iDRAC 8）可能把 EFI 标志解析为固件启动项，导致未进入 PXE；失败时请在 BMC 启动项中手动选择 PXE。"
+            />
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="onboardVisible = false">取消</el-button>
+          <el-button type="primary" :loading="onboarding" @click="confirmOnboard">开始纳管</el-button>
         </template>
       </el-dialog>
 

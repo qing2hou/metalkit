@@ -240,6 +240,7 @@ type stubTester struct {
 	last       PasswordedCredential
 	actionErr  error
 	lastAction string
+	lastMode   string
 }
 
 func (s *stubTester) PowerStatus(_ context.Context, c PasswordedCredential) (string, error) {
@@ -287,6 +288,14 @@ func (s *stubTester) BootForPXE(_ context.Context, c PasswordedCredential) error
 	s.calls++
 	s.last = c
 	s.lastAction = "onboard"
+	return s.actionErr
+}
+
+func (s *stubTester) BootForPXEMode(_ context.Context, c PasswordedCredential, mode string) error {
+	s.calls++
+	s.last = c
+	s.lastAction = "onboard"
+	s.lastMode = mode
 	return s.actionErr
 }
 
@@ -490,6 +499,54 @@ func TestAPIOnboard(t *testing.T) {
 	}
 	if te.last.Password != "secret" {
 		t.Errorf("tester saw password %q want secret", te.last.Password)
+	}
+}
+
+func TestAPIOnboardBootMode(t *testing.T) {
+	te := &stubTester{}
+	f := newAPIFixtureWithTester(t, te)
+	mu := f.seedMachine(t, 'e')
+	_, _ = doReq(t, http.MethodPut, f.ts.URL+"/api/v1/bmc/"+mu, map[string]any{
+		"ip": "10.0.0.33", "username": "u", "password": "p",
+	})
+
+	cases := []struct {
+		name string
+		body any
+		want string
+	}{
+		{"default auto", nil, "auto"},
+		{"explicit uefi", map[string]any{"boot_mode": "uefi"}, "uefi"},
+		{"explicit bios", map[string]any{"boot_mode": "BIOS"}, "bios"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			te.lastMode = ""
+			resp, body := doReq(t, http.MethodPost, f.ts.URL+"/api/v1/bmc/"+mu+"/onboard", tc.body)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+			}
+			if te.lastMode != tc.want {
+				t.Errorf("tester mode=%q want %q", te.lastMode, tc.want)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(body, &m); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if m["boot_mode"] != tc.want {
+				t.Errorf("response boot_mode=%v want %q", m["boot_mode"], tc.want)
+			}
+		})
+	}
+
+	// Invalid enum → 400 and tester not called.
+	before := te.calls
+	resp, body := doReq(t, http.MethodPost, f.ts.URL+"/api/v1/bmc/"+mu+"/onboard", map[string]any{"boot_mode": "legacy"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid mode status=%d body=%s", resp.StatusCode, body)
+	}
+	if te.calls != before {
+		t.Errorf("tester called for invalid mode")
 	}
 }
 

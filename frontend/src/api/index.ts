@@ -130,7 +130,8 @@ export const bmcApi = {
   test: (uuid: string) => apiSend<BmcTestResult>('POST', `/bmc/${uuid}/test`, {}),
   power: (uuid: string, action: 'on' | 'off' | 'cycle' | 'soft' | 'reset') =>
     apiSend<BmcActionResult>('POST', `/bmc/${uuid}/power/${action}`, {}),
-  onboard: (uuid: string) => apiSend<BmcActionResult>('POST', `/bmc/${uuid}/onboard`, {}),
+  onboard: (uuid: string, bootMode: 'auto' | 'uefi' | 'bios' = 'auto') =>
+    apiSend<BmcActionResult>('POST', `/bmc/${uuid}/onboard`, { boot_mode: bootMode }),
 }
 
 // ---------- jobs ----------

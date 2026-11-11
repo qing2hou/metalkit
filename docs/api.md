@@ -455,7 +455,7 @@ CREATE TABLE bmc_credentials (
 | `DELETE /api/v1/bmc/{machine_uuid}` | 删除（若是占位 UUID，连带把对应的占位 machines 行一起清掉） |
 | `POST /api/v1/bmc/{machine_uuid}/test` | 现场探活：调用 `ipmitool chassis power status` |
 | `POST /api/v1/bmc/{machine_uuid}/power/{action}` | 电源动作：action ∈ `on` / `off` / `cycle` / `soft` / `reset` |
-| `POST /api/v1/bmc/{machine_uuid}/onboard` | 纳管：`bootdev=pxe + power cycle` —— 目标机进 live 上报硬件，**不装系统** |
+| `POST /api/v1/bmc/{machine_uuid}/onboard` | 纳管：`bootdev=pxe + power cycle`，可选 `boot_mode`（auto/uefi/bios）—— 目标机进 live 上报硬件，**不装系统** |
 
 PUT body 示例：
 ```json
@@ -556,6 +556,18 @@ GET / LIST 响应示例（**注意没有 password 键**）：
 
 纳管：调 `ipmitool chassis bootdev pxe` + `chassis power cycle`，让目标机进 live 系统上报硬件。
 
+**请求体（可选）**：
+
+```json
+{"boot_mode": "auto" | "uefi" | "bios"}
+```
+
+- 省略或 `auto`：不带 EFI 标志，由固件当前启动模式决定（历史行为）
+- `uefi`：下发 `chassis bootdev pxe options=efiboot`，请求 UEFI PXE。部分老 BMC
+  （如 iDRAC 8）可能把 EFI 标志解析为固件启动项，失败时需在 BMC 启动项中手动选 PXE
+- `bios`：不带 EFI 标志（需要固件已处于 Legacy 模式；本接口不会远程切换 BootMode）
+- 非法值 → 400，消息指出 `boot_mode`
+
 **典型场景**：
 1. **占位 BMC 首次发现**：操作员先按 IP 注册 BMC（生成 `placeholder-<ip-dashed>` UUID 和占位
    machines 行），然后点纳管 → 目标机 PXE 进 live → live agent 报 inventory → controller
@@ -571,7 +583,7 @@ inventory 上报就停在 live 等指令。
 
 ```json
 // 调用成功
-{"ok": true, "action": "onboard"}
+{"ok": true, "action": "onboard", "boot_mode": "auto"}
 
 // ipmi 调用失败
 {"ok": false, "error": "set bootdev=pxe: ..."}
@@ -583,12 +595,12 @@ inventory 上报就停在 live 等指令。
 |---|---|
 | 404 | 没找到这个 machine_uuid 的 BMC 凭据 |
 | 503 | 当前 controller 节点没有 `ipmitool` 可用 |
-| 400 | machine_uuid 格式非法 |
+| 400 | machine_uuid 格式非法 / boot_mode 非法 |
 
-**20s 超时**：底层 `ipmi.BootForPXE` 串行调用 `chassis bootdev pxe` + `chassis power cycle`
+**20s 超时**：底层 `ipmi.BootForPXEMode` 串行调用 `chassis bootdev pxe` + `chassis power cycle`
 两个子命令，比单个动作慢，所以比 `/power` 的 15s 再宽一些。
 
-**审计**：handler 成功路径记 `bmc onboard uuid=... ip=... by=...`。
+**审计**：handler 成功路径记 `bmc onboard uuid=... ip=... boot_mode=... by=...`。
 
 ### 11.3 设计取舍
 

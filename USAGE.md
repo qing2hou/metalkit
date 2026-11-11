@@ -478,6 +478,11 @@ Job 进入 `succeeded` 状态需要满足：
 
 单机详情页 → "PXE Boot + Install" 按钮 = 一次性触发：BMC 切 `bootdev=pxe` + power cycle + 创建 job。
 
+BMC 页的「PXE 纳管」也可选择固件引导：**自动 / UEFI / BIOS**。自动与 BIOS 不带 EFI
+标志（由固件当前模式决定），UEFI 会下发 `options=efiboot`。平台不会远程切换固件
+BootMode；部分老 BMC（如 iDRAC 8）对 EFI 标志兼容性较差，未进入 PXE 时请在 BMC
+启动项中手动选择 PXE。
+
 ---
 
 ## 12. API 速查
