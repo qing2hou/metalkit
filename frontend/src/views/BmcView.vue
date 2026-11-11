@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ArrowDown, Plus } from '@element-plus/icons-vue'
 import { usePagedTable } from '@/composables/usePagedTable'
-import type { FormInstance, FormRules, UploadFile } from 'element-plus'
+import type { FormInstance, FormItemRule, FormRules, UploadFile } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 
 import { bmcApi } from '@/api'
 import type { BmcCredential } from '@/api/types'
@@ -36,8 +36,17 @@ const rules: FormRules = {
     },
   ],
   username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
-  password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
 }
+
+// Password is required only when creating. On edit the field means "leave
+// empty to keep the stored password", so it must not inherit the create-time
+// required rule — Element Plus merges form-level and item-level rules, so a
+// per-item `:rules="[]"` cannot cancel the form-level one.
+const passwordRules = computed<FormItemRule[]>(() =>
+  form.machineUuid
+    ? []
+    : [{ required: true, message: '请输入密码', trigger: 'blur' }],
+)
 
 // 电源操作确认
 
@@ -314,7 +323,7 @@ const pagedTable = usePagedTable(list)
           <el-form-item label="用户名" prop="username">
             <el-input v-model="form.username" placeholder="如 ADMIN" />
           </el-form-item>
-          <el-form-item label="密码" prop="password" :rules="form.machineUuid ? [] : rules.password">
+          <el-form-item label="密码" prop="password" :rules="passwordRules">
             <el-input
               v-model="form.password"
               type="password"
