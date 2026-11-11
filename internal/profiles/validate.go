@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -109,7 +110,7 @@ type TargetDisk struct {
 // applies.
 //
 // VLAN is an optional 802.1Q tag (1..4094). When set, the IP config moves
-// onto a VLAN sub-interface (metalkit0.<vlan> or bond0.<vlan>) and the
+// onto a VLAN sub-interface (metalkit0.<vlan> or <bond name>.<vlan>) and the
 // underlying physical/bond device stays L2-only.
 type NetworkConfig struct {
 	Method      string      `json:"method"` // static | dhcp
@@ -133,7 +134,11 @@ type NetworkConfig struct {
 // brands, NIC models, boot modes, and OS naming conventions. Interface
 // names are resolved to MACs on the live system at install time via the
 // agent NIC list; a MAC literal skips that resolution step entirely.
+//
+// Name is the bond's kernel device name. Empty means "bond0", so configs
+// written before the field existed keep their exact previous behaviour.
 type BondConfig struct {
+	Name           string   `json:"name,omitempty"`             // bond device name; default bond0
 	Mode           string   `json:"mode"`                       // active-backup | 802.3ad
 	Slaves         []string `json:"slaves"`                     // 2..8 interface names
 	Miimon         int      `json:"miimon,omitempty"`           // default 100; 50..10000
@@ -141,6 +146,51 @@ type BondConfig struct {
 	XmitHashPolicy string   `json:"xmit_hash_policy,omitempty"` // 802.3ad: layer2|layer2+3|layer3+4 (default layer3+4)
 	Primary        string   `json:"primary,omitempty"`          // active-backup only; interface name, must be in Slaves
 }
+
+// DefaultBondName is the device name used when BondConfig.Name is empty:
+// legacy profiles/bindings and callers that never set a name all render
+// exactly as before the name field existed.
+const DefaultBondName = "bond0"
+
+// InterfaceName returns the bond's kernel device name, defaulting to
+// DefaultBondName. It tolerates legacy JSON that predates the name field
+// (empty string) and is the single place renderers should ask for the name.
+func (b *BondConfig) InterfaceName() string {
+	if b == nil {
+		return DefaultBondName
+	}
+	if name := strings.TrimSpace(b.Name); name != "" {
+		return name
+	}
+	return DefaultBondName
+}
+
+// ValidateBondVLANName checks that the derived VLAN sub-interface name
+// <bond>.<vlan> fits Linux's 15-char interface limit. Exported because the
+// controller resolves the effective VLAN from the subnet / binding override
+// only when building the agent job spec — the profile validator cannot see
+// it (subnet VLANs replace profile.network.vlan).
+func ValidateBondVLANName(bond *BondConfig, vlan int) error {
+	if bond == nil || vlan <= 0 {
+		return nil
+	}
+	name := bond.InterfaceName()
+	if n := len(name) + 1 + len(strconv.Itoa(vlan)); n > 15 {
+		return fmt.Errorf("network.bond.name %q: bond name plus vlan %d is %d chars, over the 15-char interface limit", name, vlan, n)
+	}
+	return nil
+}
+
+// bondNameRE restricts bond device names to the portable subset every
+// renderer can handle: 1..15 chars (Linux IFNAMSIZ), starting with a letter,
+// no dot (a dot means VLAN sub-interface), slash or whitespace (device names
+// become ifcfg/nmconnection file names).
+var bondNameRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,14}$`)
+
+// ethNameRE matches the ethN names the RHEL7 path synthesises for slaves;
+// sharing that namespace would make the bond and one slave write the same
+// ifcfg file.
+var ethNameRE = regexp.MustCompile(`^eth[0-9]+$`)
 
 // Valid bond mode / lacp_rate / xmit_hash_policy values.
 var (
@@ -168,8 +218,8 @@ func ValidateTargetDisk(raw json.RawMessage) (TargetDisk, error) {
 }
 
 // ValidateBondJSON parses+validates the JSON blob as a BondConfig and
-// returns the canonicalised form (lowercased MACs, defaulted miimon /
-// lacp_rate / xmit_hash_policy). Exported so bindings can validate
+// returns the canonicalised form (defaulted name / miimon / lacp_rate /
+// xmit_hash_policy, lowercased MACs). Exported so bindings can validate
 // per-binding bond overrides against the same rules.
 func ValidateBondJSON(raw json.RawMessage) (BondConfig, error) {
 	var b BondConfig
@@ -296,6 +346,13 @@ func validateNetwork(raw json.RawMessage, hasSubnet bool) (NetworkConfig, error)
 		// Slaves field selects the underlying NICs). Force it to "auto" so
 		// the canonical persisted form is deterministic.
 		nc.NICSelector = "auto"
+		// The VLAN sub-interface is <bond>.<vlan>, and that whole name must
+		// fit Linux's 15-char limit. Only checkable here when the VLAN is
+		// set explicitly; VLANs inherited from a subnet are checked when the
+		// agent job spec is built (after subnet/vlan_override resolution).
+		if err := ValidateBondVLANName(nc.Bond, nc.VLAN); err != nil {
+			return nc, err
+		}
 	}
 	return nc, nil
 }
@@ -305,6 +362,17 @@ func validateNetwork(raw json.RawMessage, hasSubnet bool) (NetworkConfig, error)
 // errors on any structural problem so the persisted blob is always
 // well-formed.
 func validateBond(b *BondConfig) error {
+	// Name: default to bond0, then a portable device-name subset. The name
+	// ends up in file paths (ifcfg-<name>, <name>.nmconnection) and in
+	// <name>.<vlan> notation, hence the strict charset and no dot.
+	b.Name = strings.TrimSpace(b.Name)
+	if b.Name == "" {
+		b.Name = DefaultBondName
+	}
+	if !bondNameRE.MatchString(b.Name) {
+		return fmt.Errorf("network.bond.name %q: must be 1..15 chars, start with a letter, and contain only letters, digits, '_' or '-'", b.Name)
+	}
+
 	b.Mode = strings.ToLower(strings.TrimSpace(b.Mode))
 	if !validBondModes[b.Mode] {
 		return fmt.Errorf("network.bond.mode %q: must be active-backup or 802.3ad", b.Mode)
@@ -317,6 +385,13 @@ func validateBond(b *BondConfig) error {
 	if len(b.Slaves) > 8 {
 		return fmt.Errorf("network.bond.slaves: at most 8 interfaces (got %d)", len(b.Slaves))
 	}
+	// Names the installer/OS owns or synthesises must never be reused for the
+	// bond device: "lo" duplicates the loopback stanza, ethN is the RHEL7
+	// slave file name (ifcfg-eth0), so a bond called eth0 overwrites its own
+	// slave config and comes up with zero members.
+	if b.Name == "lo" || ethNameRE.MatchString(b.Name) {
+		return fmt.Errorf("network.bond.name %q: reserved interface name", b.Name)
+	}
 	seen := make(map[string]struct{}, len(b.Slaves))
 	for i, s := range b.Slaves {
 		s = strings.TrimSpace(s)
@@ -328,6 +403,11 @@ func validateBond(b *BondConfig) error {
 		}
 		seen[s] = struct{}{}
 		b.Slaves[i] = s
+	}
+	// A bond named after one of its own slaves can never be created (the
+	// device name is already taken by the member NIC).
+	if _, clash := seen[b.Name]; clash {
+		return fmt.Errorf("network.bond.name %q: must not collide with a slave interface", b.Name)
 	}
 
 	// Miimon: default 100, range 50..10000.

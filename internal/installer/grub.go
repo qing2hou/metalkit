@@ -2068,7 +2068,7 @@ func disableSELinuxIfEnforcing(deps Deps, mntRoot string) {
 //     timeout before giving up. Real incident 2026-10-09: first boot took
 //     4min10s, 2min of it waiting for empty ports. Bare-metal installs
 //     don't need "network fully online" gating — SSH and cloud-init are
-//     up as soon as bond0 is routable.
+//     up as soon as the bond is routable.
 //   - snapd.seeded.service: 48s seeding snaps nobody asked for on a
 //     server; it also gates cloud-init completion on Ubuntu cloud images.
 //

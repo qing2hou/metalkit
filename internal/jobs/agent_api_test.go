@@ -597,6 +597,41 @@ func TestAgentSpecSubnetOverlay(t *testing.T) {
 	}
 }
 
+// TestAgentSpecRejectsBondVLANNameOverflowFromSubnet: the profile validator
+// cannot see the subnet/binding VLAN (hasSubnet zeroes profile.network.vlan),
+// so the spec builder must reject <bond>.<vlan> names over IFNAMSIZ instead
+// of handing the agent an impossible config.
+func TestAgentSpecRejectsBondVLANNameOverflowFromSubnet(t *testing.T) {
+	f, ts, fb, fp, fi, fs := newTestAgentAPIWithSubnets(t)
+	in := f.baseInput(t, '9')
+	j, _ := f.store.Create(t.Context(), in)
+	b, p, _ := seedSpecFakes(t, j, fb, fp, fi)
+	p.Network = profiles.NetworkConfig{
+		Method: "dhcp",
+		Bond: &profiles.BondConfig{
+			Name:   "abcdefghijklmno", // 15 chars + "." + 4-digit VLAN = 20
+			Mode:   "active-backup",
+			Slaves: []string{"eno1", "eno2"},
+		},
+	}
+	b.SubnetID = "11111111111111111111111111111111"
+	fs.byID[b.SubnetID] = &subnets.Subnet{
+		ID:     b.SubnetID,
+		Name:   "lab",
+		CIDR:   "10.30.0.0/24",
+		VLANID: 4094,
+	}
+
+	code, body := agentDo(t, ts, "GET",
+		"/api/v1/agent/jobs/"+j.ID+"/spec?machine_uuid="+in.MachineUUID, "")
+	if code != http.StatusBadRequest {
+		t.Fatalf("code=%d want 400, body=%s", code, body)
+	}
+	if !strings.Contains(string(body), "network.bond.name") {
+		t.Errorf("error body %q should name the offending field", body)
+	}
+}
+
 // TestAgentSpecSubnetOverlayDHCP: a DHCP profile bound to a subnet must keep
 // method=dhcp and inherit only the subnet's VLAN. Forcing method=static when
 // no static_address is allocated produces an unconfigured netplan stanza

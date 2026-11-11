@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-//go:embed assets
+//go:embed all:assets
 var embeddedAssets embed.FS
 
 // Config configures the Web UI handler.

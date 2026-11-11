@@ -123,6 +123,152 @@ func TestValidateNetwork_BondLACPDefaults(t *testing.T) {
 	}
 }
 
+func TestValidateNetwork_BondNameDefaultsAndCanonicalises(t *testing.T) {
+	// Omitted name → bond0, so pre-name-era configs render identically.
+	nc, err := validateNetwork(ncJSON(t, map[string]any{
+		"method": "dhcp",
+		"bond": map[string]any{
+			"mode":   "active-backup",
+			"slaves": []string{"eno1", "eno2"},
+		},
+	}), false)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if nc.Bond.Name != DefaultBondName {
+		t.Errorf("name default: got %q, want %q", nc.Bond.Name, DefaultBondName)
+	}
+	if got := nc.Bond.InterfaceName(); got != DefaultBondName {
+		t.Errorf("InterfaceName default: got %q", got)
+	}
+
+	// Custom name is trimmed and kept as-is.
+	nc, err = validateNetwork(ncJSON(t, map[string]any{
+		"method": "dhcp",
+		"bond": map[string]any{
+			"name":   "  mgmt-bond ",
+			"mode":   "active-backup",
+			"slaves": []string{"eno1", "eno2"},
+		},
+	}), false)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if nc.Bond.Name != "mgmt-bond" {
+		t.Errorf("name canonicalisation: got %q", nc.Bond.Name)
+	}
+	if got := nc.Bond.InterfaceName(); got != "mgmt-bond" {
+		t.Errorf("InterfaceName: got %q", got)
+	}
+
+	// Legacy zero-value config (no name field persisted) still resolves.
+	var legacy BondConfig
+	if got := legacy.InterfaceName(); got != DefaultBondName {
+		t.Errorf("legacy InterfaceName: got %q", got)
+	}
+	var nilBond *BondConfig
+	if got := nilBond.InterfaceName(); got != DefaultBondName {
+		t.Errorf("nil InterfaceName: got %q", got)
+	}
+}
+
+func TestValidateNetwork_BondNameErrors(t *testing.T) {
+	cases := []struct {
+		name  string
+		bond  map[string]any
+		wants string
+	}{
+		{
+			name:  "dot is reserved for vlan",
+			bond:  map[string]any{"name": "bond0.100", "mode": "active-backup", "slaves": []string{"eno1", "eno2"}},
+			wants: "network.bond.name",
+		},
+		{
+			name:  "space rejected",
+			bond:  map[string]any{"name": "bond 0", "mode": "active-backup", "slaves": []string{"eno1", "eno2"}},
+			wants: "network.bond.name",
+		},
+		{
+			name:  "slash rejected (path separator)",
+			bond:  map[string]any{"name": "bond/0", "mode": "active-backup", "slaves": []string{"eno1", "eno2"}},
+			wants: "network.bond.name",
+		},
+		{
+			name:  "must start with a letter",
+			bond:  map[string]any{"name": "0bond", "mode": "active-backup", "slaves": []string{"eno1", "eno2"}},
+			wants: "network.bond.name",
+		},
+		{
+			name:  "too long (IFNAMSIZ)",
+			bond:  map[string]any{"name": "abcdefghijklmnop", "mode": "active-backup", "slaves": []string{"eno1", "eno2"}},
+			wants: "network.bond.name",
+		},
+		{
+			name:  "collides with a slave",
+			bond:  map[string]any{"name": "eno1", "mode": "active-backup", "slaves": []string{"eno1", "eno2"}},
+			wants: "must not collide",
+		},
+		{
+			name:  "reserved loopback name",
+			bond:  map[string]any{"name": "lo", "mode": "active-backup", "slaves": []string{"eno1", "eno2"}},
+			wants: "reserved interface name",
+		},
+		{
+			name:  "reserved ethN namespace",
+			bond:  map[string]any{"name": "eth0", "mode": "active-backup", "slaves": []string{"eno1", "eno2"}},
+			wants: "reserved interface name",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := validateNetwork(ncJSON(t, map[string]any{
+				"method": "dhcp",
+				"bond":   tc.bond,
+			}), false)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wants)
+			}
+			if !strings.Contains(err.Error(), tc.wants) {
+				t.Fatalf("error %q does not contain %q", err, tc.wants)
+			}
+		})
+	}
+}
+
+// TestValidateNetwork_BondNameVLANLength checks the derived sub-interface
+// name <bond>.<vlan> against Linux's 15-char limit when the VLAN is set on
+// the profile itself (subnet-inherited VLANs are checked at install time).
+func TestValidateNetwork_BondNameVLANLength(t *testing.T) {
+	nc, err := validateNetwork(ncJSON(t, map[string]any{
+		"method": "dhcp",
+		"vlan":   4094,
+		"bond": map[string]any{
+			"name":   "abcdefghijklmno", // 15 chars
+			"mode":   "active-backup",
+			"slaves": []string{"eno1", "eno2"},
+		},
+	}), false)
+	if err == nil {
+		t.Fatalf("expected IFNAMSIZ error, got %+v", nc)
+	}
+	if !strings.Contains(err.Error(), "15-char") {
+		t.Fatalf("error %q does not mention the 15-char limit", err)
+	}
+
+	// A short name with the same VLAN is fine.
+	if _, err := validateNetwork(ncJSON(t, map[string]any{
+		"method": "dhcp",
+		"vlan":   4094,
+		"bond": map[string]any{
+			"name":   "bond1",
+			"mode":   "active-backup",
+			"slaves": []string{"eno1", "eno2"},
+		},
+	}), false); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+}
+
 // validateBond — error paths -------------------------------------------
 
 func TestValidateNetwork_BondErrors(t *testing.T) {

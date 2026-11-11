@@ -9,6 +9,10 @@ import { validateHostname } from '@/lib/hostname'
 import { hostInSubnet, isValidIPv4 } from '@/lib/net'
 import { fmtBytes } from '@/lib/format'
 
+// 与后端 network.bond.name 校验保持一致：字母开头、≤15 字符、
+// 仅字母/数字/下划线/中划线（点号留给 bond.<vlan> 子接口）。
+const BOND_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,14}$/
+
 const props = defineProps<{
   modelValue: boolean
   machineUuid: string
@@ -61,6 +65,7 @@ const form = reactive({
   nicMac: '',
   // Bond
   useBond: false,
+  bondName: 'bond0',
   bondMode: 'active-backup',
   bondSlaves: [] as string[],
   bondMiimon: 100,
@@ -187,6 +192,7 @@ watch(
     // Bond：上次 binding 级覆盖优先，无覆盖回退 profile 默认
     const bond = b?.bond ?? selectedProfile.value?.network?.bond ?? null
     form.useBond = Boolean(bond)
+    form.bondName = bond?.name ?? 'bond0'
     form.bondMode = bond?.mode ?? 'active-backup'
     form.bondSlaves = bond?.slaves ?? []
     form.bondMiimon = bond?.miimon ?? 100
@@ -255,6 +261,25 @@ const blockedReasons = computed<string[]>(() => {
   if (form.diskMode !== 'smallest' && !form.diskValue) why.push('目标盘选择了按 WWN/路径/型号但未填匹配值')
   if (form.nicMode !== 'auto' && !form.nicMac) why.push('引导网卡选了按 MAC 但未填')
   if (form.useBond && form.bondSlaves.length < 2) why.push('Bond 至少需要 2 个成员口')
+  if (form.useBond) {
+    // 空 = 沿用后端默认 bond0；只有填了才校验，与 profile 缺省语义一致。
+    const bondName = form.bondName.trim()
+    if (bondName) {
+      if (!BOND_NAME_RE.test(bondName)) {
+        why.push('Bond 名称需字母开头，仅含字母/数字/下划线/中划线，最长 15 字符')
+      } else if (bondName === 'lo' || /^eth[0-9]+$/.test(bondName)) {
+        why.push('Bond 名称不能使用 lo 或 ethN（系统保留）')
+      } else if (form.bondSlaves.includes(bondName)) {
+        why.push('Bond 名称不能与成员口重名')
+      } else {
+        // 与后端一致：bond.<vlan> 整体不得超过 15 字符。
+        const vlan = props.subnets.find((s) => s.id === form.subnetId)?.vlan_id ?? 0
+        if (vlan > 0 && bondName.length + 1 + String(vlan).length > 15) {
+          why.push(`Bond 名称 + VLAN ${vlan} 超过 15 字符限制`)
+        }
+      }
+    }
+  }
   return why
 })
 
@@ -384,6 +409,7 @@ async function submit(dispatch: boolean): Promise<void> {
       // bond 永远显式发送（与旧版一致）：null = 清除绑定级 bond
       bond: form.useBond
         ? {
+            name: form.bondName.trim() || 'bond0',
             mode: form.bondMode,
             slaves: form.bondSlaves,
             miimon: form.bondMiimon,
@@ -413,7 +439,7 @@ async function submit(dispatch: boolean): Promise<void> {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="isReinstall ? '重装机器' : '配置装机'" width="720px" top="6vh" destroy-on-close>
+  <el-dialog v-model="visible" :title="isReinstall ? '重装机器' : '配置装机'" width="min(920px, 94vw)" top="6vh" destroy-on-close>
     <el-form label-width="120px">
       <el-row :gutter="16">
         <el-col :span="12">
@@ -529,9 +555,88 @@ async function submit(dispatch: boolean): Promise<void> {
         </el-col>
       </el-row>
 
-      <el-form-item label="Bond">
-        <el-switch v-model="form.useBond" />
+      <el-divider content-position="left">网络 Bond</el-divider>
+
+      <el-form-item label="启用 Bond">
+        <div class="mk-bond-head">
+          <el-switch v-model="form.useBond" />
+          <span class="mk-subtle">把 2–8 个成员口聚合成一个逻辑设备；默认 bond0</span>
+        </div>
       </el-form-item>
+
+      <template v-if="form.useBond">
+        <div class="mk-bond-grid">
+          <el-row :gutter="16">
+            <el-col :span="8">
+              <el-form-item label="设备名">
+                <el-input v-model="form.bondName" placeholder="bond0" maxlength="15" />
+                <div class="mk-subtle" style="width: 100%">默认 bond0；字母开头，≤15 字符</div>
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="绑定模式">
+                <el-select v-model="form.bondMode" style="width: 100%">
+                  <el-option label="active-backup（主备）" value="active-backup" />
+                  <el-option label="802.3ad（LACP）" value="802.3ad" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="链路检测 miimon">
+                <el-input-number
+                  v-model="form.bondMiimon"
+                  :min="0"
+                  :step="50"
+                  controls-position="right"
+                  style="width: 100%"
+                />
+                <div class="mk-subtle" style="width: 100%">单位 ms，默认 100</div>
+              </el-form-item>
+            </el-col>
+          </el-row>
+
+          <el-row :gutter="16">
+            <template v-if="form.bondMode === 'active-backup'">
+              <el-col :span="8">
+                <el-form-item label="主用成员口">
+                  <el-select v-model="form.bondPrimary" clearable placeholder="可选，默认自动" style="width: 100%">
+                    <el-option v-for="n in nics" :key="n.mac" :label="`${n.name} (${n.mac})`" :value="n.name" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+            </template>
+            <template v-else>
+              <el-col :span="8">
+                <el-form-item label="LACP 速率">
+                  <el-select v-model="form.bondLacpRate" clearable placeholder="默认 fast" style="width: 100%">
+                    <el-option label="slow (0)" value="slow" />
+                    <el-option label="fast (1)" value="fast" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="哈希策略">
+                  <el-select v-model="form.bondXmitHashPolicy" clearable placeholder="默认 layer3+4" style="width: 100%">
+                    <el-option v-for="p in ['layer2', 'layer2+3', 'layer3+4', 'encap2+3', 'encap3+4']" :key="p" :label="p" :value="p" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+            </template>
+          </el-row>
+
+          <el-form-item label="成员口" required>
+            <el-select v-model="form.bondSlaves" multiple style="width: 100%" placeholder="至少选择 2 个成员口">
+              <el-option
+                v-for="n in nics"
+                :key="n.mac"
+                :label="`${n.name} (${n.mac}${n.link ? '' : ' · DOWN'})`"
+                :value="n.name"
+              />
+            </el-select>
+            <div class="mk-subtle" style="width: 100%">建议选 2–8 个链路状态为 UP 的物理口；MAC 地址会写入安装配置</div>
+          </el-form-item>
+        </div>
+      </template>
 
       <el-divider content-position="left">监控 Agent</el-divider>
 
@@ -547,62 +652,6 @@ async function submit(dispatch: boolean): Promise<void> {
           植入后系统内运行独立的监控 agent，仅收集 CPU / 内存 / 磁盘 / 网络指标并周期上报到本平台
         </div>
       </el-form-item>
-
-      <template v-if="form.useBond">
-        <el-row :gutter="16">
-          <el-col :span="8">
-            <el-form-item label="模式">
-              <el-select v-model="form.bondMode" style="width: 100%">
-                <el-option
-                  v-for="m in ['active-backup', '802.3ad', 'balance-rr', 'balance-xor', 'broadcast', 'balance-tlb', 'balance-alb']"
-                  :key="m"
-                  :label="m"
-                  :value="m"
-                />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="miimon (ms)">
-              <el-input-number v-model="form.bondMiimon" :min="0" :step="50" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="primary">
-              <el-select v-model="form.bondPrimary" clearable placeholder="可选" style="width: 100%">
-                <el-option v-for="n in nics" :key="n.mac" :label="n.name" :value="n.name" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row v-if="form.bondMode === '802.3ad'" :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="LACP rate">
-              <el-select v-model="form.bondLacpRate" clearable style="width: 100%">
-                <el-option label="slow (0)" value="slow" />
-                <el-option label="fast (1)" value="fast" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="xmit_hash_policy">
-              <el-select v-model="form.bondXmitHashPolicy" clearable style="width: 100%">
-                <el-option v-for="p in ['layer2', 'layer2+3', 'layer3+4', 'encap2+3', 'encap3+4']" :key="p" :label="p" :value="p" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-form-item label="成员口" required>
-          <el-select v-model="form.bondSlaves" multiple style="width: 100%" placeholder="至少选择 2 个">
-            <el-option
-              v-for="n in nics"
-              :key="n.mac"
-              :label="`${n.name} (${n.mac})`"
-              :value="n.name"
-            />
-          </el-select>
-        </el-form-item>
-      </template>
 
       <el-divider content-position="left">目标盘</el-divider>
 
@@ -787,6 +836,29 @@ async function submit(dispatch: boolean): Promise<void> {
 </template>
 
 <style scoped>
+/* Bond 参数区：标签在上、控件占满整列。左标签 + 三列会把控件压到
+ * ~165px，模式/哈希策略/成员口 MAC 都显示不全——工程排障时不可接受。 */
+.mk-bond-grid :deep(.el-form-item) {
+  display: block;
+  margin-bottom: 14px;
+}
+
+.mk-bond-grid :deep(.el-form-item__label) {
+  display: block;
+  width: auto !important;
+  height: auto;
+  padding: 0 0 2px;
+  text-align: left;
+  line-height: 1.4;
+}
+
+.mk-bond-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
 .mk-password-row {
   display: flex;
   gap: 8px;

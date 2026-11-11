@@ -315,22 +315,31 @@ curl -s -u "$AUTH" -X POST "$SERVER/api/v1/images/uploads/$SESSION/finalize"
 ```json
 {
   "method": "static",
-  "interface": "bond0",
-  "bond_mode": 4,
-  "bond_slaves": ["eno1", "eno2"],
   "prefix_len": 24,
   "gateway": "192.168.10.1",
   "dns": ["223.5.5.5", "114.114.114.114"],
-  "vlan": 10
+  "nic_selector": "auto",
+  "vlan": 10,
+  "bond": {
+    "name": "bond0",
+    "mode": "802.3ad",
+    "slaves": ["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"],
+    "miimon": 100,
+    "lacp_rate": "fast",
+    "xmit_hash_policy": "layer3+4"
+  }
 }
 ```
 
 字段说明：
 - `method`：`dhcp` 或 `static`
-- `interface`：bond0 / eth0 / eno1 等
-- `bond_mode`：0=balance-rr、1=active-backup、4=LACP（802.3ad）、6=balance-alb
-- `bond_slaves`：bond 的成员网卡名列表
-- `prefix_len` / `gateway` / `dns` / `vlan`：如果 profile 关联了 subnet，这些字段可以留空（subnet 会补齐）
+- `nic_selector`：单网卡时选口方式（`auto` / `by-mac:<MAC>` / `by-name:<网卡名>`）；配置了 `bond` 后此项被忽略，由 `bond.slaves` 决定成员口
+- `bond.name`：bond 设备名，**默认 `bond0`**；字母开头、最长 15 字符，只能包含字母、数字、下划线和连字符；不能是 `lo` 或 `ethN`。配了 `vlan` 时 `<bond.name>.<vlan>` 整体也不能超过 15 字符。装机弹窗里也能按机器单独覆盖
+- `bond.mode`：`active-backup` 或 `802.3ad`（LACP，需要交换机侧配合）
+- `bond.slaves`：2–8 个成员口，推荐填 MAC 地址（跨服务器型号/网卡命名更稳），也可填网卡名
+- `bond.miimon` / `lacp_rate` / `xmit_hash_policy` / `primary`：可选，不填走后端默认
+- `vlan`：VLAN 标签；配了 bond 时 IP 落在 `<bond.name>.<vlan>` 子接口上，bond 本身保持二层
+- `prefix_len` / `gateway` / `dns`：如果 profile 关联了 subnet，这些字段可以留空（subnet 会补齐）
 
 ### 8.4 高级字段
 
@@ -513,7 +522,7 @@ curl -u admin:metalkit -X POST http://192.168.10.120:8080/api/v1/profiles -d '{
   "image_id": "<sha>",
   "subnet_id": "<subnet-id>",
   "target_disk": {"selector":"largest","min_size_gb":100},
-  "network": {"method":"static","interface":"bond0","bond_mode":4,"bond_slaves":["eno1","eno2"]},
+  "network": {"method":"static","nic_selector":"auto","bond":{"name":"bond0","mode":"802.3ad","slaves":["AA:BB:CC:DD:EE:01","AA:BB:CC:DD:EE:02"]}},
   "chroot_dns": "223.5.5.5, 114.114.114.114"
 }'
 
@@ -527,7 +536,7 @@ curl -u admin:metalkit -X PUT http://192.168.10.120:8080/api/v1/profiles/<id> -d
   "os_family": "rocky",
   "image_id": "<sha>",
   "target_disk": {"selector":"largest","min_size_gb":100},
-  "network": {"method":"static","interface":"bond0","bond_mode":4,"bond_slaves":["eno1","eno2"]},
+  "network": {"method":"static","nic_selector":"auto","bond":{"name":"bond0","mode":"802.3ad","slaves":["AA:BB:CC:DD:EE:01","AA:BB:CC:DD:EE:02"]}},
   "chroot_dns": "8.8.8.8, 1.1.1.1"
 }'
 ```

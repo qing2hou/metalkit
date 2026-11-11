@@ -347,6 +347,16 @@ func handleJob(ctx context.Context, logger *slog.Logger, cli *agentclient.Client
 		return
 	}
 
+	// Preflight before installer.Run: Run wipes the target disk early, so an
+	// impossible bond topology (name colliding with a resolved slave name,
+	// <bond>.<vlan> over 15 chars) must be rejected while the old system is
+	// still intact.
+	if err := installer.PreflightTopology(*spec, nics); err != nil {
+		logger.Error("agent: preflight failed", "job_id", job.ID, "err", err)
+		_ = cli.Fail(ctx, job.ID, fmt.Sprintf("preflight: %v", err))
+		return
+	}
+
 	// Wrap the stderr logger so every installer log line also lands in
 	// the controller's job_logs table (visible on the web platform).
 	// Without this, deps.Logger.* calls only reach the agent's stderr in
