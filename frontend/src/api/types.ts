@@ -252,6 +252,8 @@ export interface Profile {
   network?: NetworkConfig
   network_renderer?: string
   bootloader?: string
+  /** 目标固件引导方式：缺省/auto = 跟随实际启动模式，uefi，bios */
+  boot_mode?: string
   /** 装机时植入监控 agent（仅收集监控信息并上报的独立组件） */
   agent_installed?: boolean
   created_at?: string
@@ -292,6 +294,8 @@ export interface Binding {
   hostname?: string
   target_disk?: TargetDisk | null
   bond?: BondConfig | null
+  /** 每机器覆盖 boot_mode："auto"/"uefi"/"bios"；缺省 = 继承 profile */
+  boot_mode_override?: string
   has_password?: boolean
   subnet_id?: string
   vlan_override?: number

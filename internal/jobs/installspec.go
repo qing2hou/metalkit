@@ -44,6 +44,10 @@ type InstallSpec struct {
 	// Bootloader selects which bootloader installation strategy to use.
 	// Empty string = "auto" (determined by OS detection at install time).
 	Bootloader string `json:"bootloader,omitempty"`
+	// BootMode is the effective firmware boot mode the installer must target:
+	// "auto" (follow the mode the machine actually booted in), "uefi", or
+	// "bios". Resolved from binding.boot_mode_override, then profile.boot_mode.
+	BootMode string `json:"boot_mode"`
 	// SSHPublicKeys carries the resolved authorized_keys lines for the
 	// binding's ssh_key_ids (canonical "type base64 comment" form, one line
 	// per entry). The spec endpoint resolves ids → key lines so the agent /

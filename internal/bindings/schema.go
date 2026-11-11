@@ -63,4 +63,8 @@ var migrations = []string{
 	// join table) so the upsert stays one statement; the sshkeys delete
 	// handler gates on RefCountBySSHKey instead of an FK.
 	`ALTER TABLE bindings ADD COLUMN ssh_key_ids_json TEXT`,
+	// boot_mode_override (per-binding override of profile.boot_mode).
+	// NULL = inherit profile; 'auto' = follow the machine's actual firmware
+	// mode; 'uefi'/'bios' = explicit target firmware mode.
+	`ALTER TABLE bindings ADD COLUMN boot_mode_override TEXT`,
 }

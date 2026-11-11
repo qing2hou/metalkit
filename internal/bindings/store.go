@@ -159,6 +159,10 @@ type Binding struct {
 	// shapes as profile.network.nic_selector: "auto", "by-mac:..", "by-name:..".
 	// Empty / NULL = inherit profile.
 	NICSelectorOverride string `json:"nic_selector_override,omitempty"`
+	// BootModeOverride is the per-binding override for profile.boot_mode:
+	// "" = inherit profile, "auto" = follow the machine's actual firmware
+	// mode, "uefi"/"bios" = explicit target mode.
+	BootModeOverride string `json:"boot_mode_override,omitempty"`
 	// AgentInstalledOverride is the per-binding override for
 	// profile.agent_installed. nil = inherit profile (JSON omitted);
 	// set = the jobs spec endpoint substitutes it into the profile copy
@@ -169,9 +173,9 @@ type Binding struct {
 	// installer leaves the key file untouched. Held on the binding (not the
 	// profile) because key selection is a per-install decision; reuse comes
 	// from the shared catalog.
-	SSHKeyIDs  []string  `json:"ssh_key_ids,omitempty"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	UpdatedBy  string    `json:"updated_by"`
+	SSHKeyIDs []string  `json:"ssh_key_ids,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+	UpdatedBy string    `json:"updated_by"`
 }
 
 // UpsertInput is what the PUT handler accepts.
@@ -227,6 +231,11 @@ type UpsertInput struct {
 	//   ""  → explicit clear (NULL = inherit profile)
 	//   set → validate same shapes as profile.network.nic_selector and store
 	NICSelectorOverride *string `json:"nic_selector_override,omitempty"`
+	// BootModeOverride is three-state via *string:
+	//   nil  → keep existing
+	//   ""   → explicit clear (NULL = inherit profile.boot_mode)
+	//   "auto" | "uefi" | "bios" → store as the per-binding target mode
+	BootModeOverride *string `json:"boot_mode_override,omitempty"`
 	// AgentInstalledOverride is three-state via *bool:
 	//   nil  → keep existing
 	//   set  → true = implant the monitor into this machine, false = never;
@@ -344,20 +353,22 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 	keepExistingHostname := in.Hostname == nil
 	keepExistingAgentInstalled := in.AgentInstalledOverride == nil
 	keepExistingSSHKeys := in.SSHKeyIDs == nil
+	keepExistingBootMode := in.BootModeOverride == nil
 
 	var existingSubnet, existingHostname sql.NullString
 	var existingVLAN sql.NullInt64
 	var existingNICSel sql.NullString
 	var existingAgentInstalled sql.NullInt64
 	var existingSSHKeys sql.NullString
-	if keepExistingSubnet || keepExistingVLAN || keepExistingNICSel || keepExistingHostname || keepExistingAgentInstalled || keepExistingSSHKeys {
+	var existingBootMode sql.NullString
+	if keepExistingSubnet || keepExistingVLAN || keepExistingNICSel || keepExistingHostname || keepExistingAgentInstalled || keepExistingSSHKeys || keepExistingBootMode {
 		err = s.db.QueryRowContext(ctx,
-			`SELECT subnet_id, vlan_override, nic_selector_override, hostname, agent_installed_override, ssh_key_ids_json FROM bindings WHERE machine_uuid = ?`, muuid).
-			Scan(&existingSubnet, &existingVLAN, &existingNICSel, &existingHostname, &existingAgentInstalled, &existingSSHKeys)
+			`SELECT subnet_id, vlan_override, nic_selector_override, hostname, agent_installed_override, ssh_key_ids_json, boot_mode_override FROM bindings WHERE machine_uuid = ?`, muuid).
+			Scan(&existingSubnet, &existingVLAN, &existingNICSel, &existingHostname, &existingAgentInstalled, &existingSSHKeys, &existingBootMode)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			// Degrading to "nothing to keep" here would silently clear the
 			// overrides the caller asked to preserve.
-			return nil, fmt.Errorf("load existing subnet/vlan/nic/hostname/agent/ssh-key overrides: %w", err)
+			return nil, fmt.Errorf("load existing subnet/vlan/nic/hostname/agent/ssh-key/boot-mode overrides: %w", err)
 		}
 	}
 
@@ -467,6 +478,22 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
 		}
 		if sel != "" {
 			nicSelectorSQL = sel
+		}
+	}
+
+	// boot_mode_override: NULL = inherit profile; "auto"/"uefi"/"bios" = set.
+	var bootModeSQL any
+	if keepExistingBootMode {
+		if existingBootMode.Valid && existingBootMode.String != "" {
+			bootModeSQL = existingBootMode.String
+		}
+	} else {
+		bm, err := validateBootModeOverride(*in.BootModeOverride)
+		if err != nil {
+			return nil, err
+		}
+		if bm != "" {
+			bootModeSQL = bm
 		}
 	}
 
@@ -598,8 +625,9 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
             (machine_uuid, image_id, profile_id, desired_state,
              static_address, hostname, root_password_enc, target_disk_override,
              bond_override, subnet_id, vlan_override, nic_selector_override,
-             agent_installed_override, ssh_key_ids_json, updated_at, updated_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             agent_installed_override, ssh_key_ids_json, boot_mode_override,
+             updated_at, updated_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(machine_uuid) DO UPDATE SET
             image_id                   = excluded.image_id,
             profile_id                 = excluded.profile_id,
@@ -614,9 +642,10 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (*Binding, error) {
             nic_selector_override      = excluded.nic_selector_override,
             agent_installed_override   = excluded.agent_installed_override,
             ssh_key_ids_json           = excluded.ssh_key_ids_json,
+            boot_mode_override         = excluded.boot_mode_override,
             updated_at                 = excluded.updated_at,
             updated_by                 = excluded.updated_by`,
-		muuid, imageID, profileID, desired, addrSQL, hostnameSQL, ctSQL, tdSQL, bondSQL, subnetIDSQL, vlanSQL, nicSelectorSQL, agentInstalledSQL, sshKeyIDsSQL, now, in.UpdatedBy,
+		muuid, imageID, profileID, desired, addrSQL, hostnameSQL, ctSQL, tdSQL, bondSQL, subnetIDSQL, vlanSQL, nicSelectorSQL, agentInstalledSQL, sshKeyIDsSQL, bootModeSQL, now, in.UpdatedBy,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("upsert binding: %w", err)
@@ -632,7 +661,7 @@ func (s *Store) Get(ctx context.Context, machineUUID string) (*Binding, error) {
 		return nil, err
 	}
 	var b Binding
-	var addr, hostname, tdJSON, bondJSON, subnetID, nicSelOverride, sshKeysJSON sql.NullString
+	var addr, hostname, tdJSON, bondJSON, subnetID, nicSelOverride, sshKeysJSON, bootModeOverride sql.NullString
 	var vlanOverride, agentInstalledOverride sql.NullInt64
 	var updatedAt int64
 	var passwordCT []byte
@@ -640,10 +669,11 @@ func (s *Store) Get(ctx context.Context, machineUUID string) (*Binding, error) {
         SELECT machine_uuid, image_id, profile_id, desired_state,
                static_address, hostname, root_password_enc, target_disk_override,
                bond_override, subnet_id, vlan_override, nic_selector_override,
-               agent_installed_override, ssh_key_ids_json, updated_at, updated_by
+               agent_installed_override, ssh_key_ids_json, boot_mode_override,
+               updated_at, updated_by
         FROM bindings WHERE machine_uuid = ?`, muuid).Scan(
 		&b.MachineUUID, &b.ImageID, &b.ProfileID, &b.DesiredState,
-		&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &agentInstalledOverride, &sshKeysJSON, &updatedAt, &b.UpdatedBy,
+		&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &agentInstalledOverride, &sshKeysJSON, &bootModeOverride, &updatedAt, &b.UpdatedBy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -655,6 +685,7 @@ func (s *Store) Get(ctx context.Context, machineUUID string) (*Binding, error) {
 	b.Hostname = hostname.String
 	b.HasPassword = len(passwordCT) > 0
 	b.SSHKeyIDs = parseSSHKeyIDs(sshKeysJSON)
+	b.BootModeOverride = bootModeOverride.String
 	if tdJSON.Valid && tdJSON.String != "" {
 		var td profiles.TargetDisk
 		if err := json.Unmarshal([]byte(tdJSON.String), &td); err == nil {
@@ -691,7 +722,8 @@ func (s *Store) List(ctx context.Context) ([]Binding, error) {
         SELECT machine_uuid, image_id, profile_id, desired_state,
                static_address, hostname, root_password_enc, target_disk_override,
                bond_override, subnet_id, vlan_override, nic_selector_override,
-               agent_installed_override, ssh_key_ids_json, updated_at, updated_by
+               agent_installed_override, ssh_key_ids_json, boot_mode_override,
+               updated_at, updated_by
         FROM bindings ORDER BY machine_uuid`)
 	if err != nil {
 		return nil, fmt.Errorf("list bindings: %w", err)
@@ -700,18 +732,19 @@ func (s *Store) List(ctx context.Context) ([]Binding, error) {
 	out := make([]Binding, 0)
 	for rows.Next() {
 		var b Binding
-		var addr, hostname, tdJSON, bondJSON, subnetID, nicSelOverride, sshKeysJSON sql.NullString
+		var addr, hostname, tdJSON, bondJSON, subnetID, nicSelOverride, sshKeysJSON, bootModeOverride sql.NullString
 		var vlanOverride, agentInstalledOverride sql.NullInt64
 		var updatedAt int64
 		var passwordCT []byte
 		if err := rows.Scan(&b.MachineUUID, &b.ImageID, &b.ProfileID, &b.DesiredState,
-			&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &agentInstalledOverride, &sshKeysJSON, &updatedAt, &b.UpdatedBy); err != nil {
+			&addr, &hostname, &passwordCT, &tdJSON, &bondJSON, &subnetID, &vlanOverride, &nicSelOverride, &agentInstalledOverride, &sshKeysJSON, &bootModeOverride, &updatedAt, &b.UpdatedBy); err != nil {
 			return nil, fmt.Errorf("scan binding: %w", err)
 		}
 		b.StaticAddress = addr.String
 		b.Hostname = hostname.String
 		b.HasPassword = len(passwordCT) > 0
 		b.SSHKeyIDs = parseSSHKeyIDs(sshKeysJSON)
+		b.BootModeOverride = bootModeOverride.String
 		if tdJSON.Valid && tdJSON.String != "" {
 			var td profiles.TargetDisk
 			if err := json.Unmarshal([]byte(tdJSON.String), &td); err == nil {

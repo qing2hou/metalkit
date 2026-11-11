@@ -347,6 +347,7 @@ curl -s -u "$AUTH" -X POST "$SERVER/api/v1/images/uploads/$SESSION/finalize"
 |---|---|
 | **Network Renderer** | 网络配置渲染策略：`auto`（按 OS family 选）、`netplan`、`nm-keyfile`、`sysconfig` |
 | **Bootloader** | 引导安装策略：`auto`、`grub2`、`grub-efi`、`grub-pc` |
+| **固件引导（Boot Mode）** | `auto`（默认，跟随机器实际启动模式）、`uefi`、`bios`。指定后若机器实际 PXE/live 启动模式不一致，装机会在擦盘前失败并提示去 BMC/BIOS 切换；装机弹窗可按机器覆盖。BIOS + GPT 会创建约 1 MiB 的 BIOS Boot Partition（按 1 MiB 对齐，实际约 2 MiB）；RHEL 系 BIOS 安装要求目标镜像自带 i386-pc GRUB 模块 |
 | **Chroot DNS** | chroot 里装包用的 DNS，逗号分隔。留空 = `223.5.5.5, 114.114.114.114`。当镜像缺 kernel-modules 需要联网补包时用到 |
 
 ### 8.5 cloud-init 模板（可选）

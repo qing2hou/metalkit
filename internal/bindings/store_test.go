@@ -681,6 +681,89 @@ func TestTargetDiskOverrideThreeState(t *testing.T) {
 	}
 }
 
+// TestBootModeOverrideThreeState covers the per-binding boot mode override:
+// nil keeps the stored value, "" clears it (inherit profile), and
+// auto/uefi/bios are validated and stored verbatim.
+func TestBootModeOverrideThreeState(t *testing.T) {
+	f := newFixture(t)
+	mu := f.seedMachine(t, '0')
+	im := f.seedImage(t, "1")
+	pr := f.seedProfile(t, "p-bootmode", "dhcp")
+	ctx := context.Background()
+
+	// 1) First upsert without the field → inherit (empty).
+	b, err := f.bindings.Upsert(ctx, UpsertInput{
+		MachineUUID: mu, ImageID: im, ProfileID: pr,
+		DesiredState: "none", UpdatedBy: "admin",
+	})
+	if err != nil {
+		t.Fatalf("Upsert 1: %v", err)
+	}
+	if b.BootModeOverride != "" {
+		t.Fatalf("BootModeOverride after no-override upsert: got %q", b.BootModeOverride)
+	}
+
+	// 2) Explicit uefi override.
+	b, err = f.bindings.Upsert(ctx, UpsertInput{
+		MachineUUID: mu, ImageID: im, ProfileID: pr,
+		DesiredState: "none", UpdatedBy: "admin",
+		BootModeOverride: ptrStr("uefi"),
+	})
+	if err != nil {
+		t.Fatalf("Upsert 2 (uefi): %v", err)
+	}
+	if b.BootModeOverride != "uefi" {
+		t.Fatalf("BootModeOverride = %q, want uefi", b.BootModeOverride)
+	}
+
+	// 3) PUT without the field keeps it.
+	b, err = f.bindings.Upsert(ctx, UpsertInput{
+		MachineUUID: mu, ImageID: im, ProfileID: pr,
+		DesiredState: "install", UpdatedBy: "admin",
+	})
+	if err != nil {
+		t.Fatalf("Upsert 3 (keep): %v", err)
+	}
+	if b.BootModeOverride != "uefi" {
+		t.Fatalf("BootModeOverride after keep upsert: got %q", b.BootModeOverride)
+	}
+
+	// 4) Explicit auto override differs from inherit.
+	b, err = f.bindings.Upsert(ctx, UpsertInput{
+		MachineUUID: mu, ImageID: im, ProfileID: pr,
+		DesiredState: "none", UpdatedBy: "admin",
+		BootModeOverride: ptrStr("auto"),
+	})
+	if err != nil {
+		t.Fatalf("Upsert 4 (auto): %v", err)
+	}
+	if b.BootModeOverride != "auto" {
+		t.Fatalf("BootModeOverride = %q, want auto", b.BootModeOverride)
+	}
+
+	// 5) Empty string clears back to inherit.
+	b, err = f.bindings.Upsert(ctx, UpsertInput{
+		MachineUUID: mu, ImageID: im, ProfileID: pr,
+		DesiredState: "none", UpdatedBy: "admin",
+		BootModeOverride: ptrStr(""),
+	})
+	if err != nil {
+		t.Fatalf("Upsert 5 (clear): %v", err)
+	}
+	if b.BootModeOverride != "" {
+		t.Fatalf("BootModeOverride after clear: got %q", b.BootModeOverride)
+	}
+
+	// 6) Invalid value is rejected.
+	if _, err := f.bindings.Upsert(ctx, UpsertInput{
+		MachineUUID: mu, ImageID: im, ProfileID: pr,
+		DesiredState: "none", UpdatedBy: "admin",
+		BootModeOverride: ptrStr("legacy"),
+	}); err == nil {
+		t.Fatal("Upsert(legacy): expected validation error")
+	}
+}
+
 // TestBondOverrideThreeState exercises the per-binding bond override knob
 // across the same three states as TestTargetDiskOverrideThreeState. We use
 // active-backup with two MAC slaves as the representative valid value.

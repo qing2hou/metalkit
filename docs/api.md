@@ -278,6 +278,7 @@ base 路径 `/api/v1/profiles*`，**整个子树 Basic Auth**。Profile = 一份
       "xmit_hash_policy": "layer3+4"
     }
   },
+  "boot_mode": "auto" | "uefi" | "bios",
   "created_at": "2026-05-24T07:30:46Z",
   "updated_at": "2026-05-24T07:30:46Z",
   "created_by": "admin"
@@ -301,6 +302,10 @@ base 路径 `/api/v1/profiles*`，**整个子树 Basic Auth**。Profile = 一份
 - bond + `vlan`：`<bond>.<vlan>` 整体必须 ≤15 字符（如 15 字符名字 + VLAN
   4094 会被拒绝）；成员口填 MAC 时，name 也不得等于该 MAC 解析出的网卡名——
   后者在装机时拿到实时网卡清单后再校验
+- `boot_mode`：固件引导方式，缺省 `""`/`auto` = 跟随机器实际启动模式；
+  `uefi` / `bios` = 显式指定（`auto` 在存储时规范化为 `""`，响应里因
+  omitempty 不出现）。指定后如果机器实际 PXE/live 启动模式不一致，
+  装机在 `boot-detect` 阶段（擦盘前）失败，不会破坏原系统
 
 ### 9.2 端点
 
@@ -365,6 +370,9 @@ URL 已经指明了哪台机器，PUT 既是新增也是覆盖。
   各段 1–63 字符 + 总长 ≤253
 - `bond`：单机 bond 覆盖对象（结构同 `profile.network.bond`）。**整体替换**：
   缺 `name` 会被规范化成 `bond0`，只想改 mode/slaves 的调用方必须一并带上名字
+- `boot_mode_override`：每机覆盖 profile.boot_mode。三态：不传 = 保持现值；
+  `""` = 清除覆盖（继承 profile）；`"auto"` = 本次跟随机器实际启动模式；
+  `"uefi"` / `"bios"` = 显式指定。注意 `"auto"` 与 `""` 语义不同
 
 ### 10.2 端点
 

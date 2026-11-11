@@ -14,6 +14,13 @@ import (
 )
 
 func collectSystem(ctx context.Context, r *inventory.Report) error {
+	// Firmware boot mode: efivars only exists when the kernel booted via
+	// UEFI. Without this the report's uefi_mode stayed false forever and the
+	// UI mislabelled every machine as BIOS.
+	uefi := uefiModeFromPath("/sys/firmware/efi/efivars")
+	r.Firmware.UEFIMode = &uefi
+	r.Firmware.UEFIModeProbed = true
+
 	if data, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
 		r.System.KernelRelease = strings.TrimSpace(string(data))
 	} else if out, err := runCmd(ctx, 8*time.Second, "uname", "-r"); err == nil {
@@ -39,6 +46,14 @@ func collectSystem(ctx context.Context, r *inventory.Report) error {
 		return fmt.Errorf("read /proc/mounts: %w", err)
 	}
 	return nil
+}
+
+// uefiModeFromPath reports whether path is the efivars directory the kernel
+// only exposes when it booted via UEFI. Kept as a tiny helper so tests can
+// point it at a temp directory.
+func uefiModeFromPath(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
 }
 
 func parseUptime(data []byte) int64 {

@@ -182,6 +182,19 @@ func hostInSubnet(host, cidr, gateway string) error {
 	return subnets.HostInSubnet(host, cidr, gateway)
 }
 
+// validateBootModeOverride validates the per-binding boot mode override.
+// Empty means "clear the override / inherit profile"; "auto" is an explicit
+// override that follows whatever mode the machine actually boots in.
+func validateBootModeOverride(v string) (string, error) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	switch v {
+	case "", "auto", "uefi", "bios":
+		return v, nil
+	default:
+		return "", fmt.Errorf("boot_mode_override %q: must be auto, uefi or bios", v)
+	}
+}
+
 // isClearJSON returns true when raw represents an explicit "clear" intent for
 // the three-state target_disk field: empty bytes, JSON null, an empty object,
 // or whitespace around either. This is distinct from "nil raw" (= keep the

@@ -1,8 +1,31 @@
 package collect
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+func TestUEFIModeFromPath(t *testing.T) {
+	dir := t.TempDir()
+	efi := filepath.Join(dir, "efivars")
+	if err := os.MkdirAll(efi, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !uefiModeFromPath(efi) {
+		t.Error("directory should report UEFI")
+	}
+	file := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if uefiModeFromPath(file) {
+		t.Error("regular file must not report UEFI")
+	}
+	if uefiModeFromPath(filepath.Join(dir, "missing")) {
+		t.Error("missing path must report BIOS/unknown")
+	}
+}
 
 func TestParseUptime(t *testing.T) {
 	cases := []struct {

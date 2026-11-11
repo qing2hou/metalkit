@@ -22,9 +22,9 @@
 //     to the kernel via ds=nocloud-net;s=file:///boot/efi/. The ESP is
 //     mounted at /boot/efi at runtime so a single absolute URL works both
 //     pre- and post-boot.
-//   - UEFI only. M2.3 explicitly drops legacy BIOS; we fail boot-detect
-//     rather than silently picking an install path that won't boot on
-//     Dell R6x0 servers we test on.
+//   - Boot mode. Both UEFI and legacy BIOS installs are supported; the
+//     expected mode can be pinned per install (spec.BootMode) and is
+//     validated against the live boot mode before any disk write.
 package installer
 
 import (

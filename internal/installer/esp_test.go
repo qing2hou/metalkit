@@ -62,13 +62,31 @@ func TestCreateESPIfMissing_UEFI_CreatesESP(t *testing.T) {
 		t.Fatalf("expected /dev/sda3, got %q", espDev)
 	}
 
+	// Regression: creating an ESP on a GPT disk must never zap the existing
+	// partition table (`sgdisk -z` would destroy an ESP-less GPT rootfs).
+	var sawRelocate bool
+	for _, c := range exec.Calls() {
+		if c.Name != "sgdisk" || len(c.Args) == 0 {
+			continue
+		}
+		if c.Args[0] == "-z" {
+			t.Fatalf("sgdisk -z must not run when creating an ESP: %v", exec.Calls())
+		}
+		if c.Args[0] == "-e" {
+			sawRelocate = true
+		}
+	}
+	if !sawRelocate {
+		t.Errorf("expected sgdisk -e to relocate a stale backup GPT: %v", exec.Calls())
+	}
+
 	// Verify sgdisk -n and -t were called.
 	var sawNew, sawType, sawMkfs bool
 	for _, c := range exec.Calls() {
 		switch c.Name {
 		case "sgdisk":
 			full := strings.Join(c.Args, " ")
-			if strings.Contains(full, "-n") && strings.Contains(full, "3:0:+512M") {
+			if strings.Contains(full, "-n") && strings.Contains(full, "3:-512M:0") {
 				sawNew = true
 			}
 			if strings.Contains(full, "-t") && strings.Contains(full, "3:ef00") {
@@ -253,7 +271,7 @@ func TestCreateESPIfMissing_SgdiskFailure(t *testing.T) {
 	exec.OnFull["blkid -o value -s TYPE /dev/sda1"] = mockExecResult{Out: []byte("ext4")}
 	exec.OnFull["blkid -o value -s TYPE /dev/sda2"] = mockExecResult{Out: []byte("ext4")}
 	exec.OnFull["sgdisk -p /dev/sda"] = mockExecResult{Out: []byte("1\n2\n")}
-	exec.OnFull["sgdisk -n 3:0:+512M -t 3:ef00 /dev/sda"] = mockExecResult{Err: errString("sgdisk: failed")}
+	exec.OnFull["sgdisk -n 3:-512M:0 -t 3:ef00 /dev/sda"] = mockExecResult{Err: errString("sgdisk: failed")}
 	deps := Deps{Exec: exec, FS: newMockFS()}
 
 	_, err := createESPIfMissing(context.Background(), deps, "/dev/sda", "/dev/sda2", "uefi")

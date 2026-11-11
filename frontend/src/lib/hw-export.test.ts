@@ -12,7 +12,7 @@ const sample: Report = {
     product_name: 'PowerEdge R630',
     serial: '93MPG82',
   },
-  firmware: { bios: { vendor: 'Dell Inc.', version: '2.11.4' }, uefi_mode: true, secure_boot: false },
+  firmware: { bios: { vendor: 'Dell Inc.', version: '2.11.4' }, uefi_mode: true, uefi_mode_probed: true, secure_boot: false },
   cpu: { arch: 'amd64', vendor: 'GenuineIntel', sockets: 2, total_cores: 20, total_threads: 40, per_socket: [{ socket: 'CPU1', model: 'Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz', cores: 10, threads: 20 }] },
   memory: {
     total_bytes: 64 * 1024 ** 3,
@@ -76,6 +76,21 @@ describe('hardwareToCsv', () => {
     const csv = hardwareToCsv(empty)
     expect(csv).toContain('磁盘')
     expect(csv).not.toContain('sda')
+  })
+
+  it('UEFI 模式区分已探测与未上报', () => {
+    const uefi = structuredClone(sample)
+    uefi.firmware = { bios: {}, uefi_mode: true, uefi_mode_probed: true }
+    expect(hardwareToTxt(uefi)).toContain('UEFI: 是')
+
+    const bios = structuredClone(sample)
+    bios.firmware = { bios: {}, uefi_mode: false, uefi_mode_probed: true }
+    expect(hardwareToTxt(bios)).toContain('UEFI: 否')
+
+    // 旧报告没有 probed 标记：false 不能当作已确认 BIOS。
+    const legacy = structuredClone(sample)
+    legacy.firmware = { bios: {}, uefi_mode: false }
+    expect(hardwareToTxt(legacy)).toContain('UEFI: 未上报')
   })
 })
 

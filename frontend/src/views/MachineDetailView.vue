@@ -506,7 +506,7 @@ function viewHistoryItem(meta: ReportMeta): void {
               <div class="mk-kv"><dt>序列号</dt><dd>{{ (report?.machine as any)?.serial || '—' }}</dd></div>
               <div class="mk-kv"><dt>SMBIOS UUID</dt><dd><span class="mono">{{ (report?.machine as any)?.smbios_uuid || '—' }}</span></dd></div>
               <div class="mk-kv"><dt>BIOS</dt><dd>{{ biosVersion || '—' }}</dd></div>
-              <div class="mk-kv"><dt>UEFI 模式</dt><dd>{{ (report?.firmware as any)?.uefi_mode ? '是' : '否' }}</dd></div>
+              <div class="mk-kv"><dt>UEFI 模式</dt><dd>{{ (report?.firmware as any)?.uefi_mode_probed !== true ? '未上报' : (report?.firmware as any)?.uefi_mode === true ? '是' : (report?.firmware as any)?.uefi_mode === false ? '否' : '未上报' }}</dd></div>
               <div class="mk-kv"><dt>Secure Boot</dt><dd>{{ (report?.firmware as any)?.secure_boot ? '启用' : '未启用' }}</dd></div>
               <div class="mk-kv"><dt>TPM</dt><dd>{{ (report?.firmware as any)?.tpm || '—' }}</dd></div>
             </dl>

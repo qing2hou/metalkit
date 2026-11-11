@@ -144,8 +144,14 @@ func TestRefCountBySSHKey(t *testing.T) {
 		t.Errorf("RefCountBySSHKey(k2) = %d, %v; want 1, nil", n, err)
 	}
 	// An id that merely *looks like* it could substring-match must not
-	// false-positive: build an id sharing a long prefix with k1.
-	klookalike := "b" + k1[1:]
+	// false-positive: build an id sharing a long prefix with k1, but with a
+	// first character that is guaranteed different ("b"+k1[1:] is flaky: it
+	// equals k1 whenever k1 itself starts with "b").
+	first := byte('0')
+	if k1[0] == '0' {
+		first = '1'
+	}
+	klookalike := string(first) + k1[1:]
 	if n, err := f.bindings.RefCountBySSHKey(ctx, klookalike); err != nil || n != 0 {
 		t.Errorf("RefCountBySSHKey(lookalike) = %d, %v; want 0, nil", n, err)
 	}
@@ -159,10 +165,10 @@ func TestAPIUpsertUnknownSSHKey(t *testing.T) {
 	im := f.seedImage(t, "a")
 	pr := f.seedProfile(t, "p-api", "dhcp")
 	resp, _ := doRequest(t, http.MethodPut, ts.URL+"/api/v1/bindings/"+mu, map[string]any{
-		"image_id":    im,
-		"profile_id":  pr,
+		"image_id":      im,
+		"profile_id":    pr,
 		"desired_state": "install",
-		"ssh_key_ids": []string{"00000000000000000000000000000000"},
+		"ssh_key_ids":   []string{"00000000000000000000000000000000"},
 	})
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422", resp.StatusCode)

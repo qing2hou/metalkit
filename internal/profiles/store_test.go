@@ -49,6 +49,69 @@ func validInput(name string) CreateInput {
 	}
 }
 
+func TestBootModeCreateUpdate(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	in := validInput("bm-auto")
+	in.BootMode = "auto" // canonicalised to "" (follow firmware)
+	p, err := s.Create(ctx, in)
+	if err != nil {
+		t.Fatalf("Create(auto): %v", err)
+	}
+	if p.BootMode != "" {
+		t.Errorf("auto boot_mode = %q, want empty", p.BootMode)
+	}
+
+	in = validInput("bm-bios")
+	in.BootMode = "bios"
+	p, err = s.Create(ctx, in)
+	if err != nil {
+		t.Fatalf("Create(bios): %v", err)
+	}
+	if p.BootMode != "bios" {
+		t.Errorf("boot_mode = %q, want bios", p.BootMode)
+	}
+	got, err := s.Get(ctx, p.ID)
+	if err != nil || got.BootMode != "bios" {
+		t.Fatalf("Get boot_mode: %+v err=%v", got, err)
+	}
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	found := false
+	for _, item := range list {
+		if item.ID == p.ID && item.BootMode == "bios" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("List did not return boot_mode=bios")
+	}
+
+	// Update back to auto (empty) and then to uefi.
+	empty := "auto"
+	p, err = s.Update(ctx, p.ID, UpdateInput{BootMode: &empty})
+	if err != nil {
+		t.Fatalf("Update(auto): %v", err)
+	}
+	if p.BootMode != "" {
+		t.Errorf("after auto update boot_mode = %q, want empty", p.BootMode)
+	}
+	uefi := "uefi"
+	p, err = s.Update(ctx, p.ID, UpdateInput{BootMode: &uefi})
+	if err != nil || p.BootMode != "uefi" {
+		t.Fatalf("Update(uefi): %+v err=%v", p, err)
+	}
+
+	bad := validInput("bm-bad")
+	bad.BootMode = "legacy"
+	if _, err := s.Create(ctx, bad); err == nil {
+		t.Fatal("Create(legacy): expected validation error")
+	}
+}
+
 func TestCreateGet(t *testing.T) {
 	s := newTestStore(t)
 	in := validInput("p1")

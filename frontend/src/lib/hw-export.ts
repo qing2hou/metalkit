@@ -17,6 +17,15 @@ function cpuModel(r: Report): string {
   return [...new Set((r.cpu?.per_socket ?? []).map((s) => s.model).filter(Boolean))].join(' + ')
 }
 
+// uefi_mode_probed 为 true 才可信：旧报告没有该标记，且固定存了
+// uefi_mode=false，不能当作已确认 BIOS。
+function uefiLabel(fwRaw: Record<string, unknown> | undefined): string {
+  if (fwRaw?.uefi_mode_probed !== true) return '未上报'
+  if (fwRaw.uefi_mode === true) return '是'
+  if (fwRaw.uefi_mode === false) return '否'
+  return '未上报'
+}
+
 /** 存储/RAID 控制器的 PCI class 前缀：0100/0101 SCSI·IDE、0104 RAID、0106 SATA、0107 SAS、0108 NVMe。与 MachineDetailView 的分类口径一致。 */
 const STORAGE_CLASS_PREFIXES = ['0100', '0101', '0104', '0106', '0107', '0108']
 
@@ -49,6 +58,7 @@ export function hardwareToCsv(r: Report): string {
   const fwRaw = (r.firmware ?? {}) as {
     bios?: { vendor?: string; version?: string }
     uefi_mode?: boolean
+    uefi_mode_probed?: boolean
     secure_boot?: boolean
     tpm?: string
   }
@@ -59,7 +69,7 @@ export function hardwareToCsv(r: Report): string {
   out.push(csvRow([
     m.manufacturer, m.product_name, m.serial, m.smbios_uuid,
     r.cpu?.arch, r.cpu?.vendor, cpuModel(r), r.cpu?.sockets, r.cpu?.total_cores, r.cpu?.total_threads,
-    biosVer, fwRaw.uefi_mode ? '是' : '否',
+    biosVer, uefiLabel(fwRaw),
     fwRaw.secure_boot ? '启用' : '未启用', fwRaw.tpm,
   ]))
   out.push('')
@@ -119,6 +129,7 @@ export function hardwareToTxt(r: Report, header: { serial?: string; location?: s
   const fwRaw = (r.firmware ?? {}) as {
     bios?: { vendor?: string; version?: string }
     uefi_mode?: boolean
+    uefi_mode_probed?: boolean
     secure_boot?: boolean
     tpm?: string
   }
@@ -135,7 +146,7 @@ export function hardwareToTxt(r: Report, header: { serial?: string; location?: s
   L.push('── 机器/固件 ──')
   L.push(`CPU:　　 ${cell(cpuModel(r))}（${cell(r.cpu?.sockets)} 路 ${cell(r.cpu?.total_cores)} 核 ${cell(r.cpu?.total_threads)} 线程）`)
   L.push(`架构:　　 ${cell(r.cpu?.arch)}　厂商: ${cell(r.cpu?.vendor)}　BIOS: ${cell(biosVer)}`)
-  L.push(`UEFI: ${fwRaw.uefi_mode ? '是' : '否'}　Secure Boot: ${fwRaw.secure_boot ? '启用' : '未启用'}　TPM: ${cell(fwRaw.tpm)}`)
+  L.push(`UEFI: ${uefiLabel(fwRaw)}　Secure Boot: ${fwRaw.secure_boot ? '启用' : '未启用'}　TPM: ${cell(fwRaw.tpm)}`)
   L.push('')
 
   const dimms = r.memory?.dimms ?? []

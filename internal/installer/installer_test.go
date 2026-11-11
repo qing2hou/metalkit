@@ -65,6 +65,60 @@ func happySpec() jobs.InstallSpec {
 	}
 }
 
+// TestRun_BootModeMismatchFailsBeforeWipe pins the safety gate: when the
+// operator selected an explicit mode but the live system booted the other
+// way, Run must fail at boot-detect — before disk-pick and before any
+// destructive command.
+func TestRun_BootModeMismatchFailsBeforeWipe(t *testing.T) {
+	h := newHappyHarness(t)
+	// Force DetectBootMode to report "bios".
+	h.fs.notADir["/sys/firmware/efi/efivars"] = true
+
+	spec := happySpec()
+	spec.BootMode = "uefi"
+
+	err := Run(context.Background(), h.deps, spec)
+	if err == nil || !strings.Contains(err.Error(), "boot mode mismatch") {
+		t.Fatalf("expected boot mode mismatch, got %v", err)
+	}
+	if h.reporter.success {
+		t.Fatal("Succeed must not be called on a boot mode mismatch")
+	}
+	for _, c := range h.exec.Calls() {
+		if c.Name == "sgdisk" && len(c.Args) > 0 && c.Args[0] == "-Z" {
+			t.Fatalf("wipeDisk ran despite the boot mode mismatch: %v", h.exec.Calls())
+		}
+		if c.Name == "growpart" || c.Name == "dd" {
+			t.Fatalf("destructive stage ran despite the mismatch: %v", c)
+		}
+	}
+}
+
+// TestRun_ARMBiosRejectedBeforeWipe: arm64 has no i386-pc target, so a BIOS
+// boot environment must be rejected before the disk is touched even when the
+// operator left boot_mode=auto.
+func TestRun_ARMBiosRejectedBeforeWipe(t *testing.T) {
+	h := newHappyHarness(t)
+	h.fs.notADir["/sys/firmware/efi/efivars"] = true // detected bios
+
+	spec := happySpec()
+	spec.ImageArch = "arm64"
+	spec.BootMode = "auto"
+
+	err := Run(context.Background(), h.deps, spec)
+	if err == nil || !strings.Contains(err.Error(), "arm64") {
+		t.Fatalf("expected arm64 BIOS rejection, got %v", err)
+	}
+	if h.reporter.success {
+		t.Fatal("Succeed must not be called")
+	}
+	for _, c := range h.exec.Calls() {
+		if c.Name == "sgdisk" && len(c.Args) > 0 && c.Args[0] == "-Z" {
+			t.Fatalf("wipeDisk ran despite the arm64 BIOS rejection: %v", h.exec.Calls())
+		}
+	}
+}
+
 func TestRun_HappyPath(t *testing.T) {
 	h := newHappyHarness(t)
 	err := Run(context.Background(), h.deps, happySpec())
