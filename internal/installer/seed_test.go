@@ -182,7 +182,7 @@ func TestRenderNetworkConfig_StaticByMAC(t *testing.T) {
 	mustContain := []string{
 		"version: 2",
 		"ethernets:",
-		"  eth0:",
+		"  \"eth0\":",
 		// MAC is lower-cased for netplan compatibility.
 		`      macaddress: "aa:bb:cc:dd:ee:ff"`,
 		"    dhcp4: false",
@@ -221,10 +221,10 @@ func TestRenderNetworkConfig_KeyIsLiveNICName(t *testing.T) {
 		{Name: "eno3", MAC: "24:6e:96:4f:f8:f2"},
 	}
 	got := renderNetworkConfig(nc, b, nics, false)
-	if !strings.Contains(got, "  eno2:") {
+	if !strings.Contains(got, "  \"eno2\":") {
 		t.Fatalf("expected YAML key `  eno2:` (live NIC name), got:\n%s", got)
 	}
-	if strings.Contains(got, "  eth0:") {
+	if strings.Contains(got, "  \"eth0\":") {
 		t.Fatalf("did not expect generic `eth0` key when live NIC resolves:\n%s", got)
 	}
 	if !strings.Contains(got, `macaddress: "24:6e:96:4f:f8:f1"`) {
@@ -251,10 +251,10 @@ func TestRenderNetworkConfig_RHEL7UsesEthIndex(t *testing.T) {
 		{Name: "eno3", MAC: "24:6e:96:4f:f8:f2"},
 	}
 	got := renderNetworkConfig(nc, b, nics, true)
-	if !strings.Contains(got, "  eth1:") {
+	if !strings.Contains(got, "  \"eth1\":") {
 		t.Fatalf("rhel7 mode: expected key `  eth1:` (index 1), got:\n%s", got)
 	}
-	if strings.Contains(got, "  eno2:") {
+	if strings.Contains(got, "  \"eno2\":") {
 		t.Fatalf("rhel7 mode: must NOT use live name eno2 (kernel will rename to ethN):\n%s", got)
 	}
 }
@@ -284,7 +284,7 @@ func TestRenderNetworkConfig_KeyAgnosticToNICNamingStyle(t *testing.T) {
 			}
 			b := bindings.Binding{StaticAddress: "10.0.0.50"}
 			got := renderNetworkConfig(nc, b, []NICInfo{tc.nic}, false)
-			want := "  " + tc.nic.Name + ":"
+			want := "  \"" + tc.nic.Name + "\":"
 			if !strings.Contains(got, want) {
 				t.Fatalf("expected key %q in output:\n%s", want, got)
 			}
@@ -402,17 +402,17 @@ func TestRenderNetworkConfig_BondActiveBackup(t *testing.T) {
 	mustContain := []string{
 		"version: 2",
 		"ethernets:",
-		"  eno1:",
+		"  \"eno1\":",
 		`      name: "eno1"`,
-		"  eno2:",
+		"  \"eno2\":",
 		`      name: "eno2"`,
 		"bonds:",
-		"  bond0:",
-		"    interfaces: [eno1, eno2]",
+		"  \"bond0\":",
+		"    interfaces: [\"eno1\", \"eno2\"]",
 		"    parameters:",
 		"      mode: active-backup",
 		"      mii-monitor-interval: 100",
-		"      primary: eno1",
+		"      primary: \"eno1\"",
 		"    dhcp4: false",
 		`    addresses: ["10.0.0.50/24"]`,
 		`    gateway4: "10.0.0.1"`,
@@ -454,11 +454,11 @@ func TestRenderNetworkConfig_BondActiveBackup_WithNICs(t *testing.T) {
 	got := renderNetworkConfig(nc, b, nics, false)
 
 	mustContain := []string{
-		"  eno1:",
+		"  \"eno1\":",
 		`      macaddress: "aa:bb:cc:dd:ee:01"`,
-		"  eno2:",
+		"  \"eno2\":",
 		`      macaddress: "aa:bb:cc:dd:ee:02"`,
-		"      primary: eno1",
+		"      primary: \"eno1\"",
 	}
 	for _, sub := range mustContain {
 		if !strings.Contains(got, sub) {
@@ -483,11 +483,11 @@ func TestRenderNetworkConfig_BondWithMACSlaves(t *testing.T) {
 	got := renderNetworkConfig(nc, b, nil, false)
 
 	mustContain := []string{
-		"  eth0:",
+		"  \"eth0\":",
 		`      macaddress: "aa:bb:cc:dd:ee:01"`,
-		"  eth1:",
+		"  \"eth1\":",
 		`      macaddress: "aa:bb:cc:dd:ee:02"`,
-		"    interfaces: [eth0, eth1]",
+		"    interfaces: [\"eth0\", \"eth1\"]",
 	}
 	for _, sub := range mustContain {
 		if !strings.Contains(got, sub) {
@@ -521,11 +521,11 @@ func TestRenderNetworkConfig_BondWithMACSlaves_WithNICs(t *testing.T) {
 	got := renderNetworkConfig(nc, b, nics, false)
 
 	mustContain := []string{
-		"  eth0:",
+		"  \"eth0\":",
 		`      macaddress: "24:6e:96:4f:f8:f0"`,
-		"  eth1:",
+		"  \"eth1\":",
 		`      macaddress: "24:6e:96:4f:f8:f1"`,
-		"    interfaces: [eth0, eth1]",
+		"    interfaces: [\"eth0\", \"eth1\"]",
 	}
 	for _, sub := range mustContain {
 		if !strings.Contains(got, sub) {
@@ -553,11 +553,11 @@ func TestRenderNetworkConfig_BondWithMACSlaves_RHEL7(t *testing.T) {
 	got := renderNetworkConfig(nc, b, nics, true)
 
 	mustContain := []string{
-		"  eth0:",
+		"  \"eth0\":",
 		`      macaddress: "24:6e:96:4f:f8:f0"`,
-		"  eth1:",
+		"  \"eth1\":",
 		`      macaddress: "24:6e:96:4f:f8:f1"`,
-		"    interfaces: [eth0, eth1]",
+		"    interfaces: [\"eth0\", \"eth1\"]",
 	}
 	for _, sub := range mustContain {
 		if !strings.Contains(got, sub) {
@@ -632,12 +632,12 @@ func TestRenderNetworkConfig_VLAN_Single(t *testing.T) {
 
 	mustContain := []string{
 		"ethernets:",
-		"  eth0:",
+		"  \"eth0\":",
 		`      macaddress: "aa:bb:cc:dd:ee:ff"`,
 		"vlans:",
-		"  eth0.100:",
+		"  \"eth0.100\":",
 		"    id: 100",
-		"    link: eth0",
+		"    link: \"eth0\"",
 		"    dhcp4: false",
 		`    addresses: ["10.0.0.50/24"]`,
 		`    gateway4: "10.0.0.1"`,
@@ -664,11 +664,11 @@ func TestRenderNetworkConfig_VLAN_Bond(t *testing.T) {
 
 	mustContain := []string{
 		"bonds:",
-		"  bond0:",
+		"  \"bond0\":",
 		"vlans:",
-		"  bond0.200:",
+		"  \"bond0.200\":",
 		"    id: 200",
-		"    link: bond0",
+		"    link: \"bond0\"",
 		"    dhcp4: true",
 	}
 	for _, sub := range mustContain {
@@ -1209,7 +1209,7 @@ VERSION_ID="7"`
 		t.Fatalf("network-config should be written for RHEL 7 bond")
 	}
 	cfgContent := string(cfgData)
-	for _, sub := range []string{"eth0:", "eth1:", "interfaces: [eth0, eth1]"} {
+	for _, sub := range []string{"\"eth0\":", "\"eth1\":", "interfaces: [\"eth0\", \"eth1\"]"} {
 		if !strings.Contains(cfgContent, sub) {
 			t.Errorf("network-config bond missing %q\n%s", sub, cfgContent)
 		}
@@ -1597,6 +1597,276 @@ func TestBuildSeed_Sysconfig_Bond_VLAN(t *testing.T) {
 		if !strings.Contains(string(vlan), sub) {
 			t.Errorf("ifcfg-bond0.40 missing %q:\n%s", sub, vlan)
 		}
+	}
+}
+
+// TestBondCustomName_AllRenderers pins the configurable bond device name
+// across every renderer. The name must reach the master device, slave
+// membership, VLAN sub-interface and the generated file names — a stale
+// hardcoded "bond0" anywhere would produce a bond the OS never enslaves.
+func TestBondCustomName_AllRenderers(t *testing.T) {
+	const (
+		bondName = "mgmtbond"
+		mntRoot  = "/mnt/root"
+	)
+	nc := profiles.NetworkConfig{
+		Method:    "static",
+		PrefixLen: 24,
+		Gateway:   "10.0.0.1",
+		DNS:       []string{"8.8.8.8"},
+		VLAN:      40,
+		Bond: &profiles.BondConfig{
+			Name:   bondName,
+			Mode:   "802.3ad",
+			Slaves: []string{"eno1", "eno2"},
+		},
+	}
+	b := bindings.Binding{StaticAddress: "10.0.0.50"}
+
+	assertContent := func(t *testing.T, label, got string, mustContain []string) {
+		t.Helper()
+		for _, sub := range mustContain {
+			if !strings.Contains(got, sub) {
+				t.Errorf("%s missing %q:\n%s", label, sub, got)
+			}
+		}
+		if strings.Contains(got, "bond0") {
+			t.Errorf("%s still contains hardcoded bond0:\n%s", label, got)
+		}
+	}
+
+	t.Run("cloud-init netplan", func(t *testing.T) {
+		got := renderNetworkConfig(nc, b, nil, false)
+		assertContent(t, "netplan", got, []string{
+			"  \"" + bondName + "\":",
+			"    interfaces: [\"eno1\", \"eno2\"]",
+			"    \"" + bondName + ".40\":",
+			"      link: \"" + bondName + "\"",
+			"      id: 40",
+		})
+	})
+
+	t.Run("ENI", func(t *testing.T) {
+		fs := newMockFS()
+		writeENIInterfacesBond(Deps{FS: fs}, mntRoot, nc, b, nil)
+		data, ok := fs.files[mntRoot+"/etc/network/interfaces"]
+		if !ok {
+			t.Fatal("interfaces not written")
+		}
+		assertContent(t, "ENI", string(data), []string{
+			"auto " + bondName,
+			"iface " + bondName + " inet manual",
+			"    bond-master " + bondName,
+			"auto " + bondName + ".40",
+			"iface " + bondName + ".40 inet static",
+			"    vlan-raw-device " + bondName,
+		})
+	})
+
+	t.Run("wicked", func(t *testing.T) {
+		fs := newMockFS()
+		sysDir := mntRoot + "/etc/sysconfig/network"
+		writeWickedBond(Deps{FS: fs}, mntRoot, nc, b, nil, sysDir)
+
+		master, ok := fs.files[sysDir+"/ifcfg-"+bondName]
+		if !ok {
+			t.Fatal("ifcfg-" + bondName + " not written")
+		}
+		assertContent(t, "wicked master", string(master), []string{
+			"mode=802.3ad",
+			"BONDING_SLAVE_0='eno1'",
+		})
+		vlan, ok := fs.files[sysDir+"/ifcfg-"+bondName+".40"]
+		if !ok {
+			t.Fatal("ifcfg-" + bondName + ".40 not written")
+		}
+		assertContent(t, "wicked vlan", string(vlan), []string{
+			"ETHERDEVICE='" + bondName + "'",
+			"VLAN_ID='40'",
+		})
+		if _, stale := fs.files[sysDir+"/ifcfg-bond0"]; stale {
+			t.Error("wicked wrote stale ifcfg-bond0")
+		}
+	})
+
+	t.Run("RHEL7 ifcfg", func(t *testing.T) {
+		fs := newMockFS()
+		writeIfcfgBond(Deps{FS: fs}, mntRoot, nc, b, nil)
+		sysDir := mntRoot + "/etc/sysconfig/network-scripts"
+
+		master, ok := fs.files[sysDir+"/ifcfg-"+bondName]
+		if !ok {
+			t.Fatal("ifcfg-" + bondName + " not written")
+		}
+		assertContent(t, "ifcfg master", string(master), []string{
+			"DEVICE=" + bondName,
+			"NAME=" + bondName,
+			"TYPE=Bond",
+		})
+		vlan, ok := fs.files[sysDir+"/ifcfg-"+bondName+".40"]
+		if !ok {
+			t.Fatal("ifcfg-" + bondName + ".40 not written")
+		}
+		assertContent(t, "ifcfg vlan", string(vlan), []string{
+			"DEVICE=" + bondName + ".40",
+			"PHYSDEV=" + bondName,
+		})
+		slave, ok := fs.files[sysDir+"/ifcfg-eth0"]
+		if !ok {
+			t.Fatal("slave ifcfg-eth0 not written")
+		}
+		assertContent(t, "ifcfg slave", string(slave), []string{"MASTER=" + bondName})
+		if _, stale := fs.files[sysDir+"/ifcfg-bond0"]; stale {
+			t.Error("ifcfg wrote stale ifcfg-bond0")
+		}
+	})
+
+	t.Run("NM keyfile", func(t *testing.T) {
+		fs := newMockFS()
+		writeNMKeyfileBond(Deps{FS: fs}, mntRoot, nc, b, nil)
+		nmDir := mntRoot + "/etc/NetworkManager/system-connections"
+
+		master, ok := fs.files[nmDir+"/"+bondName+".nmconnection"]
+		if !ok {
+			t.Fatal(bondName + ".nmconnection not written")
+		}
+		assertContent(t, "nm master", string(master), []string{
+			"id=" + bondName,
+			"interface-name=" + bondName,
+			"type=bond",
+			"mode=802.3ad",
+		})
+		slave, ok := fs.files[nmDir+"/"+bondName+"-slave-0.nmconnection"]
+		if !ok {
+			t.Fatal(bondName + "-slave-0.nmconnection not written")
+		}
+		assertContent(t, "nm slave", string(slave), []string{
+			"id=" + bondName + "-slave-0",
+			"master=" + bondName,
+		})
+		vlan, ok := fs.files[nmDir+"/"+bondName+".40.nmconnection"]
+		if !ok {
+			t.Fatal(bondName + ".40.nmconnection not written")
+		}
+		assertContent(t, "nm vlan", string(vlan), []string{
+			"id=" + bondName + ".40",
+			"parent=" + bondName,
+		})
+		if _, stale := fs.files[nmDir+"/bond0.nmconnection"]; stale {
+			t.Error("NM wrote stale bond0.nmconnection")
+		}
+	})
+}
+
+// TestBuildSeed_RejectsBondTopologyTheControllerCannotSee pins the two
+// install-time checks: a MAC slave that resolves to the same name as the
+// bond, and <bond>.<vlan> overflowing IFNAMSIZ. Both are invisible to
+// controller-side validation (no live NIC list / subnet VLAN is applied
+// later), so BuildSeed must fail before writing any config.
+func TestBuildSeed_RejectsBondTopologyTheControllerCannotSee(t *testing.T) {
+	nics := []NICInfo{
+		{Name: "eno1", MAC: "aa:bb:cc:dd:ee:01"},
+		{Name: "eno2", MAC: "aa:bb:cc:dd:ee:02"},
+	}
+	newSpec := func(name string, vlan int) jobs.InstallSpec {
+		return jobs.InstallSpec{
+			Profile: profiles.Profile{
+				OSFamily:         "debian",
+				RootPasswordHash: "$6$hash",
+				Network: profiles.NetworkConfig{
+					Method: "dhcp",
+					VLAN:   vlan,
+					Bond: &profiles.BondConfig{
+						Name:   name,
+						Mode:   "active-backup",
+						Slaves: []string{"AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"},
+					},
+				},
+			},
+			Binding: bindings.Binding{MachineUUID: "abcdef01-0000-0000-0000-000000000000"},
+		}
+	}
+
+	// MAC slave resolves to eno1 == bond name → the bond would own its own
+	// member device.
+	err := BuildSeed(context.Background(), Deps{FS: newMockFS(), NICs: nics}, newSpec("eno1", 0), "/mnt/root")
+	if err == nil || !strings.Contains(err.Error(), "collides with slave") {
+		t.Fatalf("want resolved-name collision error, got %v", err)
+	}
+
+	// 15-char name + VLAN 4094 → bond.<vlan> is 20 chars, over IFNAMSIZ.
+	err = BuildSeed(context.Background(), Deps{FS: newMockFS(), NICs: nics}, newSpec("abcdefghijklmno", 4094), "/mnt/root")
+	if err == nil || !strings.Contains(err.Error(), "15-char") {
+		t.Fatalf("want VLAN name-length error, got %v", err)
+	}
+
+	// Same topology with a short name/no VLAN must pass the check (it will
+	// then fail later on missing rootfs bits, which is fine here — we only
+	// assert the topology check is not over-eager).
+	if err := validateResolvedBondTopology(newSpec("mgmtbond", 0).Profile.Network, nics, false); err != nil {
+		t.Fatalf("valid topology rejected: %v", err)
+	}
+}
+
+// TestWriteWickedBond_MACSlavesUseResolvedDeviceNames pins the Wicked master
+// stanza to real device names: BONDING_SLAVE_N with a raw MAC literal never
+// enslaves anything, because the installed OS only has enoN/ethN devices.
+func TestWriteWickedBond_MACSlavesUseResolvedDeviceNames(t *testing.T) {
+	fs := newMockFS()
+	nc := profiles.NetworkConfig{
+		Method: "dhcp",
+		Bond: &profiles.BondConfig{
+			Name:   "mgmtbond",
+			Mode:   "active-backup",
+			Slaves: []string{"AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"},
+		},
+	}
+	nics := []NICInfo{
+		{Name: "eno1", MAC: "aa:bb:cc:dd:ee:01"},
+		{Name: "eno2", MAC: "aa:bb:cc:dd:ee:02"},
+	}
+	sysDir := "/mnt/root/etc/sysconfig/network"
+	writeWickedBond(Deps{FS: fs}, "/mnt/root", nc, bindings.Binding{}, nics, sysDir)
+
+	master, ok := fs.files[sysDir+"/ifcfg-mgmtbond"]
+	if !ok {
+		t.Fatal("ifcfg-mgmtbond not written")
+	}
+	content := string(master)
+	for _, sub := range []string{"BONDING_SLAVE_0='eno1'", "BONDING_SLAVE_1='eno2'"} {
+		if !strings.Contains(content, sub) {
+			t.Errorf("master missing %q:\n%s", sub, content)
+		}
+	}
+	for _, mac := range []string{"AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"} {
+		if strings.Contains(content, "BONDING_SLAVE_0='"+mac) || strings.Contains(content, "BONDING_SLAVE_1='"+mac) {
+			t.Errorf("master leaked raw MAC slave %q:\n%s", mac, content)
+		}
+	}
+}
+
+// TestPreflightTopology_RHEL7SyntheticEthName covers the rhel7 naming branch:
+// slaves become eth<index> regardless of live names, so a bond named after
+// one of them must be rejected before installer.Run wipes the disk.
+func TestPreflightTopology_RHEL7SyntheticEthName(t *testing.T) {
+	nics := []NICInfo{
+		{Name: "eno1", MAC: "aa:bb:cc:dd:ee:01"},
+		{Name: "eno2", MAC: "aa:bb:cc:dd:ee:02"},
+	}
+	spec := jobs.InstallSpec{Profile: profiles.Profile{
+		OSFamily: "rhel7",
+		Network: profiles.NetworkConfig{
+			Method: "dhcp",
+			Bond: &profiles.BondConfig{
+				Name:   "eth0",
+				Mode:   "active-backup",
+				Slaves: []string{"AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"},
+			},
+		},
+	}}
+	err := PreflightTopology(spec, nics)
+	if err == nil || !strings.Contains(err.Error(), "collides with slave") {
+		t.Fatalf("want rhel7 synthetic-name collision, got %v", err)
 	}
 }
 

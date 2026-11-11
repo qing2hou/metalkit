@@ -26,7 +26,7 @@
 //     match.macaddress block for stability. If the NIC list is unavailable
 //     (nil/empty), it falls back to match.name.
 //   - VLAN: when NetworkConfig.VLAN > 0, the IP config moves onto a VLAN
-//     sub-interface (metalkit0.<vlan> or bond0.<vlan>) and the underlying
+//     sub-interface (metalkit0.<vlan> or <bond>.<vlan>) and the underlying
 //     physical/bond device stays L2-only.
 //
 // We deliberately keep the YAML emission hand-rolled. The fields are
@@ -79,6 +79,13 @@ func buildSeedCommon(
 ) error {
 	if mntRoot == "" {
 		return fmt.Errorf("install: BuildSeed: mntRoot is empty")
+	}
+	// Validate topology before writing anything: the bond name must not
+	// collide with a slave's resolved installed-OS device name, and
+	// <bond>.<vlan> must fit IFNAMSIZ. Both depend on the live NIC list
+	// and on the post-subnet VLAN, so they can't be caught controller-side.
+	if err := validateResolvedBondTopology(spec.Profile.Network, deps.NICs, rhel7); err != nil {
+		return fmt.Errorf("install: bond config: %w", err)
 	}
 	seedDir := filepath.Join(mntRoot, "var", "lib", "cloud", "seed", "nocloud-net")
 	if err := deps.FS.MkdirAll(seedDir, 0o755); err != nil {
@@ -413,7 +420,7 @@ func renderNetworkConfigSingle(nc profiles.NetworkConfig, b bindings.Binding, ni
 	sb.WriteString("version: 2\n")
 	sb.WriteString("ethernets:\n")
 	key := resolveSingleNICKey(nc.NICSelector, nics, rhel7)
-	fmt.Fprintf(&sb, "  %s:\n", key)
+	fmt.Fprintf(&sb, "  %q:\n", key)
 	switch {
 	case strings.HasPrefix(nc.NICSelector, "by-mac:"):
 		mac := strings.TrimPrefix(nc.NICSelector, "by-mac:")
@@ -450,6 +457,7 @@ func renderNetworkConfigSingle(nc profiles.NetworkConfig, b bindings.Binding, ni
 
 func renderNetworkConfigBond(nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo, rhel7 bool) string {
 	bond := nc.Bond
+	bondName := bond.InterfaceName()
 	var sb strings.Builder
 	sb.WriteString("version: 2\n")
 
@@ -493,7 +501,7 @@ func renderNetworkConfigBond(nc profiles.NetworkConfig, b bindings.Binding, nics
 			key = fmt.Sprintf("eth%d", i)
 		}
 		slaveKeys[i] = key
-		fmt.Fprintf(&sb, "  %s:\n", key)
+		fmt.Fprintf(&sb, "  %q:\n", key)
 		sb.WriteString("    match:\n")
 		if isValidMAC(mac) {
 			fmt.Fprintf(&sb, "      macaddress: %q\n", strings.ToLower(mac))
@@ -502,13 +510,13 @@ func renderNetworkConfigBond(nc profiles.NetworkConfig, b bindings.Binding, nics
 		}
 	}
 	sb.WriteString("bonds:\n")
-	sb.WriteString("  bond0:\n")
+	fmt.Fprintf(&sb, "  %q:\n", bondName)
 	sb.WriteString("    interfaces: [")
 	for i, n := range slaveKeys {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		sb.WriteString(n)
+		fmt.Fprintf(&sb, "%q", n)
 	}
 	sb.WriteString("]\n")
 	sb.WriteString("    parameters:\n")
@@ -523,7 +531,7 @@ func renderNetworkConfigBond(nc profiles.NetworkConfig, b bindings.Binding, nics
 		if bond.Primary != "" {
 			for i, s := range bond.Slaves {
 				if s == bond.Primary {
-					fmt.Fprintf(&sb, "      primary: %s\n", slaveKeys[i])
+					fmt.Fprintf(&sb, "      primary: %q\n", slaveKeys[i])
 					break
 				}
 			}
@@ -541,7 +549,7 @@ func renderNetworkConfigBond(nc profiles.NetworkConfig, b bindings.Binding, nics
 		fmt.Fprintf(&sb, "      transmit-hash-policy: %s\n", policy)
 	}
 	if nc.VLAN > 0 {
-		renderVLAN(&sb, "    ", nc, b, "bond0")
+		renderVLAN(&sb, "    ", nc, b, bondName)
 	} else {
 		writeIP(&sb, "    ", nc, b)
 	}
@@ -650,6 +658,74 @@ func lookupSlaveMAC(slave string, nics []NICInfo) string {
 	return resolveNICMAC(nics, slave)
 }
 
+// bondSlaveDeviceNames returns the device name each slave will have in the
+// installed OS, mirroring the naming rules the renderers apply: literal
+// interface names pass through, MACs resolve through the live NIC list (or
+// eth<index> on RHEL7 / when unresolved). Used to catch a bond name that
+// collides with one of its own members after resolution.
+func bondSlaveDeviceNames(bond *profiles.BondConfig, nics []NICInfo, rhel7 bool) []string {
+	names := make([]string, 0, len(bond.Slaves))
+	for i, slave := range bond.Slaves {
+		mac := lookupSlaveMAC(slave, nics)
+		name := ""
+		if isValidMAC(mac) {
+			if rhel7 {
+				for j, n := range nics {
+					if strings.EqualFold(n.MAC, mac) {
+						name = fmt.Sprintf("eth%d", j)
+						break
+					}
+				}
+			} else {
+				for _, n := range nics {
+					if strings.EqualFold(n.MAC, mac) && n.Name != "" {
+						name = n.Name
+						break
+					}
+				}
+			}
+		} else {
+			name = slave
+		}
+		if name == "" {
+			name = fmt.Sprintf("eth%d", i)
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+// validateResolvedBondTopology enforces the two bond invariants that only
+// become checkable once the live NIC list and final VLAN are known:
+//
+//   - the bond device name must differ from every slave's resolved name
+//     (a MAC slave can resolve to the same name the operator chose);
+//   - <bond>.<vlan> must fit Linux's 15-char interface limit.
+func validateResolvedBondTopology(nc profiles.NetworkConfig, nics []NICInfo, rhel7 bool) error {
+	bond := nc.Bond
+	if bond == nil {
+		return nil
+	}
+	name := bond.InterfaceName()
+	if err := profiles.ValidateBondVLANName(bond, nc.VLAN); err != nil {
+		return err
+	}
+	for i, dev := range bondSlaveDeviceNames(bond, nics, rhel7) {
+		if dev == name {
+			return fmt.Errorf("bond name %q collides with slave %d resolved to %q on the live system", name, i, dev)
+		}
+	}
+	return nil
+}
+
+// PreflightTopology runs the install-time bond checks without touching any
+// disk or file. The agent calls it after fetching the spec (and before
+// installer.Run wipes the target disk), so an impossible bond config fails
+// while the old system is still intact.
+func PreflightTopology(spec jobs.InstallSpec, nics []NICInfo) error {
+	return validateResolvedBondTopology(spec.Profile.Network, nics, spec.Profile.OSFamily == "rhel7")
+}
+
 // isValidMAC reports whether s looks like a MAC address (xx:xx:xx:xx:xx:xx).
 // Rejects interface names and other non-MAC strings that might have leaked in.
 func isValidMAC(s string) bool {
@@ -662,9 +738,9 @@ func isValidMAC(s string) bool {
 // IP configuration goes on the VLAN device; the parent stays L2-only.
 func renderVLAN(sb *strings.Builder, indent string, nc profiles.NetworkConfig, b bindings.Binding, link string) {
 	fmt.Fprintf(sb, "vlans:\n")
-	fmt.Fprintf(sb, "%s%s.%d:\n", indent, link, nc.VLAN)
+	fmt.Fprintf(sb, "%s%q:\n", indent, fmt.Sprintf("%s.%d", link, nc.VLAN))
 	fmt.Fprintf(sb, "%s  id: %d\n", indent, nc.VLAN)
-	fmt.Fprintf(sb, "%s  link: %s\n", indent, link)
+	fmt.Fprintf(sb, "%s  link: %q\n", indent, link)
 	writeIP(sb, indent+"  ", nc, b)
 }
 
@@ -703,7 +779,7 @@ func cleanStaleNetworkConfig(_ context.Context, deps Deps, mntRoot string) {
 	// NetworkManager connection keyfiles. Cloud images (Rocky 8+, RHEL 8+,
 	// Fedora) ship with pre-configured NM connections that race with our
 	// cloud-init-rendered config. For example, a default DHCP connection on
-	// eth0 would prevent NM from enslaving eth0 to bond0.
+	// eth0 would prevent NM from enslaving eth0 to the bond.
 	nmDir := filepath.Join(mntRoot, "etc", "NetworkManager", "system-connections")
 	if deps.FS.Exists(nmDir) {
 		matches, err := filepath.Glob(filepath.Join(nmDir, "*.nmconnection"))
@@ -867,12 +943,16 @@ func writeENIInterfaces(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 
 // writeENIInterfacesBond writes /etc/network/interfaces with bond configuration.
 func writeENIInterfacesBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo) {
+	bond := nc.Bond
+	if bond == nil {
+		return
+	}
 	ifDir := filepath.Join(mntRoot, "etc", "network")
 	if !deps.FS.Exists(ifDir) {
 		_ = deps.FS.MkdirAll(ifDir, 0o755)
 	}
 
-	bond := nc.Bond
+	bondName := bond.InterfaceName()
 	miimon := bond.Miimon
 	if miimon == 0 {
 		miimon = 100
@@ -887,7 +967,7 @@ func writeENIInterfacesBond(deps Deps, mntRoot string, nc profiles.NetworkConfig
 	lines = append(lines, "")
 
 	// Slave interfaces.
-	for i, slave := range bond.Slaves {
+	for _, slave := range bond.Slaves {
 		dev := slave
 		if isValidMAC(slave) {
 			for _, n := range nics {
@@ -899,24 +979,20 @@ func writeENIInterfacesBond(deps Deps, mntRoot string, nc profiles.NetworkConfig
 		}
 		lines = append(lines, "auto "+dev)
 		lines = append(lines, "iface "+dev+" inet manual")
-		if i == 0 {
-			lines = append(lines, fmt.Sprintf("    bond-master bond0"))
-		} else {
-			lines = append(lines, fmt.Sprintf("    bond-master bond0"))
-		}
+		lines = append(lines, "    bond-master "+bondName)
 		lines = append(lines, "")
 	}
 
 	// Bond master. With a VLAN on top, the bond stays L2-only (inet manual)
-	// and the IP lives on the bond0.<vlan> stanza below — mirroring the
+	// and the IP lives on the <bond>.<vlan> stanza below — mirroring the
 	// netplan/NM renderers (duplicate IP on master+VLAN wedges routing).
-	lines = append(lines, "auto bond0")
+	lines = append(lines, "auto "+bondName)
 	if nc.VLAN > 0 {
-		lines = append(lines, "iface bond0 inet manual")
+		lines = append(lines, "iface "+bondName+" inet manual")
 	} else if nc.Method == "dhcp" {
-		lines = append(lines, "iface bond0 inet dhcp")
+		lines = append(lines, "iface "+bondName+" inet dhcp")
 	} else {
-		lines = append(lines, "iface bond0 inet static")
+		lines = append(lines, "iface "+bondName+" inet static")
 		if b.StaticAddress != "" {
 			lines = append(lines, "    address "+b.StaticAddress)
 			if nc.PrefixLen > 0 {
@@ -954,11 +1030,12 @@ func writeENIInterfacesBond(deps Deps, mntRoot string, nc profiles.NetworkConfig
 	// L2-only).
 	if nc.VLAN > 0 {
 		lines = append(lines, "")
-		lines = append(lines, fmt.Sprintf("auto bond0.%d", nc.VLAN))
+		vlanDev := fmt.Sprintf("%s.%d", bondName, nc.VLAN)
+		lines = append(lines, "auto "+vlanDev)
 		if nc.Method == "dhcp" {
-			lines = append(lines, fmt.Sprintf("iface bond0.%d inet dhcp", nc.VLAN))
+			lines = append(lines, "iface "+vlanDev+" inet dhcp")
 		} else {
-			lines = append(lines, fmt.Sprintf("iface bond0.%d inet static", nc.VLAN))
+			lines = append(lines, "iface "+vlanDev+" inet static")
 			if b.StaticAddress != "" {
 				lines = append(lines, "    address "+b.StaticAddress)
 				if nc.PrefixLen > 0 {
@@ -972,7 +1049,7 @@ func writeENIInterfacesBond(deps Deps, mntRoot string, nc profiles.NetworkConfig
 				lines = append(lines, "    dns-nameservers "+strings.Join(nc.DNS, " "))
 			}
 		}
-		lines = append(lines, fmt.Sprintf("    vlan-raw-device bond0"))
+		lines = append(lines, "    vlan-raw-device "+bondName)
 	}
 
 	content := strings.Join(lines, "\n") + "\n"
@@ -1078,12 +1155,19 @@ func writeWickedIfcfg(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bi
 // writeWickedBond writes Wicked ifcfg files for a bond master and its slaves.
 func writeWickedBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nics []NICInfo, sysDir string) {
 	bond := nc.Bond
+	if bond == nil {
+		return
+	}
+	bondName := bond.InterfaceName()
 	miimon := bond.Miimon
 	if miimon == 0 {
 		miimon = 100
 	}
 
-	// Slave ifcfg files.
+	// Slave ifcfg files. Record the resolved device names so the master
+	// stanza references devices that actually exist (a raw MAC literal in
+	// BONDING_SLAVE_N never enslaves anything).
+	slaveDevs := make([]string, len(bond.Slaves))
 	for i, slave := range bond.Slaves {
 		dev := slave
 		var hwaddr string
@@ -1096,6 +1180,7 @@ func writeWickedBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bin
 				}
 			}
 		}
+		slaveDevs[i] = dev
 		var lines []string
 		lines = append(lines, "# Managed by metalkit installer")
 		lines = append(lines, "BOOTPROTO='none'")
@@ -1114,8 +1199,8 @@ func writeWickedBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bin
 		)
 	}
 
-	// Bond master ifcfg-bond0. With a VLAN on top, L2-only — the IP lives
-	// on the ifcfg-bond0.<vlan> below (same rule as the other renderers:
+	// Bond master ifcfg-<name>. With a VLAN on top, L2-only — the IP lives
+	// on the ifcfg-<name>.<vlan> below (same rule as the other renderers:
 	// duplicating the static IP on master+VLAN wedges routing).
 	var master []string
 	master = append(master, "# Managed by metalkit installer")
@@ -1150,17 +1235,17 @@ func writeWickedBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bin
 		master = append(master, fmt.Sprintf("BONDING_MODULE_OPTS='mode=%s miimon=%d lacp_rate=%s xmit_hash_policy=%s'",
 			bond.Mode, miimon, rate, policy))
 	}
-	for i, slave := range bond.Slaves {
-		master = append(master, fmt.Sprintf("BONDING_SLAVE_%d='%s'", i, slave))
+	for i, dev := range slaveDevs {
+		master = append(master, fmt.Sprintf("BONDING_SLAVE_%d='%s'", i, dev))
 	}
 
 	_ = deps.FS.WriteFile(
-		filepath.Join(sysDir, "ifcfg-bond0"),
+		filepath.Join(sysDir, "ifcfg-"+bondName),
 		[]byte(strings.Join(master, "\n")+"\n"),
 		0o644,
 	)
 
-	// VLAN sub-interface ifcfg-bond0.<vlan> when requested.
+	// VLAN sub-interface ifcfg-<name>.<vlan> when requested.
 	if nc.VLAN > 0 {
 		var vlan []string
 		vlan = append(vlan, "# Managed by metalkit installer")
@@ -1178,10 +1263,10 @@ func writeWickedBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bin
 		}
 		vlan = append(vlan, "STARTMODE='auto'")
 		vlan = append(vlan, "VLAN='yes'")
-		vlan = append(vlan, fmt.Sprintf("ETHERDEVICE='bond0'"))
+		vlan = append(vlan, "ETHERDEVICE='"+bondName+"'")
 		vlan = append(vlan, fmt.Sprintf("VLAN_ID='%d'", nc.VLAN))
 		_ = deps.FS.WriteFile(
-			filepath.Join(sysDir, fmt.Sprintf("ifcfg-bond0.%d", nc.VLAN)),
+			filepath.Join(sysDir, fmt.Sprintf("ifcfg-%s.%d", bondName, nc.VLAN)),
 			[]byte(strings.Join(vlan, "\n")+"\n"),
 			0o644,
 		)
@@ -1300,8 +1385,8 @@ func writeIfcfg(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings
 // writeIfcfgBond writes RHEL 7-style ifcfg files for a bond master and its
 // slaves into /etc/sysconfig/network-scripts/. Layout:
 //
-//   - ifcfg-bond0 — bond master, holds the IP / gateway / DNS / BONDING_OPTS.
-//   - ifcfg-eth0, ifcfg-eth1, ... — one per slave, MASTER=bond0 SLAVE=yes,
+//   - ifcfg-<bond> — bond master, holds the IP / gateway / DNS / BONDING_OPTS.
+//   - ifcfg-eth0, ifcfg-eth1, ... — one per slave, MASTER=<bond> SLAVE=yes,
 //     HWADDR matches the slave's MAC so the kernel binds the right NIC even
 //     when its predictable name differs between live and installed systems.
 //
@@ -1314,6 +1399,7 @@ func writeIfcfgBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bind
 	if bond == nil {
 		return
 	}
+	bondName := bond.InterfaceName()
 	sysDir := filepath.Join(mntRoot, "etc", "sysconfig", "network-scripts")
 	if !deps.FS.Exists(sysDir) {
 		_ = deps.FS.MkdirAll(sysDir, 0o755)
@@ -1353,14 +1439,14 @@ func writeIfcfgBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bind
 		opts = append(opts, fmt.Sprintf("xmit_hash_policy=%s", policy))
 	}
 
-	// Master ifcfg-bond0. With a VLAN on top, the bond stays L2-only —
-	// the IP/gateway/DNS live on the ifcfg-bond0.<vlan> sub-interface
+	// Master ifcfg-<bond>. With a VLAN on top, the bond stays L2-only —
+	// the IP/gateway/DNS live on the ifcfg-<bond>.<vlan> sub-interface
 	// written below. Duplicating the static IP on both the master and the
 	// VLAN wedges routing (2026-09-28 Rocky incident, NM variant).
 	var master []string
 	master = append(master, "# Managed by metalkit installer")
-	master = append(master, "DEVICE=bond0")
-	master = append(master, "NAME=bond0")
+	master = append(master, "DEVICE="+bondName)
+	master = append(master, "NAME="+bondName)
 	master = append(master, "TYPE=Bond")
 	master = append(master, "BONDING_MASTER=yes")
 	master = append(master, "ONBOOT=yes")
@@ -1387,21 +1473,22 @@ func writeIfcfgBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bind
 		master = append(master, "BOOTPROTO=none")
 	}
 	_ = deps.FS.WriteFile(
-		filepath.Join(sysDir, "ifcfg-bond0"),
+		filepath.Join(sysDir, "ifcfg-"+bondName),
 		[]byte(strings.Join(master, "\n")+"\n"),
 		0o644,
 	)
 
-	// VLAN sub-interface ifcfg-bond0.<vlan> when requested.
+	// VLAN sub-interface ifcfg-<bond>.<vlan> when requested.
 	if nc.VLAN > 0 {
+		vlanDev := fmt.Sprintf("%s.%d", bondName, nc.VLAN)
 		var vlan []string
 		vlan = append(vlan, "# Managed by metalkit installer")
-		vlan = append(vlan, fmt.Sprintf("DEVICE=bond0.%d", nc.VLAN))
-		vlan = append(vlan, fmt.Sprintf("NAME=bond0.%d", nc.VLAN))
+		vlan = append(vlan, "DEVICE="+vlanDev)
+		vlan = append(vlan, "NAME="+vlanDev)
 		vlan = append(vlan, "TYPE=Vlan")
 		vlan = append(vlan, "ONBOOT=yes")
 		vlan = append(vlan, "VLAN=yes")
-		vlan = append(vlan, fmt.Sprintf("PHYSDEV=bond0"))
+		vlan = append(vlan, "PHYSDEV="+bondName)
 		vlan = append(vlan, fmt.Sprintf("VLAN_ID=%d", nc.VLAN))
 		if nc.Method == "dhcp" {
 			vlan = append(vlan, "BOOTPROTO=dhcp")
@@ -1421,7 +1508,7 @@ func writeIfcfgBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bind
 			}
 		}
 		_ = deps.FS.WriteFile(
-			filepath.Join(sysDir, fmt.Sprintf("ifcfg-bond0.%d", nc.VLAN)),
+			filepath.Join(sysDir, "ifcfg-"+vlanDev),
 			[]byte(strings.Join(vlan, "\n")+"\n"),
 			0o644,
 		)
@@ -1440,7 +1527,7 @@ func writeIfcfgBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bind
 		}
 		lines = append(lines, "ONBOOT=yes")
 		lines = append(lines, "BOOTPROTO=none")
-		lines = append(lines, "MASTER=bond0")
+		lines = append(lines, "MASTER="+bondName)
 		lines = append(lines, "SLAVE=yes")
 		_ = deps.FS.WriteFile(
 			filepath.Join(sysDir, "ifcfg-"+dev),
@@ -1688,6 +1775,7 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 	if bond == nil {
 		return
 	}
+	bondName := bond.InterfaceName()
 	nmDir := filepath.Join(mntRoot, "etc", "NetworkManager", "system-connections")
 	if !deps.FS.Exists(nmDir) {
 		_ = deps.FS.MkdirAll(nmDir, 0o755)
@@ -1714,9 +1802,9 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 		var lines []string
 		lines = append(lines, "# Managed by metalkit installer")
 		lines = append(lines, "[connection]")
-		lines = append(lines, fmt.Sprintf("id=bond0-slave-%d", i))
+		lines = append(lines, fmt.Sprintf("id=%s-slave-%d", bondName, i))
 		lines = append(lines, "type=ethernet")
-		lines = append(lines, "master=bond0")
+		lines = append(lines, "master="+bondName)
 		lines = append(lines, "slave-type=bond")
 		lines = append(lines, "")
 		lines = append(lines, "[ethernet]")
@@ -1725,7 +1813,7 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 		}
 
 		content := strings.Join(lines, "\n") + "\n"
-		filename := fmt.Sprintf("bond0-slave-%d.nmconnection", i)
+		filename := fmt.Sprintf("%s-slave-%d.nmconnection", bondName, i)
 		_ = deps.FS.WriteFile(filepath.Join(nmDir, filename), []byte(content), 0o600)
 	}
 
@@ -1733,9 +1821,9 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 	var master []string
 	master = append(master, "# Managed by metalkit installer")
 	master = append(master, "[connection]")
-	master = append(master, "id=bond0")
+	master = append(master, "id="+bondName)
 	master = append(master, "type=bond")
-	master = append(master, "interface-name=bond0")
+	master = append(master, "interface-name="+bondName)
 	master = append(master, "autoconnect=true")
 	master = append(master, "")
 	master = append(master, "[bond]")
@@ -1800,12 +1888,12 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 	}
 
 	content := strings.Join(master, "\n") + "\n"
-	if err := deps.FS.WriteFile(filepath.Join(nmDir, "bond0.nmconnection"), []byte(content), 0o600); err != nil {
+	if err := deps.FS.WriteFile(filepath.Join(nmDir, bondName+".nmconnection"), []byte(content), 0o600); err != nil {
 		if deps.Logger != nil {
 			deps.Logger.Warn("direct-write: failed to write bond NM keyfile", "err", err)
 		}
 	} else if deps.Logger != nil {
-		deps.Logger.Info("direct-write: wrote bond0 NM keyfile")
+		deps.Logger.Info("direct-write: wrote bond NM keyfile", "bond", bondName)
 	}
 
 	// VLAN on top of bond.
@@ -1816,9 +1904,9 @@ func writeNMKeyfileBond(deps Deps, mntRoot string, nc profiles.NetworkConfig, b 
 
 // writeNMKeyfileVLAN writes a NetworkManager keyfile for a VLAN interface.
 func writeNMKeyfileVLAN(deps Deps, mntRoot string, nc profiles.NetworkConfig, b bindings.Binding, nmDir string) {
-	parent := "bond0"
-	if nc.Bond == nil {
-		parent = "metalkit0"
+	parent := "metalkit0"
+	if nc.Bond != nil {
+		parent = nc.Bond.InterfaceName()
 	}
 
 	var lines []string

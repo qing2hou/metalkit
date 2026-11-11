@@ -216,6 +216,8 @@ export interface TargetDisk {
 }
 
 export interface BondConfig {
+  /** bond 设备名，缺省 bond0；字母开头，≤15 字符，仅字母/数字/下划线/中划线 */
+  name?: string
   mode?: string
   slaves?: string[]
   miimon?: number

@@ -266,7 +266,17 @@ base 路径 `/api/v1/profiles*`，**整个子树 Basic Auth**。Profile = 一份
     "prefix_len": 24,
     "gateway": "192.168.10.1",
     "dns": ["8.8.8.8"],
-    "nic_selector": "auto" | "by-mac:AA:BB:CC:DD:EE:FF" | "by-name:eno1"
+    "nic_selector": "auto" | "by-mac:AA:BB:CC:DD:EE:FF" | "by-name:eno1",
+    "vlan": 40,
+    "bond": {
+      "name": "bond0",
+      "mode": "active-backup" | "802.3ad",
+      "slaves": ["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"],
+      "miimon": 100,
+      "primary": "eno1",
+      "lacp_rate": "fast",
+      "xmit_hash_policy": "layer3+4"
+    }
   },
   "created_at": "2026-05-24T07:30:46Z",
   "updated_at": "2026-05-24T07:30:46Z",
@@ -283,6 +293,14 @@ base 路径 `/api/v1/profiles*`，**整个子树 Basic Auth**。Profile = 一份
 - `network.method = static`：必须填 `prefix_len` (1-32)、`gateway` (IPv4)、`dns[]` (IPv4)
 - `network.method = dhcp`：static-only 字段会被服务器侧抹平
 - `nic_selector`：`auto` / `by-mac:` (规范 6 段冒号 MAC) / `by-name:` (≤15 字符 Linux ifname)
+- `network.bond.name`：可选，缺省 `bond0`；字母开头、≤15 字符，仅
+  `[A-Za-z0-9_-]`（点号保留给 `<bond>.<vlan>`；斜杠/空格拒绝——名字会进
+  ifcfg / nmconnection 文件名）；不得为 `lo` 或 `ethN`
+- `network.bond.slaves`：2–8 个成员口，接口名或 MAC；`network.bond.mode`：
+  `active-backup` / `802.3ad`；设置 bond 后 `nic_selector` 强制为 `auto`
+- bond + `vlan`：`<bond>.<vlan>` 整体必须 ≤15 字符（如 15 字符名字 + VLAN
+  4094 会被拒绝）；成员口填 MAC 时，name 也不得等于该 MAC 解析出的网卡名——
+  后者在装机时拿到实时网卡清单后再校验
 
 ### 9.2 端点
 
@@ -345,6 +363,8 @@ URL 已经指明了哪台机器，PUT 既是新增也是覆盖。
 - `hostname`：三态字段——**不传 = 保持现值**；`""` = 清除覆盖（agent 展开
   profile.hostname_template）；非空 = 校验后存为本机覆盖。校验规则：RFC-1123 字符集 +
   各段 1–63 字符 + 总长 ≤253
+- `bond`：单机 bond 覆盖对象（结构同 `profile.network.bond`）。**整体替换**：
+  缺 `name` 会被规范化成 `bond0`，只想改 mode/slaves 的调用方必须一并带上名字
 
 ### 10.2 端点
 

@@ -703,8 +703,9 @@ func TestBondOverrideThreeState(t *testing.T) {
 		t.Fatalf("Bond after no-override upsert: got %+v, want nil", b.Bond)
 	}
 
-	// 2) Set a bond override (active-backup, two slaves).
+	// 2) Set a bond override (active-backup, two slaves, custom name).
 	bondRaw, _ := json.Marshal(profiles.BondConfig{
+		Name:   "mgmtbond",
 		Mode:   "active-backup",
 		Slaves: []string{"eno1", "eno2"},
 	})
@@ -719,6 +720,9 @@ func TestBondOverrideThreeState(t *testing.T) {
 	if b.Bond == nil || b.Bond.Mode != "active-backup" || len(b.Bond.Slaves) != 2 {
 		t.Fatalf("Bond after set: %+v", b.Bond)
 	}
+	if b.Bond.Name != "mgmtbond" {
+		t.Fatalf("Bond name after set: got %q, want mgmtbond", b.Bond.Name)
+	}
 
 	// 3) Upsert without Bond field → keep existing.
 	b, err = f.bindings.Upsert(ctx, UpsertInput{
@@ -728,7 +732,7 @@ func TestBondOverrideThreeState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upsert 3 (keep): %v", err)
 	}
-	if b.Bond == nil || b.Bond.Mode != "active-backup" {
+	if b.Bond == nil || b.Bond.Mode != "active-backup" || b.Bond.Name != "mgmtbond" {
 		t.Fatalf("Bond after keep upsert: %+v", b.Bond)
 	}
 

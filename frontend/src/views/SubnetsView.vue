@@ -257,7 +257,6 @@ const pagedTable = usePagedTable(list)
           </template>
         </el-table>
         <el-pagination
-          v-if="pagedTable.total.value > pagedTable.pageSize.value"
           v-model:current-page="pagedTable.currentPage.value"
           v-model:page-size="pagedTable.pageSize.value"
           :page-sizes="[20, 50, 100]"

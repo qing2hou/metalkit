@@ -270,6 +270,16 @@ func (a *AgentAPI) getSpec(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The profile validator can't see the effective VLAN when it comes from
+	// the subnet or the binding override (hasSubnet zeroes the profile's own
+	// value). Re-check <bond>.<vlan> here so an impossible interface name
+	// never reaches the agent — the agent's preflight would fail only after
+	// the operator already dispatched the install.
+	if err := profiles.ValidateBondVLANName(profile.Network.Bond, profile.Network.VLAN); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Per-binding SSH key selection: resolve ssh_key_ids into ready-to-write
 	// authorized_keys lines on the spec. The delete handler refuses to drop a
 	// key that is still referenced, so a missing key here is corrupt state —

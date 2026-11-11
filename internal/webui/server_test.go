@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -102,6 +103,37 @@ func TestHashedAssetServed(t *testing.T) {
 	}
 	if !strings.Contains(ct, "javascript") && !strings.Contains(ct, "css") {
 		t.Logf("GET %s content-type = %q (informational)", asset, ct)
+	}
+}
+
+// TestAllBuiltAssetsEmbedded is the regression test for the 2026-11-11
+// blank-UI incident: Go's //go:embed directory pattern silently skips files
+// whose names start with "_" or ".", and Vite emits chunks such as
+// _plugin-vue_export-helper-<hash>.css. The binary then references a file it
+// never embedded and the SPA fails to boot. Every file Vite wrote must be
+// present in the embedded FS.
+func TestAllBuiltAssetsEmbedded(t *testing.T) {
+	entries, err := os.ReadDir("assets/assets")
+	if err != nil {
+		t.Fatalf("read built assets: %v", err)
+	}
+	embedded, err := embeddedAssets.ReadDir("assets/assets")
+	if err != nil {
+		t.Fatalf("read embedded assets: %v", err)
+	}
+	have := make(map[string]bool, len(embedded))
+	for _, e := range embedded {
+		if !e.IsDir() {
+			have[e.Name()] = true
+		}
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if !have[e.Name()] {
+			t.Errorf("asset %q exists on disk but is missing from the embedded FS — //go:embed must use all:assets", e.Name())
+		}
 	}
 }
 
