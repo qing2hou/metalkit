@@ -18,6 +18,10 @@ import (
 func TestInstallGRUB_UEFI_HappyPath(t *testing.T) {
 	exec := newMockExec()
 	fs := newMockFS()
+	// The ESP must be discoverable for the NVRAM entry registration.
+	fs.files["/proc/mounts"] = []byte("/dev/sda1 /mnt/root/boot/efi vfat rw 0 0\n")
+	fs.files["/mnt/root/boot/efi/EFI/metalkit/shimx64.efi"] = []byte("shim")
+	fs.files["/mnt/root/usr/sbin/grub-install"] = []byte("#!/bin/sh\nexit 0\n")
 	deps := Deps{Exec: exec, FS: fs}
 
 	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "ubuntu"}}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
@@ -29,27 +33,33 @@ func TestInstallGRUB_UEFI_HappyPath(t *testing.T) {
 		t.Fatal("99-metalkit.cfg overlay must not be written")
 	}
 
-	// Host grub-install for UEFI, then chroot update-grub, then efibootmgr.
-	var sawInstall, sawUpdate, sawEFI bool
+	// Chroot (target) grub-install for UEFI, then chroot update-grub, then
+	// host efibootmgr for the NVRAM entry.
+	var sawInstall, sawHostInstall, sawUpdate, sawEFI bool
 	for _, c := range exec.Calls() {
 		switch c.Name {
 		case "grub-install":
-			sawInstall = true
-			full := strings.Join(c.Args, " ")
-			if !strings.Contains(full, "--target=x86_64-efi") {
-				t.Fatalf("grub-install missing UEFI target: %v", c.Args)
-			}
-			if !strings.Contains(full, "--efi-directory=/mnt/root/boot/efi") {
-				t.Fatalf("grub-install missing efi-directory: %v", c.Args)
-			}
-			if !strings.Contains(full, "--boot-directory=/mnt/root/boot") {
-				t.Fatalf("grub-install missing boot-directory: %v", c.Args)
-			}
-			if !strings.Contains(full, "--bootloader-id=metalkit") {
-				t.Fatalf("grub-install missing bootloader-id: %v", c.Args)
-			}
+			sawHostInstall = true
 		case "chroot":
-			if len(c.Args) >= 2 && c.Args[0] == "/mnt/root" && c.Args[1] == "update-grub" {
+			if len(c.Args) < 2 || c.Args[0] != "/mnt/root" {
+				continue
+			}
+			switch c.Args[1] {
+			case "grub-install":
+				sawInstall = true
+				full := strings.Join(c.Args, " ")
+				for _, want := range []string{
+					"--target=x86_64-efi",
+					"--efi-directory=/boot/efi",
+					"--boot-directory=/boot",
+					"--bootloader-id=metalkit",
+					"--no-nvram",
+				} {
+					if !strings.Contains(full, want) {
+						t.Fatalf("chroot grub-install missing %s: %v", want, c.Args)
+					}
+				}
+			case "update-grub":
 				sawUpdate = true
 			}
 		case "efibootmgr":
@@ -57,7 +67,10 @@ func TestInstallGRUB_UEFI_HappyPath(t *testing.T) {
 		}
 	}
 	if !sawInstall {
-		t.Fatal("grub-install not invoked")
+		t.Fatal("chroot grub-install not invoked")
+	}
+	if sawHostInstall {
+		t.Fatal("host grub-install must not run when the target has its own")
 	}
 	if !sawUpdate {
 		t.Fatal("update-grub not invoked")
@@ -67,9 +80,38 @@ func TestInstallGRUB_UEFI_HappyPath(t *testing.T) {
 	}
 }
 
+func TestInstallGRUB_UEFI_ChrootInstallFallsBackToHost(t *testing.T) {
+	exec := newMockExec()
+	exec.OnFull["chroot /mnt/root grub-install --target=x86_64-efi --efi-directory=/boot/efi --boot-directory=/boot --bootloader-id=metalkit --recheck --no-nvram"] =
+		mockExecResult{Err: errString("no grub-install in target")}
+	fs := newMockFS()
+	fs.files["/mnt/root/usr/sbin/grub-install"] = []byte("#!/bin/sh\nexit 0\n")
+	deps := Deps{Exec: exec, FS: fs}
+
+	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "ubuntu"}}, "/mnt/root", "/dev/sda", "/boot/efi"); err != nil {
+		t.Fatalf("host fallback should succeed: %v", err)
+	}
+
+	var sawHostInstall bool
+	for _, c := range exec.Calls() {
+		if c.Name == "grub-install" {
+			sawHostInstall = true
+			full := strings.Join(c.Args, " ")
+			if !strings.Contains(full, "--efi-directory=/mnt/root/boot/efi") {
+				t.Fatalf("host fallback missing efi-directory: %v", c.Args)
+			}
+		}
+	}
+	if !sawHostInstall {
+		t.Fatal("host grub-install fallback not invoked")
+	}
+}
+
 func TestInstallGRUB_BIOS_HappyPath(t *testing.T) {
 	exec := newMockExec()
-	deps := Deps{Exec: exec, FS: newMockFS()}
+	fs := newMockFS()
+	fs.files["/mnt/root/usr/sbin/grub-install"] = []byte("#!/bin/sh\nexit 0\n")
+	deps := Deps{Exec: exec, FS: fs}
 
 	if err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "ubuntu"}}, "/mnt/root", "/dev/sda", ""); err != nil {
 		t.Fatalf("BIOS install should succeed: %v", err)
@@ -78,19 +120,20 @@ func TestInstallGRUB_BIOS_HappyPath(t *testing.T) {
 	var sawBIOS, sawUpdate bool
 	for _, c := range exec.Calls() {
 		switch c.Name {
-		case "grub-install":
-			sawBIOS = true
-			full := strings.Join(c.Args, " ")
-			if !strings.Contains(full, "--target=i386-pc") {
-				t.Fatalf("BIOS grub-install missing --target=i386-pc: %v", c.Args)
-			}
-			if !strings.Contains(full, "--boot-directory=/mnt/root/boot") {
-				t.Fatalf("BIOS grub-install missing boot-directory: %v", c.Args)
-			}
-			if c.Args[len(c.Args)-1] != "/dev/sda" {
-				t.Fatalf("BIOS grub-install missing disk target /dev/sda: %v", c.Args)
-			}
 		case "chroot":
+			if len(c.Args) >= 2 && c.Args[0] == "/mnt/root" && c.Args[1] == "grub-install" {
+				sawBIOS = true
+				full := strings.Join(c.Args, " ")
+				if !strings.Contains(full, "--target=i386-pc") {
+					t.Fatalf("BIOS grub-install missing --target=i386-pc: %v", c.Args)
+				}
+				if !strings.Contains(full, "--boot-directory=/boot") {
+					t.Fatalf("BIOS grub-install missing boot-directory: %v", c.Args)
+				}
+				if c.Args[len(c.Args)-1] != "/dev/sda" {
+					t.Fatalf("BIOS grub-install missing disk target /dev/sda: %v", c.Args)
+				}
+			}
 			if len(c.Args) >= 2 && c.Args[0] == "/mnt/root" && c.Args[1] == "update-grub" {
 				sawUpdate = true
 			}
@@ -108,8 +151,12 @@ func TestInstallGRUB_BIOS_HappyPath(t *testing.T) {
 
 func TestInstallGRUB_GrubInstallFailureSurfaces(t *testing.T) {
 	exec := newMockExec()
+	exec.OnFull["chroot /mnt/root grub-install --target=x86_64-efi --efi-directory=/boot/efi --boot-directory=/boot --bootloader-id=metalkit --recheck --no-nvram"] =
+		mockExecResult{Err: errString("no grub-install in target")}
 	exec.On["grub-install"] = mockExecResult{Err: errString("device not found")}
-	deps := Deps{Exec: exec, FS: newMockFS()}
+	fs := newMockFS()
+	fs.files["/mnt/root/usr/sbin/grub-install"] = []byte("#!/bin/sh\nexit 0\n")
+	deps := Deps{Exec: exec, FS: fs}
 	err := InstallGRUB(context.Background(), deps, jobs.InstallSpec{Profile: profiles.Profile{OSFamily: "ubuntu"}}, "/mnt/root", "/dev/sda", "/boot/efi")
 	if err == nil {
 		t.Fatal("grub-install failure must surface")

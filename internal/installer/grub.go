@@ -505,10 +505,26 @@ func efiEntryMatches(efibootmgrOut, label, loaderFile string) bool {
 	return false
 }
 
-// installGRUBHostDebian uses the HOST's grub-install (Debian live image)
-// to lay down a bootloader, then falls back through chroot update-grub
-// variants. This is the original path and works for Debian/Ubuntu cloud
-// images whose /boot/grub layout matches the host's grub-install output.
+// targetHasGrubInstall reports whether the mounted target ships its own
+// grub-install. Debian/Ubuntu images do; minimal/cloud images from other
+// families may not, in which case the host binary remains the fallback.
+func targetHasGrubInstall(deps Deps, mntRoot string) bool {
+	for _, p := range []string{
+		filepath.Join(mntRoot, "usr", "sbin", "grub-install"),
+		filepath.Join(mntRoot, "sbin", "grub-install"),
+	} {
+		if deps.FS.Exists(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// installGRUBHostDebian installs the bootloader for Debian/Ubuntu targets.
+// It prefers the target's own grub-install through a chroot so the EFI core,
+// module set, and prefix all match the target's GRUB version; the host binary
+// (Debian live, GRUB 2.06) is only a fallback for images without one. It then
+// regenerates grub.cfg through chroot update-grub variants.
 func installGRUBHostDebian(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot, devPath, espMount string) error {
 	arch := archFromSpec(spec)
 	bootDir := filepath.Join(mntRoot, "boot")
@@ -518,27 +534,106 @@ func installGRUBHostDebian(ctx context.Context, deps Deps, spec jobs.InstallSpec
 	}
 
 	if espMount != "" {
-		if _, err := deps.Exec.Run(ctx,
-			"grub-install",
-			"--target="+arch.EFIType,
-			"--efi-directory="+efiDir,
-			"--boot-directory="+bootDir,
-			"--bootloader-id=metalkit",
-			"--recheck",
-		); err != nil {
-			return fmt.Errorf("install: grub-install (uefi, dev %s): %w", devPath, err)
+		// chrootEfiDir is the ESP path as seen inside the target chroot.
+		chrootEfiDir := "/boot/efi"
+		if rel, err := filepath.Rel(mntRoot, efiDir); err == nil && rel != "" && rel != "." {
+			chrootEfiDir = "/" + rel
+		}
+
+		// Prefer the target's own grub-install. The host grub-install (Debian
+		// live, GRUB 2.06) replaces the target's /boot/grub/<arch> module set;
+		// an Ubuntu 24.04 target ships GRUB 2.12 and its generated grub.cfg
+		// contains `insmod bli`, so the host install leaves GRUB looking for a
+		// module it just deleted ("file '/grub/x86_64-efi/bli.mod' not found").
+		// The host core also embeds `search --file /.disk/info` from the live
+		// media. Running the target's grub-install keeps modules, embedded
+		// prefix, and grub.cfg from the same GRUB version.
+		//
+		// --no-nvram: don't depend on efivars being writable through the
+		// chroot; the host registers the boot entry explicitly below.
+		installed := false
+		if targetHasGrubInstall(deps, mntRoot) {
+			if out, err := deps.Exec.Run(ctx,
+				"chroot", mntRoot, "grub-install",
+				"--target="+arch.EFIType,
+				"--efi-directory="+chrootEfiDir,
+				"--boot-directory=/boot",
+				"--bootloader-id=metalkit",
+				"--recheck",
+				"--no-nvram",
+			); err == nil {
+				installed = true
+				if deps.Logger != nil {
+					deps.Logger.Info("chroot grub-install succeeded", "efi_dir", chrootEfiDir, "out", string(out))
+				}
+			} else {
+				if deps.Logger != nil {
+					deps.Logger.Warn("chroot grub-install failed, falling back to host grub-install",
+						"err", err, "out", string(out))
+				}
+			}
+		}
+		if installed {
+			if err := registerEFIBootEntryRHEL(ctx, deps, mntRoot, devPath, "metalkit", arch.Loaders); err != nil {
+				// Image's fallback \EFI\BOOT\BOOTX64.EFI may still boot, but
+				// surface the problem instead of silently relying on it.
+				if deps.Logger != nil {
+					deps.Logger.Warn("EFI NVRAM entry creation failed after chroot grub-install", "err", err)
+				}
+				if deps.Reporter != nil {
+					_ = deps.Reporter.Log(ctx, "warn",
+						fmt.Sprintf("EFI NVRAM boot entry not created: %v", err))
+				}
+			}
+		} else {
+			// Target lacks grub-install (or it failed): fall back to the host
+			// binary. This is the historical path and can mix module versions,
+			// so warn loudly.
+			if _, err := deps.Exec.Run(ctx,
+				"grub-install",
+				"--target="+arch.EFIType,
+				"--efi-directory="+efiDir,
+				"--boot-directory="+bootDir,
+				"--bootloader-id=metalkit",
+				"--recheck",
+			); err != nil {
+				return fmt.Errorf("install: grub-install (uefi, dev %s): %w", devPath, err)
+			}
 		}
 	} else {
 		if arch.IsArm {
 			return fmt.Errorf("install: BIOS boot not supported on arm64; use a UEFI arm64 image")
 		}
-		if _, err := deps.Exec.Run(ctx,
-			"grub-install",
-			"--target=i386-pc",
-			"--boot-directory="+bootDir,
-			devPath,
-		); err != nil {
-			return fmt.Errorf("install: grub-install (bios, dev %s): %w", devPath, err)
+		// Same rationale as UEFI: the target's modules and core image must
+		// come from the same GRUB build. Fall back to the host only if the
+		// target has no grub-install.
+		installed := false
+		if targetHasGrubInstall(deps, mntRoot) {
+			if out, err := deps.Exec.Run(ctx,
+				"chroot", mntRoot, "grub-install",
+				"--target=i386-pc",
+				"--boot-directory=/boot",
+				"--recheck",
+				devPath,
+			); err == nil {
+				installed = true
+				if deps.Logger != nil {
+					deps.Logger.Info("chroot grub-install (bios) succeeded", "out", string(out))
+				}
+			} else if deps.Logger != nil {
+				deps.Logger.Warn("chroot grub-install (bios) failed, falling back to host",
+					"err", err, "out", string(out))
+			}
+		}
+		if !installed {
+			if _, err := deps.Exec.Run(ctx,
+				"grub-install",
+				"--target=i386-pc",
+				"--boot-directory="+bootDir,
+				devPath,
+			); err != nil {
+				return fmt.Errorf("install: grub-install (bios, dev %s): %w", devPath, err)
+			}
 		}
 	}
 
@@ -636,6 +731,190 @@ func standardKernelMetaPackage(spec jobs.InstallSpec, arch archInfo) string {
 	return arch.DebianMetaKernel
 }
 
+// ubuntuKernelPackages resolves the repo's current standard kernel from the
+// linux-image-generic meta and returns the exact image + modules-extra
+// package names. hpsa/smartpqi live in linux-modules-extra, so both are
+// required. Exact names avoid linux-generic's linux-firmware, microcode, and
+// headers dependencies (~1 GB on noble).
+func ubuntuKernelPackages(ctx context.Context, deps Deps, mntRoot string) ([]string, error) {
+	out, err := deps.Exec.Run(ctx, "chroot", mntRoot, "apt-cache", "depends", "linux-image-generic")
+	if err != nil {
+		return nil, fmt.Errorf("apt-cache depends linux-image-generic: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		// Lines look like "  Depends: linux-image-6.8.0-149-generic".
+		pkg := fields[len(fields)-1]
+		if !strings.HasPrefix(pkg, "linux-image-") || !strings.HasSuffix(pkg, "-generic") ||
+			strings.Contains(pkg, "<") || pkg == "linux-image-generic" {
+			continue
+		}
+		ver := strings.TrimSuffix(strings.TrimPrefix(pkg, "linux-image-"), "-generic")
+		if ver == "" || !strings.ContainsAny(ver, "0123456789") {
+			continue
+		}
+		return []string{pkg, "linux-modules-extra-" + ver + "-generic"}, nil
+	}
+	return nil, fmt.Errorf("no linux-image-<version>-generic dependency in apt-cache output")
+}
+
+
+// chrootAptMirror is one candidate mirror for the chroot apt-get update.
+// TUNA is first because it is fast from CN networks, but it returns 403 on
+// some egress paths (observed on the 10.17.30.0/24 lab network), so the
+// installer retries the remaining mirrors before declaring apt unusable.
+type chrootAptMirror struct {
+	name      string
+	ubuntu    string
+	debian    string
+	debianSec string
+}
+
+var chrootAptMirrors = []chrootAptMirror{
+	{
+		name:      "tuna",
+		ubuntu:    "https://mirrors.tuna.tsinghua.edu.cn/ubuntu",
+		debian:    "https://mirrors.tuna.tsinghua.edu.cn/debian",
+		debianSec: "https://mirrors.tuna.tsinghua.edu.cn/debian-security",
+	},
+	{
+		name:      "aliyun",
+		ubuntu:    "https://mirrors.aliyun.com/ubuntu",
+		debian:    "https://mirrors.aliyun.com/debian",
+		debianSec: "https://mirrors.aliyun.com/debian-security",
+	},
+	{
+		name:      "ustc",
+		ubuntu:    "https://mirrors.ustc.edu.cn/ubuntu",
+		debian:    "https://mirrors.ustc.edu.cn/debian",
+		debianSec: "https://mirrors.ustc.edu.cn/debian-security",
+	},
+	{
+		name:      "upstream",
+		ubuntu:    "http://archive.ubuntu.com/ubuntu",
+		debian:    "http://deb.debian.org/debian",
+		debianSec: "http://deb.debian.org/debian-security",
+	},
+}
+
+// ubuntuCodename reads VERSION_CODENAME from the target rootfs so the
+// rewritten ubuntu.sources matches the image (noble, jammy, …). Falls back
+// to noble when os-release is unreadable.
+func ubuntuCodename(deps Deps, mntRoot string) string {
+	data, err := deps.FS.ReadFile(filepath.Join(mntRoot, "etc", "os-release"))
+	if err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+			if !ok || key != "VERSION_CODENAME" {
+				continue
+			}
+			value = strings.Trim(value, `"'`)
+			if isSimpleCodename(value) {
+				return value
+			}
+		}
+	}
+	return "noble"
+}
+
+func isSimpleCodename(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// writeChrootAPTMirror rewrites the target's apt sources to one mirror.
+// Ubuntu 24.04+ uses deb822 ubuntu.sources; Debian's cloud images use
+// mirror+file:/// with /etc/apt/mirrors/*.list.
+func writeChrootAPTMirror(deps Deps, mntRoot string, ubuntu bool, m chrootAptMirror) error {
+	if ubuntu {
+		codename := ubuntuCodename(deps, mntRoot)
+		body := fmt.Sprintf(`Types: deb
+URIs: %s
+Suites: %s %s-updates %s-backports
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: %s
+Suites: %s-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+`, m.ubuntu, codename, codename, codename, m.ubuntu, codename)
+		dir := filepath.Join(mntRoot, "etc", "apt", "sources.list.d")
+		if err := deps.FS.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		if err := deps.FS.WriteFile(filepath.Join(dir, "ubuntu.sources"), []byte(body), 0o644); err != nil {
+			return err
+		}
+		if deps.Logger != nil {
+			deps.Logger.Info("regenerate-initramfs-debian: rewrote ubuntu.sources",
+				"mirror", m.name, "suite", codename)
+		}
+		return nil
+	}
+
+	dir := filepath.Join(mntRoot, "etc", "apt", "mirrors")
+	if err := deps.FS.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := deps.FS.WriteFile(filepath.Join(dir, "debian.list"), []byte(m.debian+"\n"), 0o644); err != nil {
+		return err
+	}
+	if err := deps.FS.WriteFile(filepath.Join(dir, "debian-security.list"), []byte(m.debianSec+"\n"), 0o644); err != nil {
+		return err
+	}
+	if deps.Logger != nil {
+		deps.Logger.Info("regenerate-initramfs-debian: switched apt mirror", "mirror", m.name)
+	}
+	return nil
+}
+
+// chrootAptUpdate tries each mirror until apt-get update succeeds. Returns
+// true if one worked. The last attempted mirror stays configured even on
+// total failure, so a manual retry on the box uses the least-bad option.
+func chrootAptUpdate(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot string) bool {
+	ubuntu := isUbuntuFamily(spec.Profile.OSFamily)
+	var lastErr error
+	for _, m := range chrootAptMirrors {
+		if err := writeChrootAPTMirror(deps, mntRoot, ubuntu, m); err != nil {
+			lastErr = err
+			if deps.Logger != nil {
+				deps.Logger.Warn("regenerate-initramfs-debian: write apt mirror failed",
+					"mirror", m.name, "err", err)
+			}
+			continue
+		}
+		out, err := deps.Exec.Run(ctx, "chroot", mntRoot, "apt-get", "update")
+		if err == nil {
+			if deps.Logger != nil {
+				deps.Logger.Info("regenerate-initramfs-debian: apt-get update ok", "mirror", m.name)
+			}
+			return true
+		}
+		lastErr = err
+		if deps.Logger != nil {
+			deps.Logger.Warn("regenerate-initramfs-debian: apt-get update failed",
+				"mirror", m.name, "err", err, "out", string(out))
+		}
+	}
+	if deps.Logger != nil {
+		deps.Logger.Warn("regenerate-initramfs-debian: all apt mirrors failed", "err", lastErr)
+	}
+	return false
+}
+
+
 func regenerateInitramfsDebian(ctx context.Context, deps Deps, spec jobs.InstallSpec, mntRoot, devPath string) {
 	arch := archFromSpec(spec)
 	criticalDrivers := []string{"megaraid_sas", "mpt3sas", "hpsa", "aacraid", "smartpqi"}
@@ -719,43 +998,16 @@ func regenerateInitramfsDebian(ctx context.Context, deps Deps, spec jobs.Install
 		}
 	}
 
-	// Point apt at TUNA (Tsinghua mirror) for fast downloads from China.
-	// Debian cloud images default to deb.debian.org which is slow from
-	// CN networks and can time out mid-install. We rewrite the mirror
-	// files in-place; the sources.list uses mirror+file:/// so changing
-	// the mirror file is sufficient. Best-effort: if the file layout
-	// differs (older Debian releases), apt update just uses the default.
-	if isUbuntuFamily(spec.Profile.OSFamily) {
-		// Ubuntu 24.04 (noble) 用 deb822 的 /etc/apt/sources.list.d/ubuntu.sources，
-		// Debian 的 mirrors/debian.list 机制对它无效（实测：换源后仍走 archive.ubuntu.com
-		// 且 linux-image-amd64 在 Ubuntu 源里根本不存在）。整文件重写为 TUNA。
-		tunaUbuntu := []byte(`Types: deb
-URIs: https://mirrors.tuna.tsinghua.edu.cn/ubuntu
-Suites: noble noble-updates noble-backports
-Components: main universe restricted multiverse
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-Types: deb
-URIs: https://mirrors.tuna.tsinghua.edu.cn/ubuntu
-Suites: noble-security
-Components: main universe restricted multiverse
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-`)
-		sourcesDir := filepath.Join(mntRoot, "etc", "apt", "sources.list.d")
-		_ = deps.FS.MkdirAll(sourcesDir, 0o755)
-		_ = deps.FS.WriteFile(filepath.Join(sourcesDir, "ubuntu.sources"), tunaUbuntu, 0o644)
-		if deps.Logger != nil {
-			deps.Logger.Info("regenerate-initramfs-debian: rewrote ubuntu.sources to TUNA")
-		}
-	} else {
-		mirrorDir := filepath.Join(mntRoot, "etc", "apt", "mirrors")
-		_ = deps.FS.MkdirAll(mirrorDir, 0o755)
-		tunaDebian := []byte("https://mirrors.tuna.tsinghua.edu.cn/debian\n")
-		tunaSecurity := []byte("https://mirrors.tuna.tsinghua.edu.cn/debian-security\n")
-		_ = deps.FS.WriteFile(filepath.Join(mirrorDir, "debian.list"), tunaDebian, 0o644)
-		_ = deps.FS.WriteFile(filepath.Join(mirrorDir, "debian-security.list"), tunaSecurity, 0o644)
-		if deps.Logger != nil {
-			deps.Logger.Info("regenerate-initramfs-debian: switched apt mirror to TUNA")
+	// Point apt at a distro mirror for the kernel download. TUNA is the
+	// preferred (fastest from CN) mirror, but some networks block it — retry
+	// the update against fallbacks instead of giving up on the first 403.
+	// The mirror writers rewrite the image's own source files; on Ubuntu the
+	// suite name comes from the target's os-release so jammy/noble images
+	// don't get each other's repos.
+	if !chrootAptUpdate(ctx, deps, spec, mntRoot) {
+		if deps.Reporter != nil {
+			_ = deps.Reporter.Log(ctx, "warn",
+				"apt-get update failed on all mirrors — initramfs may stay incomplete")
 		}
 	}
 
@@ -780,10 +1032,31 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 		// Continue anyway — local apt cache may still have the package.
 	}
 
-	installArgs = []string{
-		mntRoot, "apt-get", "install", "-y",
-		standardKernelMetaPackage(spec, arch),
+	// Ubuntu's linux-generic meta pulls linux-firmware (~hundreds of MB),
+	// microcode, and headers; the installer only needs a kernel whose module
+	// tree has the storage drivers. Resolve the repo's current image package
+	// and install it + modules-extra (where hpsa/smartpqi live) without
+	// recommends. Fall back to the meta package if resolution fails.
+	packages := []string{standardKernelMetaPackage(spec, arch)}
+	installOpts := []string{"-y"}
+	if isUbuntuFamily(spec.Profile.OSFamily) {
+		if pkgs, err := ubuntuKernelPackages(ctx, deps, mntRoot); err == nil {
+			packages = pkgs
+			installOpts = append(installOpts, "--no-install-recommends")
+			if deps.Logger != nil {
+				deps.Logger.Info("regenerate-initramfs-debian: installing pinned Ubuntu kernel packages",
+					"packages", strings.Join(pkgs, ","))
+			}
+		} else if deps.Logger != nil {
+			deps.Logger.Warn("regenerate-initramfs-debian: kernel package resolution failed, using meta package",
+				"err", err)
+		}
 	}
+	installArgs = []string{
+		mntRoot, "apt-get", "install",
+	}
+	installArgs = append(installArgs, installOpts...)
+	installArgs = append(installArgs, packages...)
 	if out, err := deps.Exec.Run(ctx, "chroot", installArgs...); err != nil {
 		if deps.Logger != nil {
 			deps.Logger.Warn("regenerate-initramfs-debian: apt-get install linux-image-amd64 failed",
