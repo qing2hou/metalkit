@@ -371,6 +371,10 @@ export interface Job {
   finished_at?: string
   created_by?: string
   retry_of_job_id?: string
+  /** BMC 地址：优先取已录入凭据的 IP（orchestrator PXE 实际使用），否则取机器最近上报值。 */
+  bmc_ip?: string
+  /** 该机器是否已录入 BMC 凭据（纳管）。 */
+  bmc_managed?: boolean
 }
 
 export interface JobLog {

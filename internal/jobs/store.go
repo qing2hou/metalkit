@@ -78,6 +78,13 @@ type Job struct {
 	FinishedAt   *time.Time `json:"finished_at,omitempty"`
 	CreatedBy    string     `json:"created_by"`
 	RetryOfJobID string     `json:"retry_of_job_id,omitempty"`
+	// BMCIP / BMCManaged are read-only UI enrichment: the address the
+	// orchestrator uses for PXE (bmc_credentials.ip), falling back to the
+	// machine's latest agent report when no credential exists. They are not
+	// stored on the jobs row itself. BMCManaged is true when a credential row
+	// exists for the machine.
+	BMCIP      string `json:"bmc_ip,omitempty"`
+	BMCManaged bool   `json:"bmc_managed,omitempty"`
 }
 
 // CreateInput is what the API / orchestrator passes.
@@ -175,7 +182,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	row := s.db.QueryRowContext(ctx, selectJobSQL+` WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, selectJobSQL+` WHERE j.id = ?`, id)
 	j, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -200,20 +207,20 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]Job, error) {
 		if err != nil {
 			return nil, err
 		}
-		conds = append(conds, "machine_uuid = ?")
+		conds = append(conds, "j.machine_uuid = ?")
 		args = append(args, muuid)
 	}
 	if f.Status != "" {
 		if !validJobStatuses[f.Status] {
 			return nil, fmt.Errorf("status %q: invalid", f.Status)
 		}
-		conds = append(conds, "status = ?")
+		conds = append(conds, "j.status = ?")
 		args = append(args, f.Status)
 	}
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
-	q += " ORDER BY created_at DESC, id DESC"
+	q += " ORDER BY j.created_at DESC, j.id DESC"
 	limit := f.Limit
 	if limit <= 0 {
 		limit = 100
@@ -245,7 +252,7 @@ func (s *Store) CurrentForMachine(ctx context.Context, machineUUID string) (*Job
 		return nil, err
 	}
 	row := s.db.QueryRowContext(ctx,
-		selectJobSQL+` WHERE machine_uuid = ? AND status IN ('pending','running') LIMIT 1`,
+		selectJobSQL+` WHERE j.machine_uuid = ? AND j.status IN ('pending','running') LIMIT 1`,
 		muuid)
 	j, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -512,9 +519,20 @@ func (s *Store) Logs(ctx context.Context, jobID string, sinceID int64, limit int
 
 // ---- internal helpers ----
 
-const selectJobSQL = `SELECT id, machine_uuid, type, image_id, profile_id,
-       status, stage, error, created_at, started_at, finished_at,
-       created_by, retry_of_job_id FROM jobs`
+// selectJobSQL projects the job row plus its read-only BMC display fields.
+// Credential IP wins (the orchestrator talks to that address); the machine's
+// latest agent report is the fallback. json_valid guards a hand-corrupted
+// reports row: json_extract would otherwise raise and 500 Get/List — including
+// CurrentForMachine, the agent's job-polling path.
+const selectJobSQL = `SELECT j.id, j.machine_uuid, j.type, j.image_id, j.profile_id,
+       j.status, j.stage, j.error, j.created_at, j.started_at, j.finished_at,
+       j.created_by, j.retry_of_job_id,
+       COALESCE(b.ip, json_extract(CASE WHEN json_valid(r.body) THEN r.body END, '$.bmc.ip'), '') AS bmc_ip,
+       b.machine_uuid IS NOT NULL AS bmc_managed
+FROM jobs j
+LEFT JOIN machines m        ON m.uuid = j.machine_uuid
+LEFT JOIN reports r         ON r.id = m.latest_report
+LEFT JOIN bmc_credentials b ON b.machine_uuid = j.machine_uuid`
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows.
 type rowScanner interface {
@@ -529,7 +547,7 @@ func scanJob(r rowScanner) (*Job, error) {
 	if err := r.Scan(
 		&j.ID, &j.MachineUUID, &j.Type, &j.ImageID, &j.ProfileID,
 		&j.Status, &stage, &errStr, &createdAt, &startedAt, &finishedAt,
-		&j.CreatedBy, &retryOf,
+		&j.CreatedBy, &retryOf, &j.BMCIP, &j.BMCManaged,
 	); err != nil {
 		return nil, err
 	}

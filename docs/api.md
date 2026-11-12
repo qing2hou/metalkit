@@ -653,7 +653,9 @@ got, err := bmcStore.GetWithPassword(ctx, machineUUID)
   "started_at": null,
   "finished_at": null,
   "created_by": "orchestrator",
-  "retry_of_job_id": ""
+  "retry_of_job_id": "",
+  "bmc_ip": "10.0.0.21",
+  "bmc_managed": true
 }
 ```
 
@@ -661,6 +663,14 @@ got, err := bmcStore.GetWithPassword(ctx, machineUUID)
 - `status` ∈ `pending` / `running` / `succeeded` / `failed` / `cancelled`
 - 同一 machine_uuid **同时只能有一个非终态 job**（UNIQUE partial index 强制）
 - 失败 job 不会自动重试。重新装请管理员发起新的 job（可以带 `retry_of_job_id`）
+- `bmc_ip` / `bmc_managed` 是只读展示字段，不落在 jobs 行上（仅查询路径填充，`Create`
+  返回的内存对象不含）：`bmc_ip` 优先取 `bmc_credentials.ip`（orchestrator PXE 实际使用的
+  地址），无凭据时回退到机器最近一次上报的 `bmc.ip`；两者都没有则为空（JSON 中省略），
+  损坏的 report body 不会让接口报错。`bmc_managed=true` 表示该机器已录入 BMC 凭据；false
+  时同样省略。凡返回 `Job` 的端点（含 §13 的 agent `/current`、`/claim`）都带这两个字段。
+  作业列表的「BMC」列即渲染它们。
+- 注意与机器列表（§9）的 `bmc_ip` 口径不同：机器列表只显示 agent 上报值，作业这里凭据
+  优先；两者可能不同（例如凭据 IP 已改、机器尚未重新上报）。
 
 ### 12.2 端点（全部需要 Basic Auth）
 
