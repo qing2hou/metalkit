@@ -198,6 +198,19 @@ const pagedTable = usePagedTable(filtered)
               </router-link>
             </template>
           </el-table-column>
+          <el-table-column label="BMC" min-width="130">
+            <template #default="{ row }">
+              <span v-if="row.bmc_ip" class="mono">{{ row.bmc_ip }}</span>
+              <span v-else class="mk-subtle">—</span>
+              <el-tag
+                v-if="row.bmc_managed"
+                type="success"
+                size="small"
+                disable-transitions
+                style="margin-left: 6px"
+              >纳管</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column prop="stage" label="阶段" min-width="150" />
           <el-table-column label="创建" width="150">
             <template #default="{ row }">{{ fmtAbsolute(row.created_at) }}</template>

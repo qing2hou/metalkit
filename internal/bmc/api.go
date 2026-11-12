@@ -6,6 +6,7 @@ import (
 
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"metalkit/internal/apiutil"
 	"net/http"
@@ -51,6 +52,9 @@ type Tester interface {
 	// BootForPXE 设 next-boot=pxe 然后 power cycle。一次性，目标机走完
 	// live 后下次再重启就回到正常引导链（不会反复 PXE）。
 	BootForPXE(ctx context.Context, cred PasswordedCredential) error
+	// BootForPXEMode 同上，但允许显式请求固件模式：auto（不带 EFI 标志）、
+	// uefi（options=efiboot）、bios（不带 EFI 标志）。
+	BootForPXEMode(ctx context.Context, cred PasswordedCredential, mode string) error
 }
 
 // ReportReader is the inventory link the reconcile endpoint needs: just the
@@ -385,6 +389,22 @@ func (a *API) onboard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "ipmi not available on this controller")
 		return
 	}
+	// Optional body: {"boot_mode":"auto|uefi|bios"}. Omitting it keeps the
+	// historical auto behaviour (no EFI boot flag).
+	var in struct {
+		BootMode string `json:"boot_mode,omitempty"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	bootMode, err := validateBootMode(in.BootMode)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	uuid := strings.ToLower(strings.TrimSpace(r.PathValue("uuid")))
 	cred, err := a.store.GetWithPassword(r.Context(), uuid)
 	if errors.Is(err, ErrNotFound) {
@@ -401,16 +421,16 @@ func (a *API) onboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 20s：BootForPXE 内部要跑两次 ipmitool 子命令（set bootdev + power cycle），
+	// 20s：BootForPXEMode 内部要跑两次 ipmitool 子命令（set bootdev + power cycle），
 	// 加 BMC 自己的 ACK 延迟，给一点余量。
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	if perr := a.tester.BootForPXE(ctx, *cred); perr != nil {
+	if perr := a.tester.BootForPXEMode(ctx, *cred, bootMode); perr != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": perr.Error()})
 		return
 	}
-	a.logger.Info("bmc onboard", "uuid", uuid, "ip", cred.IP, "by", apiutil.RequestActor(r))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "onboard"})
+	a.logger.Info("bmc onboard", "uuid", uuid, "ip", cred.IP, "boot_mode", bootMode, "by", apiutil.RequestActor(r))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "onboard", "boot_mode": bootMode})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

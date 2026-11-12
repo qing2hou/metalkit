@@ -11,6 +11,20 @@ import (
 var smbiosUUIDRE = regexp.MustCompile(
 	`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
+// validateBootMode validates the optional PXE boot-mode request for the
+// onboard endpoint. Empty defaults to "auto" (no EFI boot flag).
+func validateBootMode(v string) (string, error) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	switch v {
+	case "":
+		return "auto", nil
+	case "auto", "uefi", "bios":
+		return v, nil
+	default:
+		return "", fmt.Errorf("boot_mode %q: must be auto, uefi or bios", v)
+	}
+}
+
 // IPMI usernames per spec are ≤16 chars ASCII, but vendors are loose; allow
 // printable ASCII no whitespace up to 64 to be forgiving.
 var usernameRE = regexp.MustCompile(`^[!-~]{1,64}$`)

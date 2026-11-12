@@ -123,6 +123,34 @@ func TestValidateNetwork_BondLACPDefaults(t *testing.T) {
 	}
 }
 
+func TestValidateBootMode(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"", "", true},
+		{"auto", "", true},
+		{" AUTO ", "", true},
+		{"uefi", "uefi", true},
+		{"BIOS", "bios", true},
+		{"legacy", "", false},
+		{"efi", "", false},
+	}
+	for _, tc := range cases {
+		got, err := ValidateBootMode(tc.in)
+		if tc.ok {
+			if err != nil {
+				t.Errorf("ValidateBootMode(%q): unexpected err %v", tc.in, err)
+			} else if got != tc.want {
+				t.Errorf("ValidateBootMode(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		} else if err == nil {
+			t.Errorf("ValidateBootMode(%q): expected error, got %q", tc.in, got)
+		}
+	}
+}
+
 func TestValidateNetwork_BondNameDefaultsAndCanonicalises(t *testing.T) {
 	// Omitted name → bond0, so pre-name-era configs render identically.
 	nc, err := validateNetwork(ncJSON(t, map[string]any{

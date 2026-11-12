@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -47,13 +48,34 @@ func TestDetectBootMode(t *testing.T) {
 	})
 }
 
-func TestRequireUEFI(t *testing.T) {
-	fs := newMockFS()
-	if err := RequireUEFI(fs); err == nil {
-		t.Fatal("expected BIOS to fail RequireUEFI")
+func TestValidateRequestedBootMode(t *testing.T) {
+	cases := []struct {
+		requested, detected string
+		wantErr             bool
+	}{
+		{"", "uefi", false},
+		{"", "bios", false},
+		{"auto", "uefi", false},
+		{"auto", "bios", false},
+		{"uefi", "uefi", false},
+		{"bios", "bios", false},
+		{"uefi", "bios", true},
+		{"bios", "uefi", true},
+		{"legacy", "bios", true},
 	}
-	_ = fs.MkdirAll("/sys/firmware/efi/efivars", 0o755)
-	if err := RequireUEFI(fs); err != nil {
-		t.Fatalf("UEFI environment should pass: %v", err)
+	for _, tc := range cases {
+		err := ValidateRequestedBootMode(tc.requested, tc.detected)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("ValidateRequestedBootMode(%q, %q): expected error", tc.requested, tc.detected)
+			}
+		} else if err != nil {
+			t.Errorf("ValidateRequestedBootMode(%q, %q): unexpected error %v", tc.requested, tc.detected, err)
+		}
+	}
+
+	err := ValidateRequestedBootMode("bios", "uefi")
+	if err == nil || !strings.Contains(err.Error(), "BMC/BIOS") {
+		t.Fatalf("mismatch error is not actionable: %v", err)
 	}
 }

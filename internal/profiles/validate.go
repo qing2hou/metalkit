@@ -209,6 +209,23 @@ var (
 	}
 )
 
+// ValidateBootMode canonicalises a profile's requested firmware boot mode.
+// Empty and "auto" both mean "follow whatever mode the machine booted in";
+// "uefi" and "bios" are explicit target modes. Bindings have their own
+// variant because an empty override means "inherit profile" there, not auto.
+func ValidateBootMode(mode string) (string, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "auto" {
+		mode = ""
+	}
+	switch mode {
+	case "", "uefi", "bios":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("boot_mode %q: must be auto, uefi or bios", mode)
+	}
+}
+
 // ValidateTargetDisk parses+validates the JSON blob. Returns the
 // canonicalised form (mode lowercased, value trimmed) for storage.
 // Exported so bindings can validate per-binding target_disk overrides

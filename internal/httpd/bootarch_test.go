@@ -64,6 +64,11 @@ func TestIPXEScriptPerArch(t *testing.T) {
 	if !strings.Contains(bodyX, "ethdevice-timeout=90") {
 		t.Errorf("default script missing ethdevice-timeout: %s", bodyX)
 	}
+	// BMC virtual displays may omit EDID; force the analog VGA mode so the
+	// ast driver programs a CRTC instead of leaving the KVM on a dead scanout.
+	if !strings.Contains(bodyX, "video=VGA-1:1024x768@60e") {
+		t.Errorf("default script missing forced VGA mode: %s", bodyX)
+	}
 }
 
 func TestBootFileArchFallback(t *testing.T) {

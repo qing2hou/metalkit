@@ -45,13 +45,15 @@ zstd
 pv
 ipmitool
 
-# M2.3 cloud-init seed + UEFI grub install
+# M2.3 cloud-init seed + UEFI/BIOS grub install
 cloud-guest-utils
 cloud-image-utils
 mtools
 xorriso
 grub-efi-amd64-bin
 grub-efi-amd64-signed
+# i386-pc modules for legacy-BIOS installs (host grub-install --target=i386-pc).
+grub-pc-bin
 shim-signed
 efibootmgr
 whois

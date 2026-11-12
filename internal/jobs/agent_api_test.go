@@ -482,6 +482,50 @@ func TestAgentSpecHappy(t *testing.T) {
 	}
 }
 
+// TestAgentSpecBootModeResolution pins the precedence: binding override >
+// profile default > auto. "auto" as a binding value is an explicit override,
+// distinct from an empty (inherit) value.
+func TestAgentSpecBootModeResolution(t *testing.T) {
+	cases := []struct {
+		name     string
+		profile  string
+		override string
+		want     string
+	}{
+		{"default auto", "", "", "auto"},
+		{"profile uefi", "uefi", "", "uefi"},
+		{"profile bios", "bios", "", "bios"},
+		{"binding overrides profile", "uefi", "bios", "bios"},
+		{"binding explicit auto", "uefi", "auto", "auto"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, ts, fb, fp, fi := newTestAgentAPIWithFetchers(t)
+			in := f.baseInput(t, '0')
+			j, err := f.store.Create(t.Context(), in)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			b, p, _ := seedSpecFakes(t, j, fb, fp, fi)
+			p.BootMode = tc.profile
+			b.BootModeOverride = tc.override
+
+			code, body := agentDo(t, ts, "GET",
+				"/api/v1/agent/jobs/"+j.ID+"/spec?machine_uuid="+in.MachineUUID, "")
+			if code != http.StatusOK {
+				t.Fatalf("spec code=%d body=%s", code, body)
+			}
+			var got InstallSpec
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got.BootMode != tc.want {
+				t.Errorf("BootMode = %q, want %q", got.BootMode, tc.want)
+			}
+		})
+	}
+}
+
 func TestAgentSpecMachineMismatch(t *testing.T) {
 	f, ts, fb, fp, fi := newTestAgentAPIWithFetchers(t)
 	in := f.baseInput(t, '1')

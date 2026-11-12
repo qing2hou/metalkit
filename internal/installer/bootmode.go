@@ -1,8 +1,9 @@
 // bootmode.go probes whether the live boot environment was reached via
-// UEFI or legacy BIOS. M2.3 only supports UEFI installs (the seed-ISO-on-
-// ESP + grub-install --target=x86_64-efi path is UEFI-specific), so
-// RequireUEFI is the policy gate Run uses to fail fast on misconfigured
-// hosts rather than producing an unbootable disk.
+// UEFI or legacy BIOS. Both install paths are supported: cloud-init seed
+// files are written into the target rootfs (mode-independent), GRUB uses
+// the ESP path for UEFI and the BIOS Boot Partition / MBR gap for legacy.
+// The operator can pin the expected mode per install (spec.BootMode) so a
+// firmware mismatch fails before the target disk is touched.
 package installer
 
 import "fmt"
@@ -29,16 +30,27 @@ func DetectBootMode(fs FS) (string, error) {
 	return "bios", nil
 }
 
-// RequireUEFI returns nil when the boot mode is UEFI, and a descriptive
-// error otherwise. M2.3 callers use this as a policy gate before doing
-// anything destructive.
-func RequireUEFI(fs FS) error {
-	mode, err := DetectBootMode(fs)
-	if err != nil {
-		return err
+// ValidateRequestedBootMode enforces the install-time selection from the
+// controller. Empty and "auto" mean "follow the mode the machine actually
+// booted in"; "uefi"/"bios" require the live boot mode to match. A mismatch
+// must fail before any disk write — installing the wrong bootloader on a
+// machine whose firmware boots the other way produces an unbootable system.
+func ValidateRequestedBootMode(requested, detected string) error {
+	switch requested {
+	case "", "auto":
+		return nil
+	case "uefi", "bios":
+	default:
+		return fmt.Errorf("install: boot mode %q: must be auto, uefi or bios", requested)
 	}
-	if mode != "uefi" {
-		return fmt.Errorf("install: boot mode %q: metalkit M2.3 requires UEFI", mode)
+	if requested != detected {
+		return fmt.Errorf(
+			"install: boot mode mismatch: requested %s, machine booted %s. "+
+				"Set the firmware boot mode (UEFI/Legacy BIOS) to %s in the BMC/BIOS setup, then retry the install",
+			requested, detected, requested)
 	}
 	return nil
 }
+
+// RequireUEFI was removed once legacy BIOS installs became supported. Use
+// ValidateRequestedBootMode (spec.BootMode) for the operator-selected mode.

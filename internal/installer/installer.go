@@ -63,6 +63,16 @@ func Run(ctx context.Context, deps Deps, spec jobs.InstallSpec) (retErr error) {
 		return err
 	}
 	_ = deps.Reporter.Log(ctx, "info", fmt.Sprintf("boot mode: %s", bootMode))
+	// Enforce the operator's selection before anything destructive happens.
+	if err := ValidateRequestedBootMode(spec.BootMode, bootMode); err != nil {
+		return err
+	}
+	// arm64 servers are UEFI-only: i386-pc has no arm64 equivalent. Reject
+	// before disk-pick/wipe rather than failing at the bootloader stage after
+	// the old system is already gone.
+	if bootMode == "bios" && archFromSpec(spec).IsArm {
+		return fmt.Errorf("install: BIOS boot not supported on arm64 (image %s); use a UEFI arm64 image", spec.ImageArch)
+	}
 
 	// --- disk-pick -------------------------------------------------------
 	if err := deps.Reporter.Stage(ctx, StageDiskPick); err != nil {
@@ -117,9 +127,16 @@ func Run(ctx context.Context, deps Deps, spec jobs.InstallSpec) (retErr error) {
 		return err
 	}
 
-	// If the live system booted UEFI but the image has no ESP, create one
-	// before growing so growpart stops at the ESP boundary.
-	if _, err := createESPIfMissing(ctx, deps, target.DevPath, "", bootMode); err != nil {
+	// UEFI installs may need a created ESP (image without one) before growing
+	// so growpart stops at the ESP boundary. BIOS installs instead need a BIOS
+	// Boot Partition for GRUB's core.img (MBR disks keep using the MBR gap).
+	// The two modes are mutually exclusive: don't run ESP discovery on BIOS,
+	// where a stale/wrong vfat partition would only add failure modes.
+	if bootMode == "bios" {
+		if _, err := createBIOSBootIfMissing(ctx, deps, target.DevPath, bootMode); err != nil {
+			return err
+		}
+	} else if _, err := createESPIfMissing(ctx, deps, target.DevPath, "", bootMode); err != nil {
 		return err
 	}
 
@@ -140,6 +157,13 @@ func Run(ctx context.Context, deps Deps, spec jobs.InstallSpec) (retErr error) {
 	espMount, cleanup, err := Mount(ctx, deps, grown.PartDev, mntRoot)
 	if err != nil {
 		return err
+	}
+	// A BIOS install must NOT take the UEFI bootloader branch just because
+	// the image happens to ship an ESP (most cloud images do). Mount keeps
+	// the ESP mounted for cleanup, but the installer's mode contract is
+	// "empty espMount = BIOS".
+	if bootMode == "bios" {
+		espMount = ""
 	}
 	// We don't `defer cleanup()` because the umount stage is reported
 	// explicitly below and we want failures from cleanup folded into the

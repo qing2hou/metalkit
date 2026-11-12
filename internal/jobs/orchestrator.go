@@ -47,6 +47,9 @@ type BMCCredential struct {
 // avoid importing ipmi from jobs; main.go bridges concrete types into here.
 type IPMIClient interface {
 	BootForPXE(ctx context.Context, cred BMCCredential) error
+	// BootForPXEMode requests an explicit firmware mode for the PXE boot:
+	// auto (no EFI flag), uefi (options=efiboot), or bios (no EFI flag).
+	BootForPXEMode(ctx context.Context, cred BMCCredential, mode string) error
 	FinalizeBootDisk(ctx context.Context, cred BMCCredential) error
 }
 
@@ -149,8 +152,10 @@ func (o *Orchestrator) handleInstallRequests(ctx context.Context) {
 	//     failed jobs" rule stated at the top of this file: a single
 	//     mid-install glitch must NOT put the BMC into a PXE reboot loop.
 	rows, err := o.db.QueryContext(ctx, `
-        SELECT b.machine_uuid, b.image_id, b.profile_id, b.desired_state, b.updated_by
+        SELECT b.machine_uuid, b.image_id, b.profile_id, b.desired_state, b.updated_by,
+               COALESCE(b.boot_mode_override, ''), COALESCE(p.boot_mode, '')
         FROM bindings b
+        LEFT JOIN profiles p ON p.id = b.profile_id
         WHERE b.desired_state IN ('install', 'reinstall')
           AND NOT EXISTS (
               SELECT 1 FROM jobs j
@@ -168,20 +173,29 @@ func (o *Orchestrator) handleInstallRequests(ctx context.Context) {
 	defer rows.Close()
 
 	for rows.Next() {
-		var muuid, imageID, profileID, desired, updatedBy string
-		if err := rows.Scan(&muuid, &imageID, &profileID, &desired, &updatedBy); err != nil {
+		var muuid, imageID, profileID, desired, updatedBy, bootModeOverride, profileBootMode string
+		if err := rows.Scan(&muuid, &imageID, &profileID, &desired, &updatedBy, &bootModeOverride, &profileBootMode); err != nil {
 			o.cfg.Logger.Error("orchestrator: scan row", "err", err)
 			continue
 		}
-		o.startJobForBinding(ctx, muuid, imageID, profileID, desired, updatedBy)
+		// Effective firmware boot mode: binding override (including explicit
+		// "auto") wins over the profile default; empty means auto.
+		bootMode := profileBootMode
+		if bootModeOverride != "" {
+			bootMode = bootModeOverride
+		}
+		if bootMode == "" {
+			bootMode = "auto"
+		}
+		o.startJobForBinding(ctx, muuid, imageID, profileID, desired, updatedBy, bootMode)
 	}
 	if err := rows.Err(); err != nil {
 		o.cfg.Logger.Error("orchestrator: scan iter", "err", err)
 	}
 }
 
-func (o *Orchestrator) startJobForBinding(ctx context.Context, muuid, imageID, profileID, desired, bindingActor string) {
-	logger := o.cfg.Logger.With("machine_uuid", muuid)
+func (o *Orchestrator) startJobForBinding(ctx context.Context, muuid, imageID, profileID, desired, bindingActor, bootMode string) {
+	logger := o.cfg.Logger.With("machine_uuid", muuid, "boot_mode", bootMode)
 
 	job, err := o.cfg.Store.Create(ctx, CreateInput{
 		MachineUUID: muuid,
@@ -237,8 +251,8 @@ func (o *Orchestrator) startJobForBinding(ctx context.Context, muuid, imageID, p
 		return
 	}
 
-	_ = o.cfg.Store.AppendLog(ctx, job.ID, "info", "issuing IPMI bootdev=pxe + power cycle")
-	if err := o.cfg.IPMI.BootForPXE(ctx, cred); err != nil {
+	_ = o.cfg.Store.AppendLog(ctx, job.ID, "info", fmt.Sprintf("issuing IPMI bootdev=pxe (boot_mode=%s) + power cycle", bootMode))
+	if err := o.cfg.IPMI.BootForPXEMode(ctx, cred, bootMode); err != nil {
 		_ = o.cfg.Store.AppendLog(ctx, job.ID, "error", "ipmi reboot failed: "+sanitize(err.Error(), cred.Password))
 		if failErr := o.cfg.Store.Fail(ctx, job.ID, "ipmi reboot failed: "+err.Error()); failErr != nil {
 			logger.Error("orchestrator: fail job", "err", failErr)

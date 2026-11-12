@@ -37,6 +37,7 @@ const form = reactive({
   // 静态配置细节由 binding 覆盖；profile 侧只存默认
   networkRenderer: '',
   bootloader: '',
+  bootMode: 'auto' as 'auto' | 'uefi' | 'bios',
   // 装机时植入监控 agent（可选，非必填）
   agentInstalled: false,
   // 组件选项
@@ -94,6 +95,7 @@ function openCreate(): void {
     netMethod: 'dhcp',
     networkRenderer: '',
     bootloader: '',
+    bootMode: 'auto',
     agentInstalled: false,
     componentOptions: null,
   })
@@ -113,6 +115,7 @@ function openEdit(row: Profile): void {
     netMethod: row.network?.method ?? 'dhcp',
     networkRenderer: row.network_renderer ?? '',
     bootloader: row.bootloader ?? '',
+    bootMode: (row.boot_mode as 'auto' | 'uefi' | 'bios') || 'auto',
     agentInstalled: row.agent_installed ?? false,
     componentOptions: null,
   })
@@ -157,6 +160,7 @@ async function save(): Promise<void> {
         network: { method: form.netMethod, nic_selector: 'auto' },
         network_renderer: form.networkRenderer || '',
         bootloader: form.bootloader || '',
+        boot_mode: form.bootMode || 'auto',
         agent_installed: form.agentInstalled,
         ...passwordPart,
       })
@@ -177,6 +181,7 @@ async function save(): Promise<void> {
         network: { method: form.netMethod, nic_selector: 'auto' },
         network_renderer: form.networkRenderer || undefined,
         bootloader: form.bootloader || undefined,
+        boot_mode: form.bootMode || 'auto',
         agent_installed: form.agentInstalled,
         ...passwordPart,
       })
@@ -233,6 +238,9 @@ const pagedTable = usePagedTable(list)
           </el-table-column>
           <el-table-column label="网络" width="90">
             <template #default="{ row }">{{ row.network?.method || 'dhcp' }}</template>
+          </el-table-column>
+          <el-table-column label="固件引导" width="100">
+            <template #default="{ row }">{{ row.boot_mode === 'uefi' ? 'UEFI' : row.boot_mode === 'bios' ? 'BIOS' : '自动' }}</template>
           </el-table-column>
           <el-table-column label="渲染器 / 引导器" min-width="170">
             <template #default="{ row }">
@@ -370,6 +378,20 @@ const pagedTable = usePagedTable(list)
                 <el-select v-model="form.bootloader" clearable placeholder="默认" style="width: 100%">
                   <el-option v-for="b in bootloaderOptions" :key="b.id" :label="b.label" :value="b.id" />
                 </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="固件引导">
+                <el-select v-model="form.bootMode" style="width: 100%">
+                  <el-option label="自动（跟随机器实际启动模式）" value="auto" />
+                  <el-option label="UEFI" value="uefi" />
+                  <el-option label="BIOS（Legacy）" value="bios" />
+                </el-select>
+                <div class="mk-subtle" style="width: 100%; margin-top: 4px">
+                  指定后，机器实际启动模式不一致时会在擦盘前失败；装机弹窗可按机器覆盖
+                </div>
               </el-form-item>
             </el-col>
           </el-row>

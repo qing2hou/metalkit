@@ -63,6 +63,8 @@ const form = reactive({
   // NIC
   nicMode: 'auto' as 'auto' | 'mac',
   nicMac: '',
+  // 固件引导：inherit = 跟随 profile，auto = 跟随机器实际启动模式
+  bootModeOverride: 'inherit' as 'inherit' | 'auto' | 'uefi' | 'bios',
   // Bond
   useBond: false,
   bondName: 'bond0',
@@ -93,6 +95,29 @@ const nics = computed(() => props.report?.nics ?? [])
 const machineArch = computed(() => props.report?.cpu?.arch ?? '')
 
 const selectedProfile = computed(() => props.profiles.find((p) => p.id === form.profileId))
+
+// 机器上次上报的固件启动模式。uefi_mode_probed 为 true 才可信；旧报告
+// 既没有该标记，又固定存了 uefi_mode=false，不能当作已确认 BIOS。
+const reportedFirmwareMode = computed<'uefi' | 'bios' | ''>(() => {
+  const fw = props.report?.firmware
+  if (fw?.uefi_mode_probed !== true) return ''
+  return fw.uefi_mode === true ? 'uefi' : fw.uefi_mode === false ? 'bios' : ''
+})
+
+// 最终会下发给后端的引导模式：binding 覆盖优先，否则继承 profile。
+const effectiveBootMode = computed<'auto' | 'uefi' | 'bios'>(() => {
+  if (form.bootModeOverride !== 'inherit') return form.bootModeOverride
+  const fromProfile = selectedProfile.value?.boot_mode
+  return fromProfile === 'uefi' || fromProfile === 'bios' ? fromProfile : 'auto'
+})
+
+// 仅提示，不阻断保存：运维可能正准备去 BMC 改固件，配置仍应能先存。
+const bootModeConflict = computed(
+  () =>
+    effectiveBootMode.value !== 'auto' &&
+    reportedFirmwareMode.value !== '' &&
+    effectiveBootMode.value !== reportedFirmwareMode.value,
+)
 
 // profile 的网络方式决定地址分配口径：
 //   static → 静态（留空 = 从子网探测可用地址后自动分配）
@@ -189,6 +214,8 @@ watch(
       form.nicMode = 'auto'
       form.nicMac = ''
     }
+    // 固件引导：binding 覆盖优先，否则继承 profile
+    form.bootModeOverride = (b?.boot_mode_override as typeof form.bootModeOverride) || 'inherit'
     // Bond：上次 binding 级覆盖优先，无覆盖回退 profile 默认
     const bond = b?.bond ?? selectedProfile.value?.network?.bond ?? null
     form.useBond = Boolean(bond)
@@ -396,6 +423,8 @@ async function submit(dispatch: boolean): Promise<void> {
         : {}),
       // NIC：by-mac 覆盖；auto 显式清空（回退 profile 默认）
       nic_selector_override: form.nicMode === 'mac' ? `by-mac:${form.nicMac}` : '',
+      // 固件引导："" 显式清除覆盖（继承 profile）；auto/uefi/bios 覆盖
+      boot_mode_override: form.bootModeOverride === 'inherit' ? '' : form.bootModeOverride,
       // 主机名：留空显式发 ""（清除覆盖 → 按 profile 模板展开）。
       // 键必须发：hostname 是三态字段，键不传等于保持原值，用户就
       // 没法通过清空输入框来撤销自定义主机名。
@@ -554,6 +583,34 @@ async function submit(dispatch: boolean): Promise<void> {
           </el-form-item>
         </el-col>
       </el-row>
+
+      <el-row :gutter="16">
+        <el-col :span="12">
+          <el-form-item label="固件引导">
+            <el-select v-model="form.bootModeOverride" style="width: 100%">
+              <el-option
+                :label="`跟随 Profile（${selectedProfile?.boot_mode === 'uefi' ? 'UEFI' : selectedProfile?.boot_mode === 'bios' ? 'BIOS' : '自动'}）`"
+                value="inherit"
+              />
+              <el-option label="自动（跟随本次实际启动模式）" value="auto" />
+              <el-option label="UEFI" value="uefi" />
+              <el-option label="BIOS（Legacy）" value="bios" />
+            </el-select>
+            <div class="mk-subtle" style="width: 100%; margin-top: 4px">
+              机器上次上报：{{ reportedFirmwareMode === 'uefi' ? 'UEFI' : reportedFirmwareMode === 'bios' ? 'BIOS' : '未知/未上报' }}
+            </div>
+            <el-alert
+              v-if="bootModeConflict"
+              type="warning"
+              :closable="false"
+              show-icon
+              style="width: 100%; margin-top: 6px"
+              :title="`所选 ${effectiveBootMode.toUpperCase()} 与机器上次启动模式 ${reportedFirmwareMode.toUpperCase()} 不一致，装机将在擦盘前失败`"
+            />
+          </el-form-item>
+        </el-col>
+      </el-row>
+
 
       <el-divider content-position="left">网络 Bond</el-divider>
 

@@ -41,11 +41,13 @@ func createESPIfMissing(ctx context.Context, deps Deps, diskDev, partDev, bootMo
 		return "", nil
 	}
 
-	// Zap any stale GPT structures left over from a previous UEFI install.
-	// A BIOS/MBR image written over a GPT disk leaves a backup GPT header at
-	// the end of the disk that confuses sgdisk -p.  -z clears GPT data without
-	// touching the MBR.  Ignore errors — a pure MBR disk has nothing to zap.
-	_, _ = deps.Exec.Run(ctx, "sgdisk", "-z", diskDev)
+	// Relocate a stale backup GPT header to the real end of the disk (the
+	// image may have been dd'd onto a larger disk, leaving the backup header
+	// at the source disk's end). Do NOT use `sgdisk -z` here: on a GPT disk
+	// without a vfat partition that would destroy every existing partition,
+	// turning "no ESP" into "no rootfs". On MBR disks -e fails harmlessly
+	// (ignored) and the -g below converts the preserved MBR layout to GPT.
+	_, _ = deps.Exec.Run(ctx, "sgdisk", "-e", diskDev)
 
 	// Find the next partition number from current table.
 	out, err := deps.Exec.Run(ctx, "sgdisk", "-p", diskDev)
@@ -60,8 +62,10 @@ func createESPIfMissing(ctx context.Context, deps Deps, diskDev, partDev, bootMo
 	// need this to succeed when the disk is actually MBR.
 	_, _ = deps.Exec.Run(ctx, "sgdisk", "-g", diskDev)
 
-	// Create the partition at the end of the disk.
-	partSpec := fmt.Sprintf("%d:0:+512M", next)
+	// Create the partition at the absolute end of the disk. start=0 would mean
+	// "start of the largest free block" (directly after root), which blocks
+	// growpart from expanding the root filesystem into the remaining space.
+	partSpec := fmt.Sprintf("%d:-512M:0", next)
 	typeSpec := fmt.Sprintf("%d:ef00", next)
 	if _, err := deps.Exec.Run(ctx, "sgdisk", "-n", partSpec, "-t", typeSpec, diskDev); err != nil {
 		return "", fmt.Errorf("install: sgdisk new ESP: %w", err)

@@ -38,7 +38,9 @@ func newFixture(t *testing.T) *fixture {
 	for _, ddl := range []string{
 		`CREATE TABLE machines (uuid TEXT PRIMARY KEY, last_seen INTEGER NOT NULL DEFAULT 0, latest_report INTEGER)`,
 		`CREATE TABLE images   (id TEXT PRIMARY KEY)`,
-		`CREATE TABLE profiles (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE profiles (id TEXT PRIMARY KEY, boot_mode TEXT)`,
+		// selectJobSQL LEFT JOINs bmc_credentials for the UI's BMC column.
+		`CREATE TABLE bmc_credentials (machine_uuid TEXT PRIMARY KEY, ip TEXT NOT NULL)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), ddl); err != nil {
 			t.Fatalf("ddl %q: %v", ddl, err)
@@ -634,5 +636,99 @@ func TestTimestampsClock(t *testing.T) {
 	j, _ := f.store.Create(context.Background(), in)
 	if !j.CreatedAt.Equal(fixed) {
 		t.Errorf("created_at=%v want %v", j.CreatedAt, fixed)
+	}
+}
+
+// ---- BMC enrichment ----
+
+// TestBMCInfoJoin pins the read-only bmc_ip/bmc_managed columns the job list
+// renders: credential IP wins, the machine's latest report is the fallback,
+// and both are empty/false when neither source knows the machine.
+func TestBMCInfoJoin(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	in := f.baseInput(t, '=')
+	j, err := f.store.Create(ctx, in)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got := func() *Job {
+		t.Helper()
+		got, err := f.store.Get(ctx, j.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		return got
+	}
+
+	if g := got(); g.BMCIP != "" || g.BMCManaged {
+		t.Errorf("no source: bmc_ip=%q managed=%v, want empty/false", g.BMCIP, g.BMCManaged)
+	}
+
+	// A hand-corrupted report body must not break job reads (json_valid guard).
+	badRes, err := f.db.ExecContext(ctx,
+		`INSERT INTO reports (uuid, ts, body) VALUES (?, ?, ?)`,
+		in.MachineUUID, 1, `{not-json`)
+	if err != nil {
+		t.Fatalf("insert bad report: %v", err)
+	}
+	badID, _ := badRes.LastInsertId()
+	if _, err := f.db.ExecContext(ctx,
+		`UPDATE machines SET latest_report = ? WHERE uuid = ?`, badID, in.MachineUUID); err != nil {
+		t.Fatalf("set bad latest_report: %v", err)
+	}
+	if g := got(); g.BMCIP != "" {
+		t.Errorf("corrupted report: bmc_ip=%q, want empty (no error)", g.BMCIP)
+	}
+
+	// Agent report fallback (machine known, BMC not yet onboarded).
+	res, err := f.db.ExecContext(ctx,
+		`INSERT INTO reports (uuid, ts, body) VALUES (?, ?, ?)`,
+		in.MachineUUID, 2, `{"bmc":{"ip":"10.0.0.9"}}`)
+	if err != nil {
+		t.Fatalf("insert report: %v", err)
+	}
+	reportID, _ := res.LastInsertId()
+	if _, err := f.db.ExecContext(ctx,
+		`UPDATE machines SET latest_report = ? WHERE uuid = ?`, reportID, in.MachineUUID); err != nil {
+		t.Fatalf("set latest_report: %v", err)
+	}
+	if g := got(); g.BMCIP != "10.0.0.9" || g.BMCManaged {
+		t.Errorf("report fallback: bmc_ip=%q managed=%v, want 10.0.0.9/false", g.BMCIP, g.BMCManaged)
+	}
+	// List and the agent's CurrentForMachine share the same projection.
+	list, err := f.store.List(ctx, ListFilter{MachineUUID: in.MachineUUID})
+	if err != nil {
+		t.Fatalf("List (report fallback): %v", err)
+	}
+	if len(list) != 1 || list[0].BMCIP != "10.0.0.9" || list[0].BMCManaged {
+		t.Errorf("List (report fallback): %+v, want bmc_ip=10.0.0.9 managed=false", list)
+	}
+	cur, err := f.store.CurrentForMachine(ctx, in.MachineUUID)
+	if err != nil {
+		t.Fatalf("CurrentForMachine: %v", err)
+	}
+	if cur.BMCIP != "10.0.0.9" || cur.BMCManaged {
+		t.Errorf("CurrentForMachine: bmc_ip=%q managed=%v, want 10.0.0.9/false", cur.BMCIP, cur.BMCManaged)
+	}
+
+	// Credential IP wins over the report (same address the orchestrator uses).
+	if _, err := f.db.ExecContext(ctx,
+		`INSERT INTO bmc_credentials (machine_uuid, ip) VALUES (?, ?)`,
+		in.MachineUUID, "10.0.0.10"); err != nil {
+		t.Fatalf("insert bmc credential: %v", err)
+	}
+	if g := got(); g.BMCIP != "10.0.0.10" || !g.BMCManaged {
+		t.Errorf("credential source: bmc_ip=%q managed=%v, want 10.0.0.10/true", g.BMCIP, g.BMCManaged)
+	}
+
+	// List goes through the same projection as Get.
+	list, err = f.store.List(ctx, ListFilter{MachineUUID: in.MachineUUID})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].BMCIP != "10.0.0.10" || !list[0].BMCManaged {
+		t.Errorf("List: %+v, want bmc_ip=10.0.0.10 managed=true", list)
 	}
 }

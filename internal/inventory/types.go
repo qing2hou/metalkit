@@ -62,10 +62,16 @@ type Chassis struct {
 
 // Firmware — BIOS, UEFI mode, Secure Boot, TPM.
 type Firmware struct {
-	BIOS       BIOS  `json:"bios"`
-	UEFIMode   bool  `json:"uefi_mode"`
-	SecureBoot *bool `json:"secure_boot,omitempty"`
-	TPM        *TPM  `json:"tpm,omitempty"`
+	BIOS BIOS `json:"bios"`
+	// UEFIMode is a pointer so "not probed" (nil, e.g. reports from older
+	// agents) is distinguishable from a confirmed legacy-BIOS boot (false).
+	UEFIMode *bool `json:"uefi_mode,omitempty"`
+	// UEFIModeProbed marks reports written after the agent started checking
+	// /sys/firmware/efi/efivars. Older reports stored uefi_mode=false without
+	// ever probing, so false alone must not be treated as "confirmed BIOS".
+	UEFIModeProbed bool  `json:"uefi_mode_probed,omitempty"`
+	SecureBoot     *bool `json:"secure_boot,omitempty"`
+	TPM            *TPM  `json:"tpm,omitempty"`
 }
 
 type BIOS struct {

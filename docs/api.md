@@ -278,6 +278,7 @@ base 路径 `/api/v1/profiles*`，**整个子树 Basic Auth**。Profile = 一份
       "xmit_hash_policy": "layer3+4"
     }
   },
+  "boot_mode": "auto" | "uefi" | "bios",
   "created_at": "2026-05-24T07:30:46Z",
   "updated_at": "2026-05-24T07:30:46Z",
   "created_by": "admin"
@@ -301,6 +302,10 @@ base 路径 `/api/v1/profiles*`，**整个子树 Basic Auth**。Profile = 一份
 - bond + `vlan`：`<bond>.<vlan>` 整体必须 ≤15 字符（如 15 字符名字 + VLAN
   4094 会被拒绝）；成员口填 MAC 时，name 也不得等于该 MAC 解析出的网卡名——
   后者在装机时拿到实时网卡清单后再校验
+- `boot_mode`：固件引导方式，缺省 `""`/`auto` = 跟随机器实际启动模式；
+  `uefi` / `bios` = 显式指定（`auto` 在存储时规范化为 `""`，响应里因
+  omitempty 不出现）。指定后如果机器实际 PXE/live 启动模式不一致，
+  装机在 `boot-detect` 阶段（擦盘前）失败，不会破坏原系统
 
 ### 9.2 端点
 
@@ -365,6 +370,9 @@ URL 已经指明了哪台机器，PUT 既是新增也是覆盖。
   各段 1–63 字符 + 总长 ≤253
 - `bond`：单机 bond 覆盖对象（结构同 `profile.network.bond`）。**整体替换**：
   缺 `name` 会被规范化成 `bond0`，只想改 mode/slaves 的调用方必须一并带上名字
+- `boot_mode_override`：每机覆盖 profile.boot_mode。三态：不传 = 保持现值；
+  `""` = 清除覆盖（继承 profile）；`"auto"` = 本次跟随机器实际启动模式；
+  `"uefi"` / `"bios"` = 显式指定。注意 `"auto"` 与 `""` 语义不同
 
 ### 10.2 端点
 
@@ -447,7 +455,7 @@ CREATE TABLE bmc_credentials (
 | `DELETE /api/v1/bmc/{machine_uuid}` | 删除（若是占位 UUID，连带把对应的占位 machines 行一起清掉） |
 | `POST /api/v1/bmc/{machine_uuid}/test` | 现场探活：调用 `ipmitool chassis power status` |
 | `POST /api/v1/bmc/{machine_uuid}/power/{action}` | 电源动作：action ∈ `on` / `off` / `cycle` / `soft` / `reset` |
-| `POST /api/v1/bmc/{machine_uuid}/onboard` | 纳管：`bootdev=pxe + power cycle` —— 目标机进 live 上报硬件，**不装系统** |
+| `POST /api/v1/bmc/{machine_uuid}/onboard` | 纳管：`bootdev=pxe + power cycle`，可选 `boot_mode`（auto/uefi/bios）—— 目标机进 live 上报硬件，**不装系统** |
 
 PUT body 示例：
 ```json
@@ -548,6 +556,18 @@ GET / LIST 响应示例（**注意没有 password 键**）：
 
 纳管：调 `ipmitool chassis bootdev pxe` + `chassis power cycle`，让目标机进 live 系统上报硬件。
 
+**请求体（可选）**：
+
+```json
+{"boot_mode": "auto" | "uefi" | "bios"}
+```
+
+- 省略或 `auto`：不带 EFI 标志，由固件当前启动模式决定（历史行为）
+- `uefi`：下发 `chassis bootdev pxe options=efiboot`，请求 UEFI PXE。部分老 BMC
+  （如 iDRAC 8）可能把 EFI 标志解析为固件启动项，失败时需在 BMC 启动项中手动选 PXE
+- `bios`：不带 EFI 标志（需要固件已处于 Legacy 模式；本接口不会远程切换 BootMode）
+- 非法值 → 400，消息指出 `boot_mode`
+
 **典型场景**：
 1. **占位 BMC 首次发现**：操作员先按 IP 注册 BMC（生成 `placeholder-<ip-dashed>` UUID 和占位
    machines 行），然后点纳管 → 目标机 PXE 进 live → live agent 报 inventory → controller
@@ -563,7 +583,7 @@ inventory 上报就停在 live 等指令。
 
 ```json
 // 调用成功
-{"ok": true, "action": "onboard"}
+{"ok": true, "action": "onboard", "boot_mode": "auto"}
 
 // ipmi 调用失败
 {"ok": false, "error": "set bootdev=pxe: ..."}
@@ -575,12 +595,12 @@ inventory 上报就停在 live 等指令。
 |---|---|
 | 404 | 没找到这个 machine_uuid 的 BMC 凭据 |
 | 503 | 当前 controller 节点没有 `ipmitool` 可用 |
-| 400 | machine_uuid 格式非法 |
+| 400 | machine_uuid 格式非法 / boot_mode 非法 |
 
-**20s 超时**：底层 `ipmi.BootForPXE` 串行调用 `chassis bootdev pxe` + `chassis power cycle`
+**20s 超时**：底层 `ipmi.BootForPXEMode` 串行调用 `chassis bootdev pxe` + `chassis power cycle`
 两个子命令，比单个动作慢，所以比 `/power` 的 15s 再宽一些。
 
-**审计**：handler 成功路径记 `bmc onboard uuid=... ip=... by=...`。
+**审计**：handler 成功路径记 `bmc onboard uuid=... ip=... boot_mode=... by=...`。
 
 ### 11.3 设计取舍
 
@@ -633,7 +653,9 @@ got, err := bmcStore.GetWithPassword(ctx, machineUUID)
   "started_at": null,
   "finished_at": null,
   "created_by": "orchestrator",
-  "retry_of_job_id": ""
+  "retry_of_job_id": "",
+  "bmc_ip": "10.0.0.21",
+  "bmc_managed": true
 }
 ```
 
@@ -641,6 +663,14 @@ got, err := bmcStore.GetWithPassword(ctx, machineUUID)
 - `status` ∈ `pending` / `running` / `succeeded` / `failed` / `cancelled`
 - 同一 machine_uuid **同时只能有一个非终态 job**（UNIQUE partial index 强制）
 - 失败 job 不会自动重试。重新装请管理员发起新的 job（可以带 `retry_of_job_id`）
+- `bmc_ip` / `bmc_managed` 是只读展示字段，不落在 jobs 行上（仅查询路径填充，`Create`
+  返回的内存对象不含）：`bmc_ip` 优先取 `bmc_credentials.ip`（orchestrator PXE 实际使用的
+  地址），无凭据时回退到机器最近一次上报的 `bmc.ip`；两者都没有则为空（JSON 中省略），
+  损坏的 report body 不会让接口报错。`bmc_managed=true` 表示该机器已录入 BMC 凭据；false
+  时同样省略。凡返回 `Job` 的端点（含 §13 的 agent `/current`、`/claim`）都带这两个字段。
+  作业列表的「BMC」列即渲染它们。
+- 注意与机器列表（§9）的 `bmc_ip` 口径不同：机器列表只显示 agent 上报值，作业这里凭据
+  优先；两者可能不同（例如凭据 IP 已改、机器尚未重新上报）。
 
 ### 12.2 端点（全部需要 Basic Auth）
 

@@ -326,6 +326,16 @@ func (a *AgentAPI) getSpec(w http.ResponseWriter, r *http.Request) {
 		profile.RootPasswordHash = hash
 	}
 
+	// Effective firmware boot mode: binding override wins over the profile
+	// default; an empty result means "auto" (follow the live boot mode).
+	bootMode := profile.BootMode
+	if binding.BootModeOverride != "" {
+		bootMode = binding.BootModeOverride
+	}
+	if bootMode == "" {
+		bootMode = "auto"
+	}
+
 	spec := InstallSpec{
 		JobID:           job.ID,
 		MachineUUID:     job.MachineUUID,
@@ -338,6 +348,7 @@ func (a *AgentAPI) getSpec(w http.ResponseWriter, r *http.Request) {
 		Binding:         *binding,
 		NetworkRenderer: profile.NetworkRenderer,
 		Bootloader:      profile.Bootloader,
+		BootMode:        bootMode,
 		SSHPublicKeys:   sshKeys,
 	}
 	writeJSON(w, http.StatusOK, spec)
