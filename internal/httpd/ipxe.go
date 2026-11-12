@@ -40,6 +40,16 @@ import (
 // ipconfig keep retransmitting DISCOVERs through classic-STP convergence;
 // the cost is a slower failure (90s) only when no DHCP server answers at all.
 //
+// video=VGA-1:1024x768@60e: some BMC virtual displays expose VGA hotplug as
+// connected but return a zero-byte EDID. The ast driver then probes the
+// connector before it has any modes, brings up astdrmfb/fbcon anyway, but
+// never programs a CRTC — the OS keeps drawing the login prompt into
+// framebuffer memory while the BMC captures a dead scanout (black screen
+// with just a cursor). getty/SSH work, which makes it look like a KVM bug.
+// The trailing `e` forces the connector on and makes DRM apply the mode at
+// fbdev init, so the CRTC is enabled before fbcon takes over. On hardware
+// without a VGA-1 connector the option is ignored.
+//
 // The /boot/* URLs are path-style (/boot/<arch>/<file>) rather than
 // query-style (?arch=) — live-boot's initramfs 9990-mount-http.sh derives the
 // fetch archive type from a sed on the extension suffix and the query string
@@ -50,7 +60,7 @@ import (
 // UART (ttyAMA0). The ttyS0 rationale comment above still applies on arm64
 // — we keep the same serial-only strategy, just the right device.
 const ipxeTemplate = `#!ipxe
-kernel http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/vmlinuz initrd=initrd.img boot=live fetch=http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/filesystem.squashfs ip=dhcp ethdevice-timeout=90 console={{.Console}},115200 metalkit.url=http://{{.ServerIP}}{{.HTTPAddr}} systemd.mask=lvm2-pvscan@.service
+kernel http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/vmlinuz initrd=initrd.img boot=live fetch=http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/filesystem.squashfs ip=dhcp ethdevice-timeout=90 console={{.Console}},115200 video=VGA-1:1024x768@60e metalkit.url=http://{{.ServerIP}}{{.HTTPAddr}} systemd.mask=lvm2-pvscan@.service
 initrd http://{{.ServerIP}}{{.HTTPAddr}}/boot/{{.Arch}}/initrd.img
 boot
 `
